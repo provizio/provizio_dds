@@ -1,4 +1,4 @@
-# Copyright 2022 Provizio Ltd.
+# Copyright 2023 Provizio Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not
 # use this file except in compliance with the License. You may obtain a copy of
@@ -23,12 +23,11 @@ set(FAST_DDS_VERSION "v2.7.2" CACHE STRING "Fast-DDS version")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.0" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
 set(PROVIZIO_CODING_STANDARDS_VERSION "v22.07.26" CACHE STRING "Provizio Coding Standards version")
 
+# Testing on/off
+set(ENABLE_TESTS ON CACHE BOOL "Defines whether tests to be enabled")
+
 # Project
 project(provizio_dds VERSION ${PROVIZIO_DDS_VERSION})
-
-# Enable CTest
-include(CTest)
-enable_testing()
 
 # Provizio Config Standards - Enables multiple quality checks
 file(DOWNLOAD
@@ -114,10 +113,17 @@ set(PROVIZIO_DDS_IDLS_SRC_DIR "${PROVIZIO_DDS_IDLS_DIR}/src/provizio_dds_idls_fa
 file(GLOB_RECURSE PROVIZIO_DDS_IDLS "${PROVIZIO_DDS_IDLS_SRC_DIR}/*.cxx")
 
 # provizio_dds library
-add_library(provizio_dds src/provizio_dds.cpp ${PROVIZIO_DDS_IDLS})
+set(PROVIZIO_DDS_SOURCES
+    src/domain_participant.cpp
+)
+add_library(provizio_dds ${PROVIZIO_DDS_SOURCES} ${PROVIZIO_DDS_IDLS})
 
 if(FAST_DDS_DEPENDENCIES)
 add_dependencies(provizio_dds ${FAST_DDS_DEPENDENCIES})
 endif(FAST_DDS_DEPENDENCIES)
-target_include_directories(provizio_dds PUBLIC ${PROVIZIO_DDS_IDLS_SRC_DIR} ${FAST_DDS_INCLUDE_DIRS})
+target_include_directories(provizio_dds PUBLIC include ${PROVIZIO_DDS_IDLS_SRC_DIR} ${FAST_DDS_INCLUDE_DIRS})
 target_link_libraries(provizio_dds PUBLIC ${FAST_DDS_LIBS})
+
+if(ENABLE_TESTS)
+add_subdirectory(test)
+endif(ENABLE_TESTS)
