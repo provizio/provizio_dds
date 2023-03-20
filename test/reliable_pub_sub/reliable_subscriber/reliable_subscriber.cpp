@@ -23,10 +23,10 @@
 
 int main()
 {
+    const auto reliability_kind = provizio::dds::RELIABLE_RELIABILITY_QOS;
     const std::string topic_name{"provizio_dds_test_reliable_pub_sub_topic"};
     const std::string expected_value{"provizio_dds_test"};
     const std::chrono::seconds wait_time{2};
-    const bool reliable_qos = true;
 
     std::mutex mutex;
     std::condition_variable condition_variable;
@@ -47,7 +47,7 @@ int main()
                 ever_matched = true;
             }
         },
-        reliable_qos);
+        reliability_kind);
 
     std::unique_lock<std::mutex> lock{mutex};
     condition_variable.wait_for(lock, wait_time, [&]() { return !string.empty(); });

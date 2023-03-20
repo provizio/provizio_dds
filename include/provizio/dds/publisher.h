@@ -11,34 +11,62 @@
 
 #include "provizio/dds/common.h"
 #include "provizio/dds/domain_participant.h"
+#include "provizio/dds/qos_defaults.h"
 
 namespace provizio
 {
     namespace dds
     {
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type = void *>
-        class data_writer_listener;
-
-        template <typename data_pub_sub_type> struct publisher_policies final
+        namespace detail
         {
-            /**
-             * @brief Defines whether to use reliable data writer DDS QOS policies.
-             * @sa
-             * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
-             */
-            static constexpr bool default_reliable_qos = true;
-        };
+            template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type = void *>
+            class data_writer_listener;
+        } // namespace detail
 
+        /**
+         * @brief Abstract interface that provides publishing functionality for a DDS data type. Normally created using
+         * provizio::dds::make_publisher.
+         *
+         * @tparam data_pub_sub_type DDS data pub/sub type, f.e. std_msgs::msg::StringPubSubType
+         *
+         * @see provizio::dds::make_publisher
+         * @see https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/publisher/publisher.html
+         */
         template <typename data_pub_sub_type> class data_publisher
         {
           public:
             using data_type = typename data_pub_sub_type::type;
 
           public:
+            /**
+             * @brief Destroys the data publisher object
+             */
             virtual ~data_publisher() = default;
+
+            /**
+             * @brief Publishes the DDS data
+             *
+             * @param data Actual DDS data to be published, f.e. std_msgs::msg::String
+             * @return true if published successfully, false otherwise
+             */
             virtual bool publish(data_type &data) = 0;
         };
 
+        /**
+         * @brief Encapsulates DDS Publisher and DataWriter functionality in a single entity with automatic life cycle
+         * management. Optionally can be provided with a function or function object to be invoked on matching first /
+         * umatching last subscriber. Normally created using provizio::dds::make_publisher.
+         *
+         * @tparam data_pub_sub_type DDS data pub/sub type, f.e. std_msgs::msg::StringPubSubType
+         * @tparam on_has_publisher_changed_function_type Optionally a function / function object type to be invoked on
+         * matching first / umatching last subscriber. Takes a single bool argument: true when the first subscriber is
+         * matched, false when the last subscriber is unmatched.
+         * @see provizio::dds::make_publisher
+         * @see https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/publisher/publisher.html
+         * @see https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/publisher/dataWriter/dataWriter.html
+         * @see
+         * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/publisher/dataWriterListener/dataWriterListener.html#dds-layer-publisher-datawriterlistener
+         */
         template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type = void *>
         class publisher_handle final : public data_publisher<data_pub_sub_type>
         {
@@ -46,19 +74,60 @@ namespace provizio
             using data_type = typename data_publisher<data_pub_sub_type>::data_type;
 
           public:
+            /**
+             * @brief Constructs a new publisher_handle object.
+             *
+             * @param domain_participant A DDS Domain Participant, as created by provizio::dds::make_domain_participant
+             * @param topic_name A DDS Topic Name
+             * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
+             * DataWriter, which makes publishing slower but more reliable
+             * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
+             * @see provizio::dds::make_publisher
+             * @see provizio::dds::make_domain_participant
+             * @see provizio::dds::publisher_policies
+             * @see
+             * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
+             */
             publisher_handle(std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
-                             bool reliable_qos = publisher_policies<data_pub_sub_type>::default_reliable_qos);
+                             ReliabilityQosPolicyKind reliability_kind =
+                                 qos_defaults<data_pub_sub_type>::datawriter_reliability_kind);
+
+            /**
+             * @brief Constructs a new publisher_handle object with an on_has_publisher_changed function to be invoked
+             * on matching first / umatching last subscriber.
+             *
+             * @param domain_participant A DDS Domain Participant, as created by provizio::dds::make_domain_participant
+             * @param topic_name A DDS Topic Name
+             * @param on_has_publisher_changed_function Function to be invoked on matching first / umatching last
+             * subscriber, takes a single bool argument: true when the first subscriber is matched, false when the last
+             * subscriber is unmatched
+             * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
+             * DataWriter, which makes publishing slower but more reliable
+             * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
+             * @see provizio::dds::make_publisher
+             * @see provizio::dds::make_domain_participant
+             * @see provizio::dds::publisher_policies
+             * @see
+             * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
+             */
             publisher_handle(std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
                              on_has_publisher_changed_function_type on_has_publisher_changed_function,
-                             bool reliable_qos = publisher_policies<data_pub_sub_type>::default_reliable_qos);
+                             ReliabilityQosPolicyKind reliability_kind =
+                                 qos_defaults<data_pub_sub_type>::datawriter_reliability_kind);
             ~publisher_handle();
 
+            /**
+             * @brief Publishes the DDS data
+             *
+             * @param data Actual DDS data to be published, f.e. std_msgs::msg::String
+             * @return true if published successfully, false otherwise
+             */
             bool publish(data_type &data) override;
 
           private:
             publisher_handle(std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
                              on_has_publisher_changed_function_type on_has_publisher_changed_function,
-                             std::unique_ptr<DataWriterListener> &&listener, bool reliable_qos);
+                             std::unique_ptr<DataWriterListener> &&listener, ReliabilityQosPolicyKind reliability_kind);
 
             std::shared_ptr<DomainParticipant> domain_participant;
             dds::TypeSupport type_support;
@@ -68,73 +137,104 @@ namespace provizio
             Publisher *publisher = nullptr;
             DataWriter *data_writer = nullptr;
 
-            friend class data_writer_listener<data_pub_sub_type, on_has_publisher_changed_function_type>;
+            friend class detail::data_writer_listener<data_pub_sub_type, on_has_publisher_changed_function_type>;
         };
 
+        /**
+         * @brief Creates a new publisher_handle object as a shared_ptr. The publisher_handle is automatically
+         * deleted correctly on destroying its last shared_ptr.
+         *
+         * @tparam data_pub_sub_type DDS data pub/sub type, f.e. std_msgs::msg::StringPubSubType
+         * @param domain_participant A DDS Domain Participant, as created by provizio::dds::make_domain_participant
+         * @param topic_name A DDS Topic Name
+         * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataWriter,
+         * which makes publishing slower but more reliable
+         * @return std::shared_ptr to the created publisher_handle
+         * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
+         * @see provizio::dds::publisher_handle
+         * @see https://en.cppreference.com/w/cpp/memory/shared_ptr
+         * @see
+         * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
+         */
         template <typename data_pub_sub_type>
         std::shared_ptr<publisher_handle<data_pub_sub_type>> make_publisher(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
-            bool reliable_qos = publisher_policies<data_pub_sub_type>::default_reliable_qos)
+            ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind)
         {
             return std::make_shared<publisher_handle<data_pub_sub_type>>(std::move(domain_participant), topic_name,
-                                                                         reliable_qos);
+                                                                         reliability_kind);
         }
 
+        /**
+         * @brief Creates a new publisher_handle object as a shared_ptr with an on_has_publisher_changed function to be
+         * invoked on matching first / umatching last subscriber. The publisher_handle is automatically deleted
+         * correctly on destroying its last shared_ptr.
+         *
+         * @tparam data_pub_sub_type DDS data pub/sub type, f.e. std_msgs::msg::StringPubSubType
+         * @tparam on_has_publisher_changed_function_type Type of function to be invoked on matching first / umatching
+         * last subscriber, takes a single bool argument: true when the first subscriber is matched, false when the last
+         * subscriber is unmatched. Usually the function type is auto-detected from the provided argument value.
+         * @param domain_participant A DDS Domain Participant, as created by provizio::dds::make_domain_participant
+         * @param topic_name A DDS Topic Name
+         * @param on_has_publisher_changed_function The on_has_publisher_changed function
+         * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataWriter,
+         * which makes publishing slower but more reliable
+         * @return std::shared_ptr to the created publisher_handle
+         * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
+         * @see provizio::dds::publisher_handle
+         * @see https://en.cppreference.com/w/cpp/memory/shared_ptr
+         * @see
+         * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
+         */
         template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
         std::shared_ptr<publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>> make_publisher(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
             on_has_publisher_changed_function_type on_has_publisher_changed_function,
-            bool reliable_qos = publisher_policies<data_pub_sub_type>::default_reliable_qos)
+            ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind)
         {
             return std::make_shared<publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>>(
-                std::move(domain_participant), topic_name, std::move(on_has_publisher_changed_function), reliable_qos);
+                std::move(domain_participant), topic_name, std::move(on_has_publisher_changed_function),
+                reliability_kind);
         }
 
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
-        class data_writer_listener : public DataWriterListener
+        namespace detail
         {
-          public:
-            data_writer_listener(publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type> &publisher)
-                : publisher(publisher)
+            template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
+            class data_writer_listener : public DataWriterListener
             {
-            }
-
-            void on_publication_matched(DataWriter *writer, const PublicationMatchedStatus &info) override
-            {
-                (void)writer;
-                if (info.current_count > 0 && info.current_count_change == info.current_count)
+              public:
+                data_writer_listener(
+                    publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type> &publisher)
+                    : publisher(publisher)
                 {
-                    // Just matched the first publisher
-                    publisher.on_has_publisher_changed_function(publisher, true);
                 }
-                else if (info.current_count == 0 && info.current_count_change < 0)
+
+                void on_publication_matched(DataWriter *writer, const PublicationMatchedStatus &info) override
                 {
-                    // Just unmatched the last publisher
-                    publisher.on_has_publisher_changed_function(publisher, false);
+                    (void)writer;
+                    if (info.current_count > 0 && info.current_count_change == info.current_count)
+                    {
+                        // Just matched the first publisher
+                        publisher.on_has_publisher_changed_function(publisher, true);
+                    }
+                    else if (info.current_count == 0 && info.current_count_change < 0)
+                    {
+                        // Just unmatched the last publisher
+                        publisher.on_has_publisher_changed_function(publisher, false);
+                    }
                 }
-            }
 
-          private:
-            publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type> &publisher;
-        };
-
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
-        publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>::publisher_handle(
-            std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name, bool reliable_qos)
-            : publisher_handle(std::move(domain_participant), topic_name, nullptr,
-                               std::unique_ptr<DataWriterListener>{}, reliable_qos)
-        {
-        }
+              private:
+                publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type> &publisher;
+            };
+        } // namespace detail
 
         template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
         publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>::publisher_handle(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
-            on_has_publisher_changed_function_type on_has_publisher_changed_function, bool reliable_qos)
-            : publisher_handle(
-                  std::move(domain_participant), topic_name, std::move(on_has_publisher_changed_function),
-                  std::make_unique<data_writer_listener<data_pub_sub_type, on_has_publisher_changed_function_type>>(
-                      *this),
-                  reliable_qos)
+            const ReliabilityQosPolicyKind reliability_kind)
+            : publisher_handle(std::move(domain_participant), topic_name, nullptr,
+                               std::unique_ptr<DataWriterListener>{}, reliability_kind)
         {
         }
 
@@ -142,7 +242,20 @@ namespace provizio
         publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>::publisher_handle(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
             on_has_publisher_changed_function_type on_has_publisher_changed_function,
-            std::unique_ptr<DataWriterListener> &&listener, bool reliable_qos)
+            const ReliabilityQosPolicyKind reliability_kind)
+            : publisher_handle(
+                  std::move(domain_participant), topic_name, std::move(on_has_publisher_changed_function),
+                  std::make_unique<
+                      detail::data_writer_listener<data_pub_sub_type, on_has_publisher_changed_function_type>>(*this),
+                  reliability_kind)
+        {
+        }
+
+        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
+        publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>::publisher_handle(
+            std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
+            on_has_publisher_changed_function_type on_has_publisher_changed_function,
+            std::unique_ptr<DataWriterListener> &&listener, const ReliabilityQosPolicyKind reliability_kind)
             : domain_participant(std::move(domain_participant)), type_support(new data_pub_sub_type()),
               on_has_publisher_changed_function(std::move(on_has_publisher_changed_function)),
               listener(std::move(listener))
@@ -150,7 +263,7 @@ namespace provizio
             const auto &topic_qos = TOPIC_QOS_DEFAULT;
             const auto &publisher_qos = PUBLISHER_QOS_DEFAULT;
             auto datawriter_qos = DATAWRITER_QOS_DEFAULT;
-            datawriter_qos.reliability().kind = reliable_qos ? RELIABLE_RELIABILITY_QOS : BEST_EFFORT_RELIABILITY_QOS;
+            datawriter_qos.reliability().kind = reliability_kind;
 
             type_support.register_type(this->domain_participant.get());
             topic = this->domain_participant->create_topic(topic_name, type_support->getName(), topic_qos);

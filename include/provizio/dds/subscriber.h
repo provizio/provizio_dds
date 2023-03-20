@@ -24,30 +24,44 @@
 
 #include "provizio/dds/common.h"
 #include "provizio/dds/domain_participant.h"
+#include "provizio/dds/qos_defaults.h"
 
 namespace provizio
 {
     namespace dds
     {
-        template <typename data_pub_sub_type> struct subscriber_policies final
-        {
-            /**
-             * @brief Defines whether to use reliable data reader DDS QOS policies.
-             * @sa
-             * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
-             */
-            static constexpr bool default_reliable_qos = false;
-        };
-
+        /**
+         * @brief Encapsulates DDS Subscriber and DataReader functionality in a single entity with automatic life cycle
+         * management. Normally created with provizio::dds::make_subscriber.
+         *
+         * @tparam data_pub_sub_type DDS data pub/sub type, f.e. std_msgs::msg::StringPubSubType
+         * @see provizio::dds::make_subscriber
+         */
         template <typename data_pub_sub_type> class subscriber_handle final
         {
           public:
             using data_type = typename data_pub_sub_type::type;
 
           public:
+            /**
+             * @brief Constructs a new subscriber_handle object.
+             *
+             * @param domain_participant A DDS Domain Participant, as created by provizio::dds::make_domain_participant
+             * @param topic_name A DDS Topic Name
+             * @param data_listener A DDS DataReaderListener as a shared_ptr
+             * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
+             * DataReader, which makes receiving data slower but more reliable
+             * @see provizio::dds::make_subscriber
+             * @see https://en.cppreference.com/w/cpp/memory/shared_ptr
+             * @see
+             * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/subscriber/dataReaderListener/dataReaderListener.html
+             * @see
+             * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
+             */
             subscriber_handle(std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
                               std::shared_ptr<DataReaderListener> data_listener,
-                              bool reliable_qos = subscriber_policies<data_pub_sub_type>::default_reliable_qos);
+                              ReliabilityQosPolicyKind reliability_kind =
+                                  qos_defaults<data_pub_sub_type>::datareader_reliability_kind);
             ~subscriber_handle();
 
           private:
@@ -59,32 +73,73 @@ namespace provizio
             DataReader *data_reader = nullptr;
         };
 
+        /**
+         * @brief Creates a new subscriber_handle object as a shared_ptr with a function / function object to be invoked
+         * on receiving data. The subscriber_handle is automatically deleted correctly on destroying its last
+         * shared_ptr. Usually the function type is auto-detected from the provided argument value.
+         *
+         * @tparam data_pub_sub_type DDS data pub/sub type, f.e. std_msgs::msg::StringPubSubType
+         * @tparam on_data_function_type Type of a function / function object to be invoked on receiving data, takes a
+         * single argument as a const reference to the data type, f.e. const std_msgs::msg::String&
+         * @param domain_participant A DDS Domain Participant, as created by provizio::dds::make_domain_participant
+         * @param topic_name A DDS Topic Name
+         * @param data_listener A DDS DataReaderListener as a shared_ptr
+         * @param on_data_function Function / function object to be invoked on receiving data
+         * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataReader,
+         * which makes receiving data slower but more reliable
+         * @return std::shared_ptr to the created subscriber_handle
+         * @see provizio::dds::subscriber_handle
+         * @see https://en.cppreference.com/w/cpp/memory/shared_ptr
+         */
         template <typename data_pub_sub_type, typename on_data_function_type>
         std::shared_ptr<subscriber_handle<data_pub_sub_type>> make_subscriber(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
             on_data_function_type on_data_function,
-            bool reliable_qos = subscriber_policies<data_pub_sub_type>::default_reliable_qos);
+            ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datareader_reliability_kind);
 
+        /**
+         * @brief Creates a new subscriber_handle object as a shared_ptr with a function / function object to be invoked
+         * on receiving data and another function / function object to be invoked on matching first /
+         * umatching last publisher. The subscriber_handle is automatically deleted correctly on destroying its last
+         * shared_ptr. Usually the function types are auto-detected from the provided argument values.
+         *
+         * @tparam data_pub_sub_type DDS data pub/sub type, f.e. std_msgs::msg::StringPubSubType
+         * @tparam on_data_function_type Type of a function / function object to be invoked on receiving data, takes a
+         * single argument as a const reference to the data type, f.e. const std_msgs::msg::String&
+         * @tparam on_has_publisher_changed_function_type Type of a function / function object to be invoked on matching
+         * first / umatching last publisher, takes a single bool argument: true when the first publisher is matched,
+         * false when the last publisher is unmatched
+         * @param domain_participant A DDS Domain Participant, as created by provizio::dds::make_domain_participant
+         * @param topic_name A DDS Topic Name
+         * @param data_listener A DDS DataReaderListener as a shared_ptr
+         * @param on_data_function Function / function object to be invoked on receiving data
+         * @param on_has_publisher_changed_function The on_has_publisher_changed function
+         * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataReader,
+         * which makes receiving data slower but more reliable
+         * @return std::shared_ptr to the created subscriber_handle
+         * @see provizio::dds::subscriber_handle
+         * @see https://en.cppreference.com/w/cpp/memory/shared_ptr
+         */
         template <typename data_pub_sub_type, typename on_data_function_type,
                   typename on_has_publisher_changed_function_type>
         std::shared_ptr<subscriber_handle<data_pub_sub_type>> make_subscriber(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
             on_data_function_type on_data_function,
             on_has_publisher_changed_function_type on_has_publisher_changed_function,
-            bool reliable_qos = subscriber_policies<data_pub_sub_type>::default_reliable_qos);
+            ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datareader_reliability_kind);
 
         template <typename data_pub_sub_type>
         subscriber_handle<data_pub_sub_type>::subscriber_handle(std::shared_ptr<DomainParticipant> domain_participant,
                                                                 const std::string &topic_name,
                                                                 std::shared_ptr<DataReaderListener> data_listener,
-                                                                const bool reliable_qos)
+                                                                const ReliabilityQosPolicyKind reliability_kind)
             : domain_participant(std::move(domain_participant)), type_support(new data_pub_sub_type()),
               data_listener(std::move(data_listener))
         {
             const auto &topic_qos = TOPIC_QOS_DEFAULT;
             const auto &subscriber_qos = SUBSCRIBER_QOS_DEFAULT;
             auto datareader_qos = DATAREADER_QOS_DEFAULT;
-            datareader_qos.reliability().kind = reliable_qos ? RELIABLE_RELIABILITY_QOS : BEST_EFFORT_RELIABILITY_QOS;
+            datareader_qos.reliability().kind = reliability_kind;
 
             type_support.register_type(this->domain_participant.get());
             topic = this->domain_participant->create_topic(topic_name, type_support->getName(), topic_qos);
@@ -136,14 +191,14 @@ namespace provizio
         template <typename data_pub_sub_type, typename on_data_function_type>
         std::shared_ptr<subscriber_handle<data_pub_sub_type>> make_subscriber(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
-            on_data_function_type on_data_function, const bool reliable_qos)
+            on_data_function_type on_data_function, const ReliabilityQosPolicyKind reliability_kind)
         {
             return std::make_shared<subscriber_handle<data_pub_sub_type>>(
                 std::move(domain_participant), topic_name,
                 std::make_shared<
                     on_data_function_data_listener<typename data_pub_sub_type::type, on_data_function_type>>(
                     std::move(on_data_function)),
-                reliable_qos);
+                reliability_kind);
         }
 
         template <typename data_type, typename on_data_function_type, typename on_has_publisher_changed_function_type>
@@ -182,14 +237,15 @@ namespace provizio
         std::shared_ptr<subscriber_handle<data_pub_sub_type>> make_subscriber(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
             on_data_function_type on_data_function,
-            on_has_publisher_changed_function_type on_has_publisher_changed_function, const bool reliable_qos)
+            on_has_publisher_changed_function_type on_has_publisher_changed_function,
+            const ReliabilityQosPolicyKind reliability_kind)
         {
             return std::make_shared<subscriber_handle<data_pub_sub_type>>(
                 std::move(domain_participant), topic_name,
                 std::make_shared<functional_data_listener<typename data_pub_sub_type::type, on_data_function_type,
                                                           on_has_publisher_changed_function_type>>(
                     std::move(on_data_function), std::move(on_has_publisher_changed_function)),
-                reliable_qos);
+                reliability_kind);
         }
     } // namespace dds
 } // namespace provizio

@@ -22,7 +22,7 @@
 
 int main()
 {
-    const bool reliable_qos = true;
+    const auto reliability_kind = provizio::dds::RELIABLE_RELIABILITY_QOS;
     const std::string topic_name{"rt/chatter"};
     const std::string expected_substring{"Hello World:"};
     const std::chrono::seconds wait_time{3};
@@ -44,7 +44,7 @@ int main()
                 condition_variable.notify_one();
             }
         },
-        reliable_qos);
+        reliability_kind);
 
     std::unique_lock<std::mutex> lock{mutex};
     condition_variable.wait_for(lock, wait_time,
