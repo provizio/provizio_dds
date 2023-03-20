@@ -119,10 +119,23 @@ set(PROVIZIO_DDS_SOURCES
 add_library(provizio_dds ${PROVIZIO_DDS_SOURCES} ${PROVIZIO_DDS_IDLS})
 
 if(FAST_DDS_DEPENDENCIES)
-add_dependencies(provizio_dds ${FAST_DDS_DEPENDENCIES})
+    add_dependencies(provizio_dds ${FAST_DDS_DEPENDENCIES})
 endif(FAST_DDS_DEPENDENCIES)
 target_include_directories(provizio_dds PUBLIC include ${PROVIZIO_DDS_IDLS_SRC_DIR} ${FAST_DDS_INCLUDE_DIRS})
 target_link_libraries(provizio_dds PUBLIC ${FAST_DDS_LIBS})
+
+# Installation config
+install(
+    TARGETS provizio_dds
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib)
+install(DIRECTORY include/provizio DESTINATION include)
+install(DIRECTORY "${PROVIZIO_DDS_IDLS_SRC_DIR}/" DESTINATION include FILES_MATCHING PATTERN "*.h")
+if(FAST_DDS_INSTALL_DIR)
+    install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/include/" DESTINATION include)
+    install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib)
+endif(FAST_DDS_INSTALL_DIR)
 
 if(ENABLE_TESTS)
 add_subdirectory(test)
