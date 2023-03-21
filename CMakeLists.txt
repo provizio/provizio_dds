@@ -19,9 +19,9 @@ include(ExternalProject)
 # Versions
 set(PROVIZIO_DDS_VERSION "23.3")
 set(PROVIZIO_DDS_IDLS_VERSION "develop" CACHE STRING "provizio_dds_idls version")
-set(FAST_DDS_VERSION "v2.7.2" CACHE STRING "Fast-DDS version")
+set(FAST_DDS_VERSION "v2.7.2" CACHE STRING "Fast-DDS version, when not already present in the system")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.0" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
-set(PROVIZIO_CODING_STANDARDS_VERSION "v22.07.26" CACHE STRING "Provizio Coding Standards version")
+set(PROVIZIO_CODING_STANDARDS_VERSION "v23.03.21" CACHE STRING "Provizio Coding Standards version")
 
 # Testing on/off
 set(ENABLE_TESTS ON CACHE BOOL "Defines whether tests to be enabled")
