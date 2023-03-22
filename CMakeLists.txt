@@ -20,6 +20,7 @@ include(ExternalProject)
 set(PROVIZIO_DDS_VERSION "23.3")
 set(PROVIZIO_DDS_IDLS_VERSION "master" CACHE STRING "provizio_dds_idls version")
 set(FAST_DDS_VERSION "v2.7.2" CACHE STRING "Fast-DDS version, when not already present in the system")
+set(LOOK_FOR_FAST_DDS TRUE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.0" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
 set(PROVIZIO_CODING_STANDARDS_VERSION "v23.03.21" CACHE STRING "Provizio Coding Standards version")
 
@@ -37,18 +38,20 @@ include(${CMAKE_CURRENT_BINARY_DIR}/StandardConfig.cmake)
 StandardConfig(SAFETY_CRITICAL)
 
 # Check if Fast-DDS installation is present in the system
-if(NOT fastcdr_FOUND)
-    find_package(fastcdr QUIET)
-endif()
-if(NOT fastrtps_FOUND)
-    find_package(fastrtps QUIET)
-endif()
-if(fastcdr_FOUND AND fastrtps_FOUND)
+if(LOOK_FOR_FAST_DDS)
+    if(NOT fastcdr_FOUND)
+        find_package(fastcdr QUIET)
+    endif()
+    if(NOT fastrtps_FOUND)
+        find_package(fastrtps QUIET)
+    endif()
+endif(LOOK_FOR_FAST_DDS)
+if(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
     message("Fast-DDS version ${fastrtps_VERSION} found at ${fastrtps_DIR} and will be used.")
     set(FAST_DDS_LIBS fastrtps fastcdr)
     set(FAST_DDS_DEPENDENCIES)
     set(FAST_DDS_INCLUDE_DIRS)
-else(fastcdr_FOUND AND fastrtps_FOUND)
+else(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
     # Let's build Fast-DDS
     message("Fast-DDS not found in the system and will be built. Version ${FAST_DDS_VERSION} with foonathan_memory_vendor version ${FOONATHAN_MEMORY_VENDOR_VERSION}.")
 
@@ -82,7 +85,7 @@ else(fastcdr_FOUND AND fastrtps_FOUND)
         PREFIX "${FAST_DDS_PREFIX}"
         SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
         BINARY_DIR "${FAST_DDS_BINARY_DIR}"
-        CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DBUILD_SHARED_LIBS=OFF" "-DTHIRDPARTY=ON" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules"
+        CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=ON" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules"
     )
     link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
@@ -96,7 +99,7 @@ else(fastcdr_FOUND AND fastrtps_FOUND)
         OpenSSL::Crypto
         $<$<BOOL:${WIN32}>:crypt32.lib>
     )
-endif(fastcdr_FOUND AND fastrtps_FOUND)
+endif(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
 
 # Resolve provizio_dds_idls (https://github.com/provizio/provizio_dds_idls)
 set(PROVIZIO_DDS_IDLS_DIR "${CMAKE_CURRENT_BINARY_DIR}/provizio_dds_idls")
