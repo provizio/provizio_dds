@@ -12,20 +12,39 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-cmake_minimum_required(VERSION 3.10.0)
+cmake_minimum_required(VERSION 3.11.0)
 
 include(ExternalProject)
+include(FetchContent)
 
-# Versions
-set(PROVIZIO_DDS_VERSION "23.3")
-set(PROVIZIO_DDS_IDLS_VERSION "master" CACHE STRING "provizio_dds_idls version")
+# Detect the version from git tag if present, otherwise use yy.mm.dd
+find_package(Git REQUIRED)
+execute_process(
+        COMMAND "${GIT_EXECUTABLE}" tag --points-at HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE VERSION
+        ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+if (VERSION STREQUAL "")
+    # Tag not found, use the date instead (without trailing zeros)
+    string(TIMESTAMP CURRENT_DATE "%y.%m.%d")
+    string(REPLACE ".0" "." PROVIZIO_DDS_VERSION "${CURRENT_DATE}")
+else(VERSION STREQUAL "")
+    # Remove the "v" prefix and trailing zeros
+    string(REPLACE "v" "" PROVIZIO_DDS_VERSION "${VERSION}")
+    string(REPLACE ".0" "." PROVIZIO_DDS_VERSION "${PROVIZIO_DDS_VERSION}")
+endif (VERSION STREQUAL "")
+message("Version: ${PROVIZIO_DDS_VERSION}")
+
+# Configuration
+set(PROVIZIO_DDS_IDLS_VERSION "feature/APT-2168-Python" CACHE STRING "provizio_dds_idls version")
 set(FAST_DDS_VERSION "v2.7.2" CACHE STRING "Fast-DDS version, when not already present in the system")
 set(LOOK_FOR_FAST_DDS TRUE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.0" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
 set(PROVIZIO_CODING_STANDARDS_VERSION "v23.03.21" CACHE STRING "Provizio Coding Standards version")
-
-# Testing on/off
-set(ENABLE_TESTS ON CACHE BOOL "Defines whether tests to be enabled")
+set(FAST_DDS_PYTHON_VERSION "1.2.1" CACHE STRING "Fast-DDS-python version, without v prefix")
+set(ENABLE_TESTS ON CACHE BOOL "Defines whether tests are built and enabled")
+set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be generated")
+set(PYTHON_PACKAGES_INSTALL_DIR "" CACHE STRING "Defines an install directory for Python artifacts (or use default if empty)")
 
 # Project
 project(provizio_dds VERSION ${PROVIZIO_DDS_VERSION})
@@ -48,7 +67,6 @@ if(LOOK_FOR_FAST_DDS)
 endif(LOOK_FOR_FAST_DDS)
 if(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
     message("Fast-DDS version ${fastrtps_VERSION} found at ${fastrtps_DIR} and will be used.")
-    set(FAST_DDS_LIBS fastrtps fastcdr)
     set(FAST_DDS_DEPENDENCIES)
     set(FAST_DDS_INCLUDE_DIRS)
 else(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
@@ -91,45 +109,41 @@ else(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
 
     set(FAST_DDS_DEPENDENCIES libfast_dds)
     set(FAST_DDS_INCLUDE_DIRS "${FAST_DDS_INSTALL_DIR}/include/")
-    set(FAST_DDS_LIBS
-        fastrtps
-        fastcdr
-        foonathan_memory
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        $<$<BOOL:${WIN32}>:crypt32.lib>
-    )
 endif(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
 
 # Resolve provizio_dds_idls (https://github.com/provizio/provizio_dds_idls)
-set(PROVIZIO_DDS_IDLS_DIR "${CMAKE_CURRENT_BINARY_DIR}/provizio_dds_idls")
-file(MAKE_DIRECTORY "${PROVIZIO_DDS_IDLS_DIR}")
-execute_process(
-    COMMAND "${CMAKE_COMMAND}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/provizio_dds_idls" "-DPROVIZIO_DDS_IDLS_VERSION=${PROVIZIO_DDS_IDLS_VERSION}"
-    WORKING_DIRECTORY "${PROVIZIO_DDS_IDLS_DIR}"
+FetchContent_Declare(provizio_dds_idls
+    GIT_REPOSITORY "https://github.com/provizio/provizio_dds_idls"
+    GIT_TAG "${PROVIZIO_DDS_IDLS_VERSION}"
 )
-execute_process(
-    COMMAND "${CMAKE_COMMAND}" --build .
-    WORKING_DIRECTORY "${PROVIZIO_DDS_IDLS_DIR}"
-)
-set(PROVIZIO_DDS_IDLS_SRC_DIR "${PROVIZIO_DDS_IDLS_DIR}/src/provizio_dds_idls_fastdds_cpp")
+FetchContent_Populate(provizio_dds_idls)
+
+set(PROVIZIO_DDS_IDLS_SRC_DIR "${provizio_dds_idls_SOURCE_DIR}/provizio_dds_idls_fastdds")
 file(GLOB_RECURSE PROVIZIO_DDS_IDLS "${PROVIZIO_DDS_IDLS_SRC_DIR}/*.cxx")
+
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# provizio_dds_types library
+add_library(provizio_dds_types SHARED ${PROVIZIO_DDS_IDLS})
+if(WIN32)
+    target_compile_definitions(provizio_dds_types PRIVATE EPROSIMA_USER_DLL_EXPORT)
+endif(WIN32)
+if(FAST_DDS_DEPENDENCIES)
+    add_dependencies(provizio_dds_types ${FAST_DDS_DEPENDENCIES})
+endif(FAST_DDS_DEPENDENCIES)
+target_include_directories(provizio_dds_types PUBLIC include ${PROVIZIO_DDS_IDLS_SRC_DIR} ${FAST_DDS_INCLUDE_DIRS})
+target_link_libraries(provizio_dds_types PUBLIC fastrtps fastcdr)
 
 # provizio_dds library
 set(PROVIZIO_DDS_SOURCES
     src/domain_participant.cpp
 )
-add_library(provizio_dds ${PROVIZIO_DDS_SOURCES} ${PROVIZIO_DDS_IDLS})
-
-if(FAST_DDS_DEPENDENCIES)
-    add_dependencies(provizio_dds ${FAST_DDS_DEPENDENCIES})
-endif(FAST_DDS_DEPENDENCIES)
-target_include_directories(provizio_dds PUBLIC include ${PROVIZIO_DDS_IDLS_SRC_DIR} ${FAST_DDS_INCLUDE_DIRS})
-target_link_libraries(provizio_dds PUBLIC ${FAST_DDS_LIBS})
+add_library(provizio_dds ${PROVIZIO_DDS_SOURCES})
+target_link_libraries(provizio_dds PUBLIC fastrtps fastcdr provizio_dds_types)
 
 # Installation config
 install(
-    TARGETS provizio_dds
+    TARGETS provizio_dds provizio_dds_types
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib)
@@ -139,6 +153,177 @@ if(FAST_DDS_INSTALL_DIR)
     install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/include/" DESTINATION include)
     install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib)
 endif(FAST_DDS_INSTALL_DIR)
+
+# Python
+if(PYTHON_BINDINGS)
+    message(STATUS "Configuring Python bindings...")
+
+    # SWIG: use standard target name.
+    if(POLICY CMP0078)
+        cmake_policy(SET CMP0078 NEW)
+    endif()
+    # SWIG: use SWIG_MODULE_NAME property.
+    if(POLICY CMP0086)
+        cmake_policy(SET CMP0086 NEW)
+    endif()
+
+    # SWIG
+    find_package(SWIG REQUIRED COMPONENTS python)
+    include(${SWIG_USE_FILE})
+    set(CMAKE_SWIG_FLAGS "")
+    if("${SWIG_VERSION}" VERSION_LESS "4.0")
+        message(FATAL_ERROR "SWIG 4.0 or newer is required, but ${SWIG_VERSION} found!")
+    endif("${SWIG_VERSION}" VERSION_LESS "4.0")
+
+    # Python3
+    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+    set(PYTHON_INCLUDE_PATH ${Python3_INCLUDE_DIRS})
+    set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
+    set(PYTHON_LIBRARIES ${Python3_LIBRARIES})
+    include_directories(${PYTHON_INCLUDE_PATH})
+
+    include_directories(${FAST_DDS_INCLUDE_DIRS})
+
+    # Resolve Fast-DDS-python
+    FetchContent_Declare(fast_dds_python
+        GIT_REPOSITORY "https://github.com/provizio/Fast-DDS-python"
+        GIT_TAG "v${FAST_DDS_PYTHON_VERSION}"
+    )
+    FetchContent_Populate(fast_dds_python)
+    set(FASTDDS_PYTHON_CMAKE_DIR "${fast_dds_python_SOURCE_DIR}/fastdds_python")
+    set(FASTDDS_PYTHON_CMAKE_FILE "${FASTDDS_PYTHON_CMAKE_DIR}/CMakeLists.txt")
+    file(WRITE
+        "${FASTDDS_PYTHON_CMAKE_FILE}"
+
+        "project(fastdds_python VERSION ${FAST_DDS_PYTHON_VERSION})
+        
+        # Disable treating warnings as errors in Fast-DDS-python
+        add_compile_options(-Wno-error -Wno-unused-parameter)
+        
+        add_subdirectory(src/swig)
+        "
+    )
+    add_subdirectory("${FASTDDS_PYTHON_CMAKE_DIR}" "${fast_dds_python_BINARY_DIR}")
+    
+    # Add all IDL directories to include directories
+    file(GLOB_RECURSE IDLS_SRC_DIRS LIST_DIRECTORIES true "${PROVIZIO_DDS_IDLS_SRC_DIR}/*")
+    foreach(DIR ${IDLS_SRC_DIRS})
+        if(IS_DIRECTORY "${DIR}")
+            include_directories("${DIR}")
+        endif(IS_DIRECTORY "${DIR}")
+    endforeach(DIR ${IDLS_SRC_DIRS})
+
+    file(GLOB_RECURSE PROVIZIO_DDS_IDL_I_S "${PROVIZIO_DDS_IDLS_SRC_DIR}/*.i")
+    list(FILTER PROVIZIO_DDS_IDL_I_S EXCLUDE REGEX ".*PubSub.*")
+
+    # Remove %module as we'll package all type wrappers into single module instead
+    set(MAIN_I "${CMAKE_CURRENT_BINARY_DIR}/provizio_dds_python_types.i")
+    file(WRITE "${MAIN_I}" "%module provizio_dds_python_types\n\n")
+    foreach(IDL_I ${PROVIZIO_DDS_IDL_I_S})
+        file(READ "${IDL_I}" FILE_CONTENTS)
+        string(REPLACE "%module" "//" FILE_CONTENTS "${FILE_CONTENTS}")
+        file(WRITE "${IDL_I}" "${FILE_CONTENTS}")
+        file(APPEND "${MAIN_I}" "%include ${IDL_I}\n")
+    endforeach(IDL_I ${PROVIZIO_DDS_IDL_I_S})
+
+    set_source_files_properties(${MAIN_I} PROPERTIES
+        CPLUSPLUS ON
+        USE_TARGET_INCLUDE_DIRECTORIES TRUE
+    )
+    swig_add_library(provizio_dds_python_types
+        TYPE SHARED
+        LANGUAGE python
+        SOURCES ${MAIN_I}
+    )
+
+    if(UNIX AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set_property(TARGET provizio_dds_python_types PROPERTY SWIG_COMPILE_DEFINITIONS SWIGWORDSIZE64)
+    endif()
+
+    # We have to disable some of the warnings in the generated code to compile it successfully
+    target_compile_options(provizio_dds_python_types PRIVATE -Wno-delete-non-virtual-dtor -Wno-unused-parameter)
+
+    swig_link_libraries(provizio_dds_python_types
+        Python3::Module
+        provizio_dds_types
+        fastrtps
+        fastcdr
+    )
+
+    # Make sure Fast-DDS is built prior to SWIG code generation
+    if(FAST_DDS_DEPENDENCIES)
+        add_dependencies(fastdds_python_swig_compilation ${FAST_DDS_DEPENDENCIES})
+        add_dependencies(provizio_dds_python_types_swig_compilation ${FAST_DDS_DEPENDENCIES})
+    endif(FAST_DDS_DEPENDENCIES)
+
+    set(FASTDDS_PYTHON_LIBS
+        "${fast_dds_python_BINARY_DIR}/src/swig/fastdds.py"
+        "${fast_dds_python_BINARY_DIR}/src/swig/_fastdds_python.so"
+    )
+    set(PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS
+        "${CMAKE_CURRENT_BINARY_DIR}/provizio_dds_python_types.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/_provizio_dds_python_types.so"
+    )
+    set(PROVIZIO_DDS_PYTHON_LIB
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/provizio_dds.py"
+    )
+    set(PROVIZIO_DDS_PYTHON_LIBS
+        ${FASTDDS_PYTHON_LIBS}
+        ${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS}
+        ${PROVIZIO_DDS_PYTHON_LIB}
+    )
+    if(FAST_DDS_INSTALL_DIR)
+        file(GLOB FASTDDS_LIBS "${FAST_DDS_INSTALL_DIR}/lib/*.so*")
+        set(PROVIZIO_DDS_PYTHON_LIBS ${PROVIZIO_DDS_PYTHON_LIBS} ${FASTDDS_LIBS})
+    endif(FAST_DDS_INSTALL_DIR)
+
+    # Find the installation path
+    if(PYTHON_PACKAGES_INSTALL_DIR)
+        # Installation as Python packages with their __init__.py
+        set(FASTDDS_PYTHON_LIBS ${FASTDDS_PYTHON_LIBS} "${CMAKE_CURRENT_SOURCE_DIR}/python/inits/fastdds/__init__.py")
+        set(PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS ${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS} "${CMAKE_CURRENT_SOURCE_DIR}/python/inits/provizio_dds_python_types/__init__.py")
+        set(PROVIZIO_DDS_PYTHON_LIB ${PROVIZIO_DDS_PYTHON_LIB} "${CMAKE_CURRENT_SOURCE_DIR}/python/inits/provizio_dds/__init__.py")
+
+        set(FASTDDS_PYTHON_LIBS_DIR "${PYTHON_PACKAGES_INSTALL_DIR}/fastdds")
+        set(PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS_DIR "${PYTHON_PACKAGES_INSTALL_DIR}/provizio_dds_python_types")
+        set(PROVIZIO_DDS_PYTHON_LIB_DIR "${PYTHON_PACKAGES_INSTALL_DIR}/provizio_dds")
+
+        # Output the version to the version file, to be used by setup.py
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${PROVIZIO_DDS_VERSION}")
+    else(PYTHON_PACKAGES_INSTALL_DIR)
+        # Installation as .py files
+        execute_process(COMMAND ${Python3_EXECUTABLE} -c "from distutils import sysconfig; print(sysconfig.get_python_lib(plat_specific=True, prefix='${CMAKE_INSTALL_PREFIX}' ) )"
+            OUTPUT_VARIABLE _ABS_PYTHON_MODULE_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        get_filename_component(_ABS_PYTHON_MODULE_PATH ${_ABS_PYTHON_MODULE_PATH} ABSOLUTE)
+        file(RELATIVE_PATH _REL_PYTHON_MODULE_PATH ${CMAKE_INSTALL_PREFIX} ${_ABS_PYTHON_MODULE_PATH})
+        set(FASTDDS_PYTHON_LIBS_DIR ${_REL_PYTHON_MODULE_PATH})
+        set(PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS_DIR ${_REL_PYTHON_MODULE_PATH})
+        set(PROVIZIO_DDS_PYTHON_LIB_DIR ${_REL_PYTHON_MODULE_PATH})
+    endif(PYTHON_PACKAGES_INSTALL_DIR)
+
+    # Install Python artifacts
+    install(FILES
+        ${FASTDDS_PYTHON_LIBS}
+        DESTINATION "${FASTDDS_PYTHON_LIBS_DIR}"
+    )
+    install(FILES
+        ${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS}
+        DESTINATION "${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS_DIR}"
+    )
+    install(TARGETS provizio_dds_types
+        LIBRARY DESTINATION "${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS_DIR}"
+    )
+    install(FILES
+        ${PROVIZIO_DDS_PYTHON_LIB}
+        DESTINATION "${PROVIZIO_DDS_PYTHON_LIB_DIR}"
+    )
+    if(FAST_DDS_INSTALL_DIR)
+        # Local build of Fast-DDS, have to be included with the package then
+        install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION "${PROVIZIO_DDS_PYTHON_LIB_DIR}")
+    endif(FAST_DDS_INSTALL_DIR)
+endif(PYTHON_BINDINGS)
 
 if(ENABLE_TESTS)
 add_subdirectory(test)

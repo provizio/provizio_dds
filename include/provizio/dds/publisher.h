@@ -19,7 +19,7 @@ namespace provizio
     {
         namespace detail
         {
-            template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type = void *>
+            template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type = void *>
             class data_writer_listener;
         } // namespace detail
 
@@ -58,16 +58,16 @@ namespace provizio
          * umatching last subscriber. Normally created using provizio::dds::make_publisher.
          *
          * @tparam data_pub_sub_type DDS data pub/sub type, f.e. std_msgs::msg::StringPubSubType
-         * @tparam on_has_publisher_changed_function_type Optionally a function / function object type to be invoked on
-         * matching first / umatching last subscriber. Takes a single bool argument: true when the first subscriber is
-         * matched, false when the last subscriber is unmatched.
+         * @tparam on_has_subscriber_changed_function_type Optionally a function / function object type to be invoked on
+         * matching first / umatching last subscriber. Takes two arguments: a reference to the publisher_handle and a
+         * bool: true when the first subscriber is matched, false when the last subscriber is unmatched.
          * @see provizio::dds::make_publisher
          * @see https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/publisher/publisher.html
          * @see https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/publisher/dataWriter/dataWriter.html
          * @see
          * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/publisher/dataWriterListener/dataWriterListener.html#dds-layer-publisher-datawriterlistener
          */
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type = void *>
+        template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type = void *>
         class publisher_handle final : public data_publisher<data_pub_sub_type>
         {
           public:
@@ -93,14 +93,14 @@ namespace provizio
                                  qos_defaults<data_pub_sub_type>::datawriter_reliability_kind);
 
             /**
-             * @brief Constructs a new publisher_handle object with an on_has_publisher_changed function to be invoked
+             * @brief Constructs a new publisher_handle object with an on_has_subscriber_changed function to be invoked
              * on matching first / umatching last subscriber.
              *
              * @param domain_participant A DDS Domain Participant, as created by provizio::dds::make_domain_participant
              * @param topic_name A DDS Topic Name
-             * @param on_has_publisher_changed_function Function to be invoked on matching first / umatching last
-             * subscriber, takes a single bool argument: true when the first subscriber is matched, false when the last
-             * subscriber is unmatched
+             * @param on_has_subscriber_changed_function Function to be invoked on matching first / umatching last
+             * subscriber, takes two arguments: a reference to the publisher_handle and a bool: true when the first
+             * subscriber is matched, false when the last subscriber is unmatched.
              * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
              * DataWriter, which makes publishing slower but more reliable
              * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
@@ -111,7 +111,7 @@ namespace provizio
              * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
              */
             publisher_handle(std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
-                             on_has_publisher_changed_function_type on_has_publisher_changed_function,
+                             on_has_subscriber_changed_function_type on_has_subscriber_changed_function,
                              ReliabilityQosPolicyKind reliability_kind =
                                  qos_defaults<data_pub_sub_type>::datawriter_reliability_kind);
             ~publisher_handle();
@@ -126,18 +126,18 @@ namespace provizio
 
           private:
             publisher_handle(std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
-                             on_has_publisher_changed_function_type on_has_publisher_changed_function,
+                             on_has_subscriber_changed_function_type on_has_subscriber_changed_function,
                              std::unique_ptr<DataWriterListener> &&listener, ReliabilityQosPolicyKind reliability_kind);
 
             std::shared_ptr<DomainParticipant> domain_participant;
             dds::TypeSupport type_support;
-            on_has_publisher_changed_function_type on_has_publisher_changed_function;
+            on_has_subscriber_changed_function_type on_has_subscriber_changed_function;
             std::unique_ptr<DataWriterListener> listener;
             Topic *topic = nullptr;
             Publisher *publisher = nullptr;
             DataWriter *data_writer = nullptr;
 
-            friend class detail::data_writer_listener<data_pub_sub_type, on_has_publisher_changed_function_type>;
+            friend class detail::data_writer_listener<data_pub_sub_type, on_has_subscriber_changed_function_type>;
         };
 
         /**
@@ -166,17 +166,18 @@ namespace provizio
         }
 
         /**
-         * @brief Creates a new publisher_handle object as a shared_ptr with an on_has_publisher_changed function to be
+         * @brief Creates a new publisher_handle object as a shared_ptr with an on_has_subscriber_changed function to be
          * invoked on matching first / umatching last subscriber. The publisher_handle is automatically deleted
          * correctly on destroying its last shared_ptr.
          *
          * @tparam data_pub_sub_type DDS data pub/sub type, f.e. std_msgs::msg::StringPubSubType
-         * @tparam on_has_publisher_changed_function_type Type of function to be invoked on matching first / umatching
-         * last subscriber, takes a single bool argument: true when the first subscriber is matched, false when the last
-         * subscriber is unmatched. Usually the function type is auto-detected from the provided argument value.
+         * @tparam on_has_subscriber_changed_function_type Type of function to be invoked on matching first / umatching
+         * last subscriber, takes two arguments: a reference to the publisher_handle and a bool: true when the first
+         * subscriber is matched, false when the last subscriber is unmatched. Usually the function type is
+         * auto-detected from the provided argument value.
          * @param domain_participant A DDS Domain Participant, as created by provizio::dds::make_domain_participant
          * @param topic_name A DDS Topic Name
-         * @param on_has_publisher_changed_function The on_has_publisher_changed function
+         * @param on_has_subscriber_changed_function The on_has_subscriber_changed function
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataWriter,
          * which makes publishing slower but more reliable
          * @return std::shared_ptr to the created publisher_handle
@@ -186,25 +187,25 @@ namespace provizio
          * @see
          * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
          */
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
-        std::shared_ptr<publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>> make_publisher(
+        template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type>
+        std::shared_ptr<publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type>> make_publisher(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
-            on_has_publisher_changed_function_type on_has_publisher_changed_function,
+            on_has_subscriber_changed_function_type on_has_subscriber_changed_function,
             ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind)
         {
-            return std::make_shared<publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>>(
-                std::move(domain_participant), topic_name, std::move(on_has_publisher_changed_function),
+            return std::make_shared<publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type>>(
+                std::move(domain_participant), topic_name, std::move(on_has_subscriber_changed_function),
                 reliability_kind);
         }
 
         namespace detail
         {
-            template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
+            template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type>
             class data_writer_listener : public DataWriterListener
             {
               public:
                 data_writer_listener(
-                    publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type> &publisher)
+                    publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type> &publisher)
                     : publisher(publisher)
                 {
                 }
@@ -215,22 +216,22 @@ namespace provizio
                     if (info.current_count > 0 && info.current_count_change == info.current_count)
                     {
                         // Just matched the first publisher
-                        publisher.on_has_publisher_changed_function(publisher, true);
+                        publisher.on_has_subscriber_changed_function(publisher, true);
                     }
                     else if (info.current_count == 0 && info.current_count_change < 0)
                     {
                         // Just unmatched the last publisher
-                        publisher.on_has_publisher_changed_function(publisher, false);
+                        publisher.on_has_subscriber_changed_function(publisher, false);
                     }
                 }
 
               private:
-                publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type> &publisher;
+                publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type> &publisher;
             };
         } // namespace detail
 
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
-        publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>::publisher_handle(
+        template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type>
+        publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type>::publisher_handle(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
             const ReliabilityQosPolicyKind reliability_kind)
             : publisher_handle(std::move(domain_participant), topic_name, nullptr,
@@ -238,26 +239,26 @@ namespace provizio
         {
         }
 
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
-        publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>::publisher_handle(
+        template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type>
+        publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type>::publisher_handle(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
-            on_has_publisher_changed_function_type on_has_publisher_changed_function,
+            on_has_subscriber_changed_function_type on_has_subscriber_changed_function,
             const ReliabilityQosPolicyKind reliability_kind)
             : publisher_handle(
-                  std::move(domain_participant), topic_name, std::move(on_has_publisher_changed_function),
+                  std::move(domain_participant), topic_name, std::move(on_has_subscriber_changed_function),
                   std::make_unique<
-                      detail::data_writer_listener<data_pub_sub_type, on_has_publisher_changed_function_type>>(*this),
+                      detail::data_writer_listener<data_pub_sub_type, on_has_subscriber_changed_function_type>>(*this),
                   reliability_kind)
         {
         }
 
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
-        publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>::publisher_handle(
+        template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type>
+        publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type>::publisher_handle(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
-            on_has_publisher_changed_function_type on_has_publisher_changed_function,
+            on_has_subscriber_changed_function_type on_has_subscriber_changed_function,
             std::unique_ptr<DataWriterListener> &&listener, const ReliabilityQosPolicyKind reliability_kind)
             : domain_participant(std::move(domain_participant)), type_support(new data_pub_sub_type()),
-              on_has_publisher_changed_function(std::move(on_has_publisher_changed_function)),
+              on_has_subscriber_changed_function(std::move(on_has_subscriber_changed_function)),
               listener(std::move(listener))
         {
             const auto &topic_qos = TOPIC_QOS_DEFAULT;
@@ -271,8 +272,8 @@ namespace provizio
             data_writer = publisher->create_datawriter(topic, datawriter_qos, this->listener.get());
         }
 
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
-        publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>::~publisher_handle()
+        template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type>
+        publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type>::~publisher_handle()
         {
             if (data_writer != nullptr)
             {
@@ -290,8 +291,8 @@ namespace provizio
             }
         }
 
-        template <typename data_pub_sub_type, typename on_has_publisher_changed_function_type>
-        bool publisher_handle<data_pub_sub_type, on_has_publisher_changed_function_type>::publish(data_type &data)
+        template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type>
+        bool publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type>::publish(data_type &data)
         {
             return data_writer->write(&data);
         }

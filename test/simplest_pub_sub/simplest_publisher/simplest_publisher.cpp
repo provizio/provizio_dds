@@ -24,7 +24,7 @@ int main()
     const std::string topic_name{"provizio_dds_test_simplest_pub_sub_topic"};
     const std::string value{"provizio_dds_test"};
     const std::chrono::milliseconds wait_time{200};
-    const int publish_times = 20;
+    const int publish_times = 15;
 
     auto publisher = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(
         provizio::dds::make_domain_participant(), topic_name);

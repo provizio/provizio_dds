@@ -1,7 +1,7 @@
 # provizio_dds
 
-C++ library for [DDS communication](https://www.dds-foundation.org/what-is-dds-3/) in Provizio customer facing APIs and
-internal Provizio software components. Built using
+C++ and Python library for [DDS communication](https://www.dds-foundation.org/what-is-dds-3/) in Provizio customer
+facing APIs and internal Provizio software components. Built using
 [eProsima Fast-DDS](https://www.eprosima.com/index.php/products-all/eprosima-fast-dds) DDS implementation (Apache
 License 2.0).
 
@@ -10,7 +10,8 @@ built-in data types.
 
 ## Build dependencies
 
-cmake, git, C++ 14 compiler, libssl-dev
+- cmake, git, C++ 14 compiler, libssl-dev
+- For Python bindings, also Python3, SWIG 4, libpython3-dev
 
 ## Publishing Data
 

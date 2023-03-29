@@ -19,3 +19,7 @@ enable_testing()
 add_subdirectory(simplest_pub_sub)
 add_subdirectory(reliable_pub_sub)
 add_subdirectory(ros_interop)
+
+if(PYTHON_BINDINGS)
+    add_subdirectory(python)
+endif(PYTHON_BINDINGS)
