@@ -240,8 +240,8 @@ if(PYTHON_BINDINGS)
         set_property(TARGET provizio_dds_python_types PROPERTY SWIG_COMPILE_DEFINITIONS SWIGWORDSIZE64)
     endif()
 
-    # We have to disable some of the warnings in the generated code to compile it successfully
-    target_compile_options(provizio_dds_python_types PRIVATE -Wno-delete-non-virtual-dtor -Wno-unused-parameter)
+    # We have to disable some of the warnings in the generated code
+    target_compile_options(provizio_dds_python_types PRIVATE -Wno-delete-non-virtual-dtor -Wno-unused-parameter -Wno-missing-field-initializers -Wno-error)
 
     swig_link_libraries(provizio_dds_python_types
         Python3::Module

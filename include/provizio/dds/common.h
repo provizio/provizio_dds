@@ -25,7 +25,7 @@ namespace provizio
          * @brief Makes Fast-DDS entities available in provizio::dds
          */
         using namespace eprosima::fastdds::dds;
-    }
+    } // namespace dds
 } // namespace provizio
 
 #endif // DDS_COMMON

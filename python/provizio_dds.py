@@ -37,6 +37,9 @@ class QosDefaults:
     """Per type defaults for datareader_reliability_kind. BEST_EFFORT_RELIABILITY_QOS by default in Fast DDS"""
     datareader_reliability_kind_per_type = {None: BEST_EFFORT_RELIABILITY_QOS}
 
+    """Per type defaults for memory policies, both datawriter and datareader. PREALLOCATED_WITH_REALLOC_MEMORY_MODE in Fast-DDS 2.9+"""
+    memory_policy_per_type = {None: PREALLOCATED_WITH_REALLOC_MEMORY_MODE}
+
     def __init__(self, pub_sub_type):
         """Constructs an instance of QosDefaults for the DDS Pub/Sub type.
 
@@ -54,6 +57,10 @@ class QosDefaults:
         except KeyError:
             self.datareader_reliability_kind = QosDefaults.datareader_reliability_kind_per_type[
                 None]
+        try:
+            self.memory_policy = QosDefaults.memory_policy_per_type[pub_sub_type]
+        except KeyError:
+            self.memory_policy = QosDefaults.memory_policy_per_type[None]
 
 
 def make_domain_participant():
@@ -138,9 +145,10 @@ class Publisher(_TopicHandle):
 
         super().__init__(domain_participant, topic_name, pub_sub_type)
 
+        qos_defaults = QosDefaults(pub_sub_type)
+
         if (reliability_kind is None):
-            reliability_kind = QosDefaults(
-                pub_sub_type).datawriter_reliability_kind
+            reliability_kind = qos_defaults.datawriter_reliability_kind
 
         # Create Publisher
         self._publisher_qos = PublisherQos()
@@ -154,6 +162,7 @@ class Publisher(_TopicHandle):
         self._writer_qos = DataWriterQos()
         self._publisher.get_default_datawriter_qos(self._writer_qos)
         self._writer_qos.reliability().kind = reliability_kind
+        self._writer_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
         self._writer = self._publisher.create_datawriter(
             self._topic, self._writer_qos, self._listener)
 
@@ -217,9 +226,10 @@ class Subscriber(_TopicHandle):
         """
         super().__init__(domain_participant, topic_name, pub_sub_type)
 
+        qos_defaults = QosDefaults(pub_sub_type)
+
         if (reliability_kind is None):
-            reliability_kind = QosDefaults(
-                pub_sub_type).datareader_reliability_kind
+            reliability_kind = qos_defaults.datareader_reliability_kind
 
         # Create Subscriber
         self._subscriber_qos = SubscriberQos()
@@ -233,6 +243,7 @@ class Subscriber(_TopicHandle):
         self._reader_qos = DataReaderQos()
         self._subscriber.get_default_datareader_qos(self._reader_qos)
         self._reader_qos.reliability().kind = reliability_kind
+        self._reader_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
         self._reader = self._subscriber.create_datareader(
             self._topic, self._reader_qos, self._listener)
 

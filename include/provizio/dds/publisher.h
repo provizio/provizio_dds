@@ -1,3 +1,17 @@
+// Copyright 2023 Provizio Ltd.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #ifndef DDS_PUBLISHER
 #define DDS_PUBLISHER
 
@@ -265,6 +279,7 @@ namespace provizio
             const auto &publisher_qos = PUBLISHER_QOS_DEFAULT;
             auto datawriter_qos = DATAWRITER_QOS_DEFAULT;
             datawriter_qos.reliability().kind = reliability_kind;
+            datawriter_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
 
             type_support.register_type(this->domain_participant.get());
             topic = this->domain_participant->create_topic(topic_name, type_support->getName(), topic_qos);

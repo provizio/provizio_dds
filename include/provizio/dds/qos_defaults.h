@@ -15,6 +15,7 @@
 #ifndef DDS_QOS_DEFAULTS
 #define DDS_QOS_DEFAULTS
 
+#include <fastdds/rtps/resources/ResourceManagement.h>
 #include <fastrtps/qos/QosPolicies.h>
 
 #include "provizio/dds/common.h"
@@ -48,6 +49,14 @@ namespace provizio
              * https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/core/policy/standardQosPolicies.html#reliabilityqospolicy
              */
             static constexpr ReliabilityQosPolicyKind datareader_reliability_kind = BEST_EFFORT_RELIABILITY_QOS;
+
+            /**
+             * @brief Defines the default memory policy for both data reader and data writer.
+             * PREALLOCATED_WITH_REALLOC_MEMORY_MODE in Fast-DDS 2.9+.
+             * @see
+             * https://fast-dds.docs.eprosima.com/en/latest/fastdds/api_reference/rtps/resources/MemoryManagementPolicy.html
+             */
+            static constexpr auto memory_policy = eprosima::fastrtps::rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
         };
     } // namespace dds
 } // namespace provizio

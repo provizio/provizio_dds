@@ -140,6 +140,7 @@ namespace provizio
             const auto &subscriber_qos = SUBSCRIBER_QOS_DEFAULT;
             auto datareader_qos = DATAREADER_QOS_DEFAULT;
             datareader_qos.reliability().kind = reliability_kind;
+            datareader_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
 
             type_support.register_type(this->domain_participant.get());
             topic = this->domain_participant->create_topic(topic_name, type_support->getName(), topic_qos);

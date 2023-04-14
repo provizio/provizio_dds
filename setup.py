@@ -14,7 +14,7 @@ install_dir = build_dir + "/install"
 target_dir = build_dir + "/packages"
 os.makedirs(build_dir, exist_ok=True)
 # TODO: Windows support
-if (os.system(f'cd "{build_dir}" && cmake "-DPYTHON_BINDINGS=ON" "-DCMAKE_INSTALL_PREFIX={install_dir}" -DPYTHON_PACKAGES_INSTALL_DIR={target_dir} "{source_dir}" && cmake --build . -- -j4 && cmake --install .') != 0):
+if (os.system(f'cd "{build_dir}" && cmake "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" "{source_dir}" && cmake --build . -- -j4 && cmake --install .') != 0):
     raise CMakeBuildError()
 
 # Read README.md text
