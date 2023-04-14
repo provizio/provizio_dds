@@ -56,6 +56,12 @@ file(DOWNLOAD
 include(${CMAKE_CURRENT_BINARY_DIR}/StandardConfig.cmake)
 StandardConfig(SAFETY_CRITICAL)
 
+# RPATH to look for libraries in expected locations
+set(CMAKE_INSTALL_RPATH ${CMAKE_INSTALL_RPATH} $ORIGIN $ORIGIN/../lib)
+if(CMAKE_INSTALL_PREFIX)
+    set(CMAKE_INSTALL_RPATH ${CMAKE_INSTALL_RPATH} "${CMAKE_INSTALL_PREFIX}/lib")
+endif(CMAKE_INSTALL_PREFIX)
+
 # Check if Fast-DDS installation is present in the system
 if(LOOK_FOR_FAST_DDS)
     if(NOT fastcdr_FOUND)
@@ -103,7 +109,7 @@ else(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
         PREFIX "${FAST_DDS_PREFIX}"
         SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
         BINARY_DIR "${FAST_DDS_BINARY_DIR}"
-        CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=ON" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules"
+        CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=ON" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules" "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH};${FAST_DDS_INSTALL_DIR}/lib"
     )
     link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
@@ -138,15 +144,14 @@ target_link_libraries(provizio_dds_types PUBLIC fastrtps fastcdr)
 set(PROVIZIO_DDS_SOURCES
     src/domain_participant.cpp
 )
-add_library(provizio_dds ${PROVIZIO_DDS_SOURCES})
-target_link_libraries(provizio_dds PUBLIC fastrtps fastcdr provizio_dds_types)
+add_library(provizio_dds SHARED ${PROVIZIO_DDS_SOURCES})
+target_link_libraries(provizio_dds PUBLIC provizio_dds_types fastrtps fastcdr)
 
 # Installation config
 install(
     TARGETS provizio_dds provizio_dds_types
     RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib)
+    LIBRARY DESTINATION lib)
 install(DIRECTORY include/provizio DESTINATION include)
 install(DIRECTORY "${PROVIZIO_DDS_IDLS_SRC_DIR}/" DESTINATION include FILES_MATCHING PATTERN "*.h")
 if(FAST_DDS_INSTALL_DIR)
