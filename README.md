@@ -8,45 +8,157 @@ License 2.0).
 Although based directly on a DDS, it's compatible with [ROS2](https://docs.ros.org/en/rolling/) and provides all ROS2
 built-in data types.
 
+## Provizio DDS API
+
+[Table of DDS topics and their respective data types used in Provizio API](https://github.com/provizio/provizio_dds_idls/blob/master/TOPICS.md)
+
 ## Build dependencies
 
-- cmake, git, C++ 14 compiler, libssl-dev
-- For Python bindings, also Python3, SWIG 4, libpython3-dev
+**Common:**
+
+- CMake
+- Git
+- C++ 14 compiler
+- libssl-dev
+- When Fast-DDS installation is present it will be used, otherwise downloaded and built automatically
+
+**Python:**
+
+- All in **Common** list
+- Python 3
+- Pip 3
+- SWIG 4+
+- libpython3-dev
+
+## Importing
+
+**C++ (CMake):**
+
+```CMake
+# Resolve provizio_dds (https://github.com/provizio/provizio_dds)
+set(PROVIZIO_DDS_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/provizio_dds_build")
+set(PROVIZIO_DDS_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/provizio_dds")
+set(PROVIZIO_DDS_PREFIX "${CMAKE_CURRENT_BINARY_DIR}")
+set(PROVIZIO_DDS_GITHUB_PROJECT "provizio/provizio_dds")
+set(PROVIZIO_DDS_GITHUB_BRANCH "master") # Or a specific tag or branch you prefer
+set(PROVIZIO_DDS_INSTALL_DIR "${PROVIZIO_DDS_BINARY_DIR}/install")
+ExternalProject_Add(libprovizio_dds
+    GIT_REPOSITORY "https://github.com/${PROVIZIO_DDS_GITHUB_PROJECT}.git"
+    GIT_TAG "${PROVIZIO_DDS_GITHUB_BRANCH}"
+    PREFIX "${PROVIZIO_DDS_PREFIX}"
+    SOURCE_DIR "${PROVIZIO_DDS_SOURCE_DIR}"
+    BINARY_DIR "${PROVIZIO_DDS_BINARY_DIR}"
+    CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${PROVIZIO_DDS_INSTALL_DIR}" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF"
+)
+add_dependencies(<YOUR_CMAKE_TARGET> libprovizio_dds)
+target_include_directories(<YOUR_CMAKE_TARGET> SYSTEM PUBLIC "${PROVIZIO_DDS_INSTALL_DIR}/include")
+target_link_directories(<YOUR_CMAKE_TARGET> PUBLIC "${PROVIZIO_DDS_INSTALL_DIR}/lib")
+target_link_libraries(<YOUR_CMAKE_TARGET> PUBLIC provizio_dds provizio_dds_types fastrtps fastcdr)
+```
+
+**Python (pip):**
+
+```Bash
+pip3 install -v git+https://github.com/provizio/provizio_dds.git
+```
+
+or
+
+```Bash
+pip3 install -v git+https://github.com/provizio/provizio_dds.git@TAG_or_BRANCH
+```
 
 ## Publishing Data
+
+**C++ Example:**
 
 ```C++
 #include "provizio/dds/publisher.h"
 #include <std_msgs/msg/StringPubSubTypes.h>
 
-// In a function
-auto publisher = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(
-    provizio::dds::make_domain_participant(), "rt/chatter");
+int main()
+{
+    // Make a DDS Publisher
+    auto publisher = provizio::dds::make_publisher<
+        std_msgs::msg::StringPubSubType>(           // DDS Pub/Sub Type
+        provizio::dds::make_domain_participant(),   // DDS Domain Participant
+        "rt/chatter"                                // DDS Topic Name
+    );
 
-std_msgs::msg::String str;
-str.data("Hello World!");
+    // Create a message
+    std_msgs::msg::String str;
+    str.data("Hello World!");
 
-publisher->publish(str);
+    // Publish the message
+    publisher->publish(str);
+
+    return 0;
+}
 ```
 
 For more details see [provizio/dds/publisher.h](include/provizio/dds/publisher.h).
 
+**Python Example:**
+
+```Python
+import provizio_dds
+
+# Make a DDS Publisher
+publisher = provizio_dds.Publisher(
+    provizio_dds.make_domain_participant(), # DDS Domain Participant
+    "rt/chatter",                           # DDS Topic Name
+    provizio_dds.StringPubSubType)          # DDS Pub/Sub Type
+
+# Create a message
+message = provizio_dds.String()
+message.data("Hello World!")
+
+# Publish the message
+publisher.publish(message)
+```
+
+For more details see [python/provizio_dds.py](python/provizio_dds.py).
+
 ## Receiving Data
+
+**C++ Example:**
 
 ```C++
 #include "provizio/dds/subscriber.h"
 #include <std_msgs/msg/StringPubSubTypes.h>
 #include <iostream>
 
-// In a function
-const auto subscriber = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
-    provizio::dds::make_domain_participant(), "rt/chatter", [&](const std_msgs::msg::String &message) {
-        std::cout << message.data() << std::endl;
-    });
+int main()
+{
+    // Make a DDS Subscriber
+    const auto subscriber = provizio::dds::make_subscriber<
+        std_msgs::msg::StringPubSubType>(           // DDS Pub/Sub Type
+        provizio::dds::make_domain_participant(),   // DDS Domain Participant
+        "rt/chatter",                               // DDS Topic Name
+        [&](const std_msgs::msg::String &message) { // Message handler (takes DDS Data Type as a const reference)
+            // Print the received message
+            std::cout << message.data() << std::endl;
+        });
+    std::cin.get(); // Wait for any user input
+
+    return 0;
+}
 ```
 
 For more details see [provizio/dds/subscriber.h](include/provizio/dds/subscriber.h).
 
-## Built-In Data Types
+**Python Example:**
 
-See <https://github.com/provizio/provizio_dds_idls>
+```Python
+import provizio_dds
+
+subscriber = provizio_dds.Subscriber(
+    provizio_dds.make_domain_participant(), # DDS Domain Participant
+    "rt/chatter",                           # DDS Topic Name
+    provizio_dds.StringPubSubType,          # DDS Pub/Sub Type
+    provizio_dds.String,                    # DDS Data Type
+    lambda message: print(message.data()))  # Message handler (takes a DDS Data Type object), prints the received message
+input("Press Enter to continue...") # Wait for any user input
+```
+
+For more details see [python/provizio_dds.py](python/provizio_dds.py).
