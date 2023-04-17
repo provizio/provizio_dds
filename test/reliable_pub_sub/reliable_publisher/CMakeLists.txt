@@ -12,5 +12,7 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
+find_package(Threads REQUIRED)
+
 add_executable(reliable_publisher reliable_publisher.cpp)
-target_link_libraries(reliable_publisher PUBLIC provizio_dds)
+target_link_libraries(reliable_publisher PUBLIC provizio_dds Threads::Threads)

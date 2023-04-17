@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2023 Provizio Ltd.
+# Copyright 2022 Provizio Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,4 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from fastdds.fastdds import *
+set -e
+
+cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
+
+# Source ROS, if present
+for ROS_DIR in /opt/ros/* ; do
+    if [[ -f "${ROS_DIR}/setup.bash" ]]; then
+        source "${ROS_DIR}/setup.bash"
+        break
+    fi
+done
+
+cd ../../build
+ctest --output-on-failure

@@ -30,9 +30,9 @@ namespace provizio
 
         std::shared_ptr<DomainParticipant> make_domain_participant(DomainId_t domain_id)
         {
-            return std::shared_ptr<DomainParticipant>(dds::DomainParticipantFactory::get_instance()->create_participant(
-                                                          domain_id, PARTICIPANT_QOS_DEFAULT, nullptr),
-                                                      delete_participant);
+            return {dds::DomainParticipantFactory::get_instance()->create_participant(domain_id,
+                                                                                      PARTICIPANT_QOS_DEFAULT, nullptr),
+                    delete_participant};
         }
     } // namespace dds
 } // namespace provizio

@@ -12,5 +12,7 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
+find_package(Threads REQUIRED)
+
 add_executable(ros_interop_subscriber ros_interop_subscriber.cpp)
-target_link_libraries(ros_interop_subscriber PUBLIC provizio_dds)
+target_link_libraries(ros_interop_subscriber PUBLIC provizio_dds Threads::Threads)

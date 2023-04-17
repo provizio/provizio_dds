@@ -25,11 +25,11 @@ int main()
     const auto reliability_kind = provizio::dds::RELIABLE_RELIABILITY_QOS;
     const std::string topic_name{"rt/chatter"};
     const std::string expected_substring{"Hello World:"};
-    const std::chrono::seconds wait_time{3};
+    const std::chrono::seconds wait_time{5};
 
+    std::string string;
     std::mutex mutex;
     std::condition_variable condition_variable;
-    std::string string;
     const auto subscriber = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
         provizio::dds::make_domain_participant(), topic_name,
         [&](const std_msgs::msg::String &message) {

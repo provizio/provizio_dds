@@ -14,18 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sys import platform
+# Use as:
+# build.sh [CMake arguments]
 
-if platform != "win32":
-    extension = "dylib" if platform == "darwin" else "so"
+set -e
 
-    # Load libraries in the same folder, as Python itself won't look in it
-    import ctypes
-    import os
-    module_dir = os.path.dirname(__file__)
-    if os.path.isfile(module_dir + "/libfastcdr." + extension):
-        ctypes.cdll.LoadLibrary(module_dir + "/libfastcdr." + extension)
-    if os.path.isfile(module_dir + "/libfastrtps." + extension):
-        ctypes.cdll.LoadLibrary(module_dir + "/libfastrtps." + extension)
+cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
 
-from provizio_dds.provizio_dds import *
+export CC=${CC:-"gcc"}
+if [ -z "${CXX:-}" ]; then
+    case "${CC}" in
+        gcc)
+            export CXX=g++
+            ;;
+        clang)
+            export CXX=clang++
+            ;;
+        *)
+            ;;
+    esac
+fi
+
+mkdir -p ../../build
+cd ../../build
+
+cmake .. $@
+cmake --build . -- -j 16

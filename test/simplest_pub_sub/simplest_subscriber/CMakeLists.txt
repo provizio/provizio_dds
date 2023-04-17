@@ -12,5 +12,7 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
+find_package(Threads REQUIRED)
+
 add_executable(simplest_subscriber simplest_subscriber.cpp)
-target_link_libraries(simplest_subscriber PUBLIC provizio_dds)
+target_link_libraries(simplest_subscriber PUBLIC provizio_dds Threads::Threads)

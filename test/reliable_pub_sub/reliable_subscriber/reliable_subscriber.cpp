@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <atomic>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
@@ -26,35 +25,44 @@ int main()
     const auto reliability_kind = provizio::dds::RELIABLE_RELIABILITY_QOS;
     const std::string topic_name{"provizio_dds_test_reliable_pub_sub_topic"};
     const std::string expected_value{"provizio_dds_test"};
-    const std::chrono::seconds wait_time{2};
+    const std::chrono::seconds wait_time{3};
 
     std::mutex mutex;
     std::condition_variable condition_variable;
     std::string string;
-    std::atomic<bool> ever_matched;
+    bool ever_matched{false};
     const auto subscriber = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
         provizio::dds::make_domain_participant(), topic_name,
         [&](const std_msgs::msg::String &message) {
-            {
-                std::lock_guard<std::mutex> lock{mutex};
-                string = message.data();
-            }
+            std::lock_guard<std::mutex> lock{mutex};
+            string = message.data();
             condition_variable.notify_one();
         },
         [&](bool matched) {
             if (matched)
             {
+                std::lock_guard<std::mutex> lock{mutex};
                 ever_matched = true;
+                condition_variable.notify_one();
             }
         },
         reliability_kind);
 
     std::unique_lock<std::mutex> lock{mutex};
-    condition_variable.wait_for(lock, wait_time, [&]() { return !string.empty(); });
+    condition_variable.wait_for(lock, wait_time, [&]() { return ever_matched && string == expected_value; });
 
     if (!ever_matched)
     {
-        std::cerr << "reliable_subscriber: Never matched a publisher" << std::endl;
+        if (!string.empty())
+        {
+            std::cerr << "reliable_subscriber: Despite receiving a message: " << string << ", ever_matched is false"
+                      << std::endl;
+        }
+        else
+        {
+            std::cerr << "reliable_subscriber: Never matched a publisher" << std::endl;
+        }
+        return 1;
     }
 
     if (string != expected_value)

@@ -14,18 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sys import platform
+set -e
 
-if platform != "win32":
-    extension = "dylib" if platform == "darwin" else "so"
+if [[ "${OSTYPE}" == "darwin"* ]]; then
+    SUDO=""
+elif [[ "${GITHUB_RUNNER_SKIP_SUDO:-}" == "YES" ]]; then
+    SUDO="echo"
+else
+    if [ "${EUID}" -ne 0 ]; then
+        SUDO="sudo"
+    else
+        # Running as root already
+        SUDO=""
+    fi
+fi
 
-    # Load libraries in the same folder, as Python itself won't look in it
-    import ctypes
-    import os
-    module_dir = os.path.dirname(__file__)
-    if os.path.isfile(module_dir + "/libfastcdr." + extension):
-        ctypes.cdll.LoadLibrary(module_dir + "/libfastcdr." + extension)
-    if os.path.isfile(module_dir + "/libfastrtps." + extension):
-        ctypes.cdll.LoadLibrary(module_dir + "/libfastrtps." + extension)
-
-from provizio_dds.provizio_dds import *
+$SUDO $@
