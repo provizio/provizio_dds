@@ -53,6 +53,7 @@ setup(
     url="https://github.com/provizio/provizio_dds",
     long_description=readme,
     long_description_content_type='text/markdown',
+    install_requires=["numpy>=1.16"],
     packages=["fastdds", "provizio_dds_python_types", "provizio_dds"],
     package_dir={"fastdds": f"{target_dir}/fastdds",
                  "provizio_dds_python_types": f"{target_dir}/provizio_dds_python_types",

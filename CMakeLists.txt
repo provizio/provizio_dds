@@ -331,17 +331,18 @@ if(PYTHON_BINDINGS)
         "${CMAKE_CURRENT_BINARY_DIR}/provizio_dds_python_types.py"
         "${CMAKE_CURRENT_BINARY_DIR}/_provizio_dds_python_types${CMAKE_SHARED_LIBRARY_SUFFIX}"
     )
-    set(PROVIZIO_DDS_PYTHON_LIB
-        "${CMAKE_CURRENT_SOURCE_DIR}/python/provizio_dds.py"
-    )
     set(PROVIZIO_DDS_PYTHON_LIBS
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/provizio_dds.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/point_cloud2.py"
+    )
+    set(PROVIZIO_DDS_ALL_PYTHON_LIBS
         ${FASTDDS_PYTHON_LIBS}
         ${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS}
-        ${PROVIZIO_DDS_PYTHON_LIB}
+        ${PROVIZIO_DDS_PYTHON_LIBS}
     )
     if(FAST_DDS_INSTALL_DIR)
         file(GLOB FASTDDS_LIBS "${FAST_DDS_INSTALL_DIR}/lib/*${CMAKE_SHARED_LIBRARY_SUFFIX}*")
-        set(PROVIZIO_DDS_PYTHON_LIBS ${PROVIZIO_DDS_PYTHON_LIBS} ${FASTDDS_LIBS})
+        set(PROVIZIO_DDS_ALL_PYTHON_LIBS ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${FASTDDS_LIBS})
     endif(FAST_DDS_INSTALL_DIR)
 
     # Find the installation path
@@ -349,11 +350,11 @@ if(PYTHON_BINDINGS)
         # Installation as Python packages with their __init__.py
         set(FASTDDS_PYTHON_LIBS ${FASTDDS_PYTHON_LIBS} "${CMAKE_CURRENT_SOURCE_DIR}/python/inits/fastdds/__init__.py")
         set(PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS ${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS} "${CMAKE_CURRENT_SOURCE_DIR}/python/inits/provizio_dds_python_types/__init__.py")
-        set(PROVIZIO_DDS_PYTHON_LIB ${PROVIZIO_DDS_PYTHON_LIB} "${CMAKE_CURRENT_SOURCE_DIR}/python/inits/provizio_dds/__init__.py")
+        set(PROVIZIO_DDS_PYTHON_LIBS ${PROVIZIO_DDS_PYTHON_LIBS} "${CMAKE_CURRENT_SOURCE_DIR}/python/inits/provizio_dds/__init__.py")
 
         set(FASTDDS_PYTHON_LIBS_DIR "${PYTHON_PACKAGES_INSTALL_DIR}/fastdds")
         set(PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS_DIR "${PYTHON_PACKAGES_INSTALL_DIR}/provizio_dds_python_types")
-        set(PROVIZIO_DDS_PYTHON_LIB_DIR "${PYTHON_PACKAGES_INSTALL_DIR}/provizio_dds")
+        set(PROVIZIO_DDS_PYTHON_LIBS_DIR "${PYTHON_PACKAGES_INSTALL_DIR}/provizio_dds")
 
         # Output the version to the version file, to be used by setup.py
         file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${PROVIZIO_DDS_VERSION}")
@@ -367,7 +368,7 @@ if(PYTHON_BINDINGS)
         file(RELATIVE_PATH _REL_PYTHON_MODULE_PATH ${CMAKE_INSTALL_PREFIX} ${_ABS_PYTHON_MODULE_PATH})
         set(FASTDDS_PYTHON_LIBS_DIR ${_REL_PYTHON_MODULE_PATH})
         set(PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS_DIR ${_REL_PYTHON_MODULE_PATH})
-        set(PROVIZIO_DDS_PYTHON_LIB_DIR ${_REL_PYTHON_MODULE_PATH})
+        set(PROVIZIO_DDS_PYTHON_LIBS_DIR ${_REL_PYTHON_MODULE_PATH})
     endif(PYTHON_PACKAGES_INSTALL_DIR)
 
     # Install Python artifacts
@@ -383,12 +384,12 @@ if(PYTHON_BINDINGS)
         LIBRARY DESTINATION "${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS_DIR}"
     )
     install(FILES
-        ${PROVIZIO_DDS_PYTHON_LIB}
-        DESTINATION "${PROVIZIO_DDS_PYTHON_LIB_DIR}"
+        ${PROVIZIO_DDS_PYTHON_LIBS}
+        DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
     )
     if(FAST_DDS_INSTALL_DIR)
         # Local build of Fast-DDS, have to be included with the package then
-        install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION "${PROVIZIO_DDS_PYTHON_LIB_DIR}")
+        install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}")
     endif(FAST_DDS_INSTALL_DIR)
 
     if("${CMAKE_SHARED_LIBRARY_SUFFIX}" STREQUAL ".dylib")

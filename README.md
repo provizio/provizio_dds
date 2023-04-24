@@ -33,6 +33,8 @@ built-in data types.
 - Pip 3
 - SWIG 4+
 - libpython3-dev
+- setuptools
+- numpy>=1.16
 
 There is a convenience Bash script to install all dependencies in *apt*-featuring Linux and macOS. In Linux it's to be executed with root privileges, f.e. using `sudo`.
 

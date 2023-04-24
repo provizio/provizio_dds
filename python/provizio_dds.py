@@ -29,6 +29,11 @@ if os.name == 'nt':
 
 from provizio_dds_python_types import *
 from fastdds import *
+if __package__ or "." in __name__:
+    from . import point_cloud2
+else:
+    import point_cloud2
+
 
 
 class QosDefaults:
