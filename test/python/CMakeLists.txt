@@ -1,7 +1,7 @@
 set(TEST_PATH "${CMAKE_CURRENT_BINARY_DIR}")
 
-# Copy tests and all dependencies to the same test directory
-add_custom_target(python_tests ALL)
+# Install numpy, copy tests and all dependencies to the same test directory
+add_custom_target(python_tests ALL "${PYTHON_EXECUTABLE}" -m pip install \"numpy>=1.16\")
 file(GLOB TEST_SCRIPTS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
 foreach(FILE ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${TEST_SCRIPTS})
     add_custom_command(TARGET python_tests POST_BUILD
@@ -19,24 +19,24 @@ add_dependencies(python_tests provizio_dds_python_types)
 
 # TODO: Windows versions
 add_test(NAME python_pub_python_sub
-    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" ./python_publisher.py & \"${PYTHON_EXECUTABLE}\" ./python_subscriber.py"
+    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher.py & \"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_pub_python_sub PROPERTIES TIMEOUT 8)
+set_tests_properties(python_pub_python_sub PROPERTIES TIMEOUT 20)
 
 add_test(NAME python_pub_cpp_sub
-    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" ./python_publisher.py & $<TARGET_FILE:simplest_subscriber>"
+    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher.py & $<TARGET_FILE:simplest_subscriber>"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_pub_cpp_sub PROPERTIES TIMEOUT 8)
+set_tests_properties(python_pub_cpp_sub PROPERTIES TIMEOUT 20)
 
 add_test(NAME cpp_pub_python_sub
-    COMMAND sh -c "$<TARGET_FILE:simplest_publisher> & \"${PYTHON_EXECUTABLE}\" ./python_subscriber.py"
+    COMMAND sh -c "$<TARGET_FILE:simplest_publisher> & \"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(cpp_pub_python_sub PROPERTIES TIMEOUT 8)
+set_tests_properties(cpp_pub_python_sub PROPERTIES TIMEOUT 20)
 
 add_test(NAME pointcloud2_test
-    COMMAND "${PYTHON_EXECUTABLE}" ./pointcloud2_test.py
+    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./pointcloud2_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )

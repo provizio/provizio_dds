@@ -201,7 +201,7 @@ def read_points_list(
     """
     assert isinstance(cloud, PointCloud2), \
         'cloud is not a provizio_dds.PointCloud2'
-    
+
     if field_names is None:
         fields = cloud.fields()
         field_names = [fields[i].name() for i in range(len(fields))]
@@ -212,12 +212,11 @@ def read_points_list(
                                                 skip_nans, uvs)]
 
 
-def dtype_from_fields(fields: Iterable[PointField], point_step: Optional[int] = None) -> np.dtype:
+def dtype_from_fields(fields, point_step: Optional[int] = None) -> np.dtype:
     """
     Convert a Iterable of provizio_dds.PointField messages to a np.dtype.
 
     :param fields: The point cloud fields.
-                   (Type: iterable of provizio_dds.PointField)
     :param point_step: Point step size in bytes. Calculated from the given fields by default.
                        (Type: optional of integer)
     :returns: NumPy datatype
@@ -226,17 +225,17 @@ def dtype_from_fields(fields: Iterable[PointField], point_step: Optional[int] = 
     field_names = []
     field_offsets = []
     field_datatypes = []
-    for i, field in enumerate(fields):
+    for i in range(len(fields)):
         # Datatype as numpy datatype
-        datatype = _DATATYPES[field.datatype()]
+        datatype = _DATATYPES[fields[i].datatype()]
         # Name field
-        if field.name == '':
+        if fields[i].name == '':
             name = f'{DUMMY_FIELD_PREFIX}_{i}'
         else:
-            name = field.name()
+            name = fields[i].name()
         # Handle fields with count > 1 by creating subfields with a suffix consiting
         # of "_" followed by the subfield counter [0 -> (count - 1)]
-        field_count = field.count()
+        field_count = fields[i].count()
         assert field_count > 0, "Can't process fields with count = 0."
         for a in range(field_count):
             # Add suffix if we have multiple subfields
@@ -247,8 +246,8 @@ def dtype_from_fields(fields: Iterable[PointField], point_step: Optional[int] = 
             assert subfield_name not in field_names, 'Duplicate field names are not allowed!'
             field_names.append(subfield_name)
             # Create new offset that includes subfields
-            field_offsets.append(field.offset() + a *
-                                 _DATATYPES_SIZES[field.datatype()])
+            field_offsets.append(fields[i].offset() + a *
+                                 _DATATYPES_SIZES[fields[i].datatype()])
             field_datatypes.append(datatype.str)
 
     # Create dtype
@@ -264,7 +263,7 @@ def dtype_from_fields(fields: Iterable[PointField], point_step: Optional[int] = 
 
 def create_cloud(
         header: Header,
-        fields: Iterable[PointField],
+        fields,
         points: Iterable,
         is_dense: bool = True) -> PointCloud2:
     """
@@ -272,7 +271,6 @@ def create_cloud(
 
     :param header: The point cloud header. (Type: provizio_dds.Header)
     :param fields: The point cloud fields.
-                   (Type: iterable of provizio_dds.PointField)
     :param points: The point cloud points. List of iterables, i.e. one iterable
                    for each point, with the elements of each iterable being the
                    values of the fields for that point (in the same order as

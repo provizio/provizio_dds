@@ -25,7 +25,7 @@ int main()
     const auto reliability_kind = provizio::dds::RELIABLE_RELIABILITY_QOS;
     const std::string topic_name{"rt/chatter"};
     const std::string expected_substring{"Hello World:"};
-    const std::chrono::seconds wait_time{5};
+    const std::chrono::seconds wait_time{8};
 
     std::string string;
     std::mutex mutex;

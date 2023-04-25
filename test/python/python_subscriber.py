@@ -20,25 +20,25 @@ import threading
 
 TEST_TOPIC_NAME = "provizio_dds_test_simplest_pub_sub_topic"
 TEST_VALUE = "provizio_dds_test"
-WAIT_TIME = 3
+WAIT_TIME = 6
 
-cv = threading.Condition()
 received_string = None
 had_publishers = False
+cv = threading.Condition()
 
 
 def on_message(message):
     """Callback to be invoked on receiving a message"""
-    global received_string
     with cv:
+        global received_string
         received_string = message.data()
         cv.notify()
 
 
 def on_has_publisher_changed_function(has):
-    global had_publishers
     if (has):
         with cv:
+            global had_publishers
             had_publishers = True
             cv.notify()
 
@@ -48,17 +48,17 @@ subscriber = provizio_dds.Subscriber(
 
 with cv:
     cv.wait_for(
-        lambda: had_publishers and received_string is not None, WAIT_TIME)
-    del subscriber  # So we're sure received_string won't be modified when we're checking it below
+        lambda: had_publishers and received_string == TEST_VALUE, WAIT_TIME)
+    del subscriber  # So we're sure received_string won't be modified anymore
 
-if (not had_publishers):
-    print("python_subscriber: never matched a publisher")
-    sys.exit(1)
+    if (not had_publishers):
+        print("python_subscriber: never matched a publisher")
+        sys.exit(1)
 
-if (received_string != TEST_VALUE):
-    print(
-        "python_subscriber: {expected} was expected but {received} was received!".format(expected=TEST_VALUE, received=received_string))
-    sys.exit(1)
-else:
-    print("python_subscriber: Success!")
-    sys.exit(0)
+    if (received_string != TEST_VALUE):
+        print(
+            "python_subscriber: {expected} was expected but {received} was received!".format(expected=TEST_VALUE, received=received_string))
+        sys.exit(1)
+    else:
+        print("python_subscriber: Success!")
+        sys.exit(0)

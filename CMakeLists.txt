@@ -18,7 +18,7 @@ include(ExternalProject)
 include(FetchContent)
 
 # Configuration
-set(PROVIZIO_DDS_IDLS_VERSION "feature/APT-2168-Python" CACHE STRING "provizio_dds_idls version")
+set(PROVIZIO_DDS_IDLS_VERSION "master" CACHE STRING "provizio_dds_idls version")
 set(FAST_DDS_VERSION "v2.8.2" CACHE STRING "Fast-DDS version, when not already present in the system")
 set(LOOK_FOR_FAST_DDS TRUE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.0" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")

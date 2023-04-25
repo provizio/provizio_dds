@@ -21,7 +21,7 @@ import provizio_dds
 TEST_TOPIC_NAME = "provizio_dds_test_simplest_pub_sub_topic"
 TEST_VALUE = "provizio_dds_test"
 WAIT_TIME = 0.2
-PUBLISH_TIMES = 15
+PUBLISH_TIMES = 25
 
 publisher = provizio_dds.Publisher(
     provizio_dds.make_domain_participant(), TEST_TOPIC_NAME, provizio_dds.StringPubSubType, lambda _, has_subscriber: print("python_publisher: " + ("first subscriber matched" if has_subscriber else "all subscribers unmatched")))

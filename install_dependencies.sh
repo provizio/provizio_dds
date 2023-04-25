@@ -51,6 +51,18 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
   # Install CMake
   brew install cmake
 
+  # Install openssl
+  brew install openssl
+
+  if [[ "${PYTHON}" != "OFF" ]]; then
+    # Install Python and related dependencies
+    brew install python3
+    pip3 install setuptools
+
+    # Install SWIG
+    brew install swig
+  fi
+
   if [[ "${STATIC_ANALYSIS}" != "OFF" ]]; then
     if [[ "${CC}" == "gcc" ]]; then
       # Despite building with GCC, llvm tools are required
@@ -63,18 +75,6 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
     # Install clang-format and clang-tidy
     ln -s "$(brew --prefix llvm)/bin/clang-format" "/usr/local/bin/clang-format"
     ln -s "$(brew --prefix llvm)/bin/clang-tidy" "/usr/local/bin/clang-tidy"
-
-    # Install openssl
-    brew install openssl
-
-    if [[ "${PYTHON}" != "OFF" ]]; then
-      # Install Python and related dependencies
-      brew install python3
-      pip3 install setuptools numpy
-
-      # Install SWIG
-      brew install swig
-    fi
   fi
 else
   # Linux (Ubuntu 18+ assumed)
@@ -219,7 +219,7 @@ else
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
     apt install -y --no-install-recommends python3 python3-pip libpython3-dev
-    pip3 install setuptools numpy
+    pip3 install setuptools
 
     # Install SWIG
     if [ "${UBUNTU_18}" = true ]; then

@@ -13,16 +13,17 @@
 # limitations under the License.
 
 import sys
-import numpy as np
 import provizio_dds
 
 # Create a PointCloud2
+print("Creating a PointCloud2...")
 points = [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
-          [1.0, 2.0, 3.0, 4.0, 5.0, np.nan]]
+          [1.0, 2.0, 3.0, 4.0, 5.0, float('nan')]]
 cloud = provizio_dds.point_cloud2.make_radar_point_cloud(
     provizio_dds.point_cloud2.make_header(10, 20, "test_frame"), points)
 
 # Check the cloud
+print("Checking the PointCloud2 metadata...")
 assert cloud.header().stamp().sec() == 10
 assert cloud.header().stamp().nanosec() == 20
 assert cloud.header().frame_id() == "test_frame"
@@ -43,6 +44,7 @@ assert cloud.fields()[4].name() == "signal_to_noise_ratio"
 assert cloud.fields()[5].name() == "ground_relative_radial_velocity"
 
 # Read it
+print("Reading the PointCloud2 and checking its data...")
 read_points = provizio_dds.point_cloud2.read_points_list(cloud)
 assert str(
     read_points[0]) == "Point(x=0.1, y=0.2, z=0.3, radar_relative_radial_velocity=0.4, signal_to_noise_ratio=0.5, ground_relative_radial_velocity=0.6)", "Got:" + str(read_points[0])
