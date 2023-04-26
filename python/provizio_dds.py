@@ -71,9 +71,10 @@ class QosDefaults:
             self.memory_policy = QosDefaults.memory_policy_per_type[None]
 
 
-def make_domain_participant():
+def make_domain_participant(domain_id=0):
     """Creates a new DDS Domain Participant that automatically cleans up internal objects on deletion
 
+    :param domain_id: DDS domain_id, 0 by default
     :return: A wrapped DDS Domain Participant
     """
 
@@ -96,7 +97,7 @@ def make_domain_participant():
         def get(self):
             return self._participant
 
-    return _DomainParticipant()
+    return _DomainParticipant(domain_id)
 
 
 class _TopicHandle:
