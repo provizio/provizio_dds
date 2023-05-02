@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # Copyright 2023 Provizio Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not
@@ -56,8 +58,7 @@ with cv:
         sys.exit(1)
 
     if (received_string != TEST_VALUE):
-        print(
-            "python_subscriber: {expected} was expected but {received} was received!".format(expected=TEST_VALUE, received=received_string))
+        print(f"python_subscriber: {TEST_VALUE} was expected but {received_string} was received!")
         sys.exit(1)
     else:
         print("python_subscriber: Success!")

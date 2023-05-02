@@ -20,6 +20,7 @@ built-in data types.
 
 **Common:**
 
+- Linux or macOS
 - CMake
 - Git
 - C++ 14 compiler

@@ -53,7 +53,7 @@
 import array
 from collections import namedtuple
 import sys
-from typing import Iterable, List, NamedTuple, Optional
+from typing import Iterable, List, NamedTuple, Optional, Sequence
 import numpy as np
 from numpy.lib.recfunctions import structured_to_unstructured, unstructured_to_structured
 from provizio_dds_python_types import *
@@ -212,11 +212,11 @@ def read_points_list(
                                                 skip_nans, uvs)]
 
 
-def dtype_from_fields(fields, point_step: Optional[int] = None) -> np.dtype:
+def dtype_from_fields(fields: Sequence, point_step: Optional[int] = None) -> np.dtype:
     """
     Convert a Iterable of provizio_dds.PointField messages to a np.dtype.
 
-    :param fields: The point cloud fields.
+    :param fields: The point cloud fields. (Type: Sequence of provizio_dds.PointField)
     :param point_step: Point step size in bytes. Calculated from the given fields by default.
                        (Type: optional of integer)
     :returns: NumPy datatype
@@ -263,14 +263,14 @@ def dtype_from_fields(fields, point_step: Optional[int] = None) -> np.dtype:
 
 def create_cloud(
         header: Header,
-        fields,
+        fields: Sequence,
         points: Iterable,
         is_dense: bool = True) -> PointCloud2:
     """
     Create a provizio_dds.PointCloud2 message.
 
     :param header: The point cloud header. (Type: provizio_dds.Header)
-    :param fields: The point cloud fields.
+    :param fields: The point cloud fields. (Type: Sequence of provizio_dds.PointField)
     :param points: The point cloud points. List of iterables, i.e. one iterable
                    for each point, with the elements of each iterable being the
                    values of the fields for that point (in the same order as
@@ -354,15 +354,15 @@ def make_radar_point_cloud(header: Header, points: Iterable, is_dense: bool = Tr
     fields[4].name("signal_to_noise_ratio")
     fields[5].name("ground_relative_radial_velocity")
 
-    return create_cloud(header, fields, points)
+    return create_cloud(header, fields, points, is_dense)
 
 
-def make_header(timestamp_sec, timestamp_nanosec, frame_id: str) -> Header:
+def make_header(timestamp_sec: int, timestamp_nanosec: int, frame_id: str) -> Header:
     """
     Create a provizio_dds.Header
 
-    :param timestamp_sec: Seconds component of timestamp
-    :param timestamp_nanosec: Nanoseconds component of timestamp, valid in the range [0, 10e9)
+    :param timestamp_sec: Seconds component of timestamp. (Type: int)
+    :param timestamp_nanosec: Nanoseconds component of timestamp, valid in the range [0, 10e9). (Type: int)
     :param frame_id: Frame this data is associated with
     """
     header = Header()

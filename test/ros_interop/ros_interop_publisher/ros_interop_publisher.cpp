@@ -30,14 +30,14 @@ int main()
 
     std_msgs::msg::String str;
     str.data(value);
-    int successfull_times = 0;
+    int successful_times = 0;
     for (int i = 0; i < publish_times; ++i)
     {
-        successfull_times += publisher->publish(str) ? 1 : 0;
+        successful_times += publisher->publish(str) ? 1 : 0;
         std::this_thread::sleep_for(wait_time);
     }
 
-    std::cout << "ros_interop_publisher: Successfully published " << successfull_times << " times" << std::endl;
+    std::cout << "ros_interop_publisher: Successfully published " << successful_times << " times" << std::endl;
 
-    return successfull_times > 0 ? 0 : 1;
+    return successful_times > 0 ? 0 : 1;
 }

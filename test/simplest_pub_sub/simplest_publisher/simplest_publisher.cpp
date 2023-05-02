@@ -22,23 +22,23 @@
 int main()
 {
     const std::string topic_name{"provizio_dds_test_simplest_pub_sub_topic"};
-    const std::string value{"provizio_dds_test"};
+    const std::string string{"provizio_dds_test"};
     const std::chrono::milliseconds wait_time{200};
     const int publish_times = 15;
 
     auto publisher = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(
         provizio::dds::make_domain_participant(), topic_name);
 
-    std_msgs::msg::String str;
-    str.data(value);
-    int successfull_times = 0;
+    std_msgs::msg::String message;
+    message.data(string);
+    int successful_times = 0;
     for (int i = 0; i < publish_times; ++i)
     {
-        successfull_times += publisher->publish(str) ? 1 : 0;
+        successful_times += publisher->publish(message) ? 1 : 0;
         std::this_thread::sleep_for(wait_time);
     }
 
-    std::cout << "simplest_publisher: Successfully published " << successfull_times << " times" << std::endl;
+    std::cout << "simplest_publisher: Successfully published " << successful_times << " times" << std::endl;
 
-    return successfull_times > 0 ? 0 : 1;
+    return successful_times > 0 ? 0 : 1;
 }

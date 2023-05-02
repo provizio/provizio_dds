@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # Copyright 2023 Provizio Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not
@@ -28,12 +30,11 @@ publisher = provizio_dds.Publisher(
 
 message = provizio_dds.String()
 message.data(TEST_VALUE)
-successfull_times = 0
+successful_times = 0
 for i in range(PUBLISH_TIMES):
-    successfull_times += 1 if publisher.publish(message) else 0
+    successful_times += 1 if publisher.publish(message) else 0
     time.sleep(WAIT_TIME)
 
-print("python_publisher: Successfully published {times} times".format(
-    times=successfull_times))
+print(f"python_publisher: Successfully published {successful_times} times")
 
-sys.exit(0 if successfull_times > 0 else 1)
+sys.exit(0 if successful_times > 0 else 1)

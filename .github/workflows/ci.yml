@@ -9,7 +9,7 @@ jobs:
     name: Check license headers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: .github/workflows/check_license_headers.sh
 
   build-nix-cpp:
@@ -25,7 +25,7 @@ jobs:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: ON
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}"
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}"
 
@@ -43,7 +43,7 @@ jobs:
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: OFF
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
@@ -59,7 +59,7 @@ jobs:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}"
       - run: .github/workflows/test_pip_package.sh
 
@@ -75,11 +75,11 @@ jobs:
     env:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
-      ROS_TESTS: OFF
+      ENABLE_ROS_TESTS: OFF
     steps:
-      - uses: actions/checkout@v2
-      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" "${ROS_TESTS}" /usr/
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS="${ROS_TESTS}"
+      - uses: actions/checkout@v3
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}" /usr/
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS="${ENABLE_ROS_TESTS}"
       - run: .github/workflows/test.sh
 
   test-nix-pip-package-preinstalled-fastdds:
@@ -93,7 +93,7 @@ jobs:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" OFF /usr/
       - run: .github/workflows/test_pip_package.sh
 
@@ -110,7 +110,7 @@ jobs:
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: ON
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}"
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh

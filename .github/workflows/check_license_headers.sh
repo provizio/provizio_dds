@@ -46,4 +46,4 @@ for FILE in $(find . -not \( -path ./build -prune \) -name '*.bat'); do
     check_license_header "$FILE" "::"
 done
 
-echo "OK"
+echo "Licence headers OK"

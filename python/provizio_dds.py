@@ -1,5 +1,3 @@
-#!/bin/bash
-
 # Copyright 2023 Provizio Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +18,7 @@ internal Provizio software components. Built using eProsima Fast-DDS DDS
 implementation (Apache License 2.0).
 """
 import os
+from typing import Any, Callable, Optional, TypeVar
 
 # until https://bugs.python.org/issue46276 is fixed we can apply this workaround
 # on windows
@@ -35,7 +34,6 @@ else:
     import point_cloud2
 
 
-
 class QosDefaults:
     """Defines default QOS policies. They can be overriden for specific types"""
 
@@ -48,7 +46,7 @@ class QosDefaults:
     """Per type defaults for memory policies, both datawriter and datareader. PREALLOCATED_WITH_REALLOC_MEMORY_MODE in Fast-DDS 2.9+"""
     memory_policy_per_type = {None: PREALLOCATED_WITH_REALLOC_MEMORY_MODE}
 
-    def __init__(self, pub_sub_type):
+    def __init__(self, pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType)):
         """Constructs an instance of QosDefaults for the DDS Pub/Sub type.
 
         :param pub_sub_type: The DDS PubSub Type, f.e. provizio_dds.StringPubSubType
@@ -71,7 +69,7 @@ class QosDefaults:
             self.memory_policy = QosDefaults.memory_policy_per_type[None]
 
 
-def make_domain_participant(domain_id=0):
+def make_domain_participant(domain_id: int = 0):
     """Creates a new DDS Domain Participant that automatically cleans up internal objects on deletion
 
     :param domain_id: DDS domain_id, 0 by default
@@ -79,7 +77,7 @@ def make_domain_participant(domain_id=0):
     """
 
     class _DomainParticipant:
-        def __init__(self, domain_id=0):
+        def __init__(self, domain_id):
             factory = DomainParticipantFactory.get_instance()
             self._participant_qos = DomainParticipantQos()
             factory.get_default_participant_qos(self._participant_qos)
@@ -142,7 +140,14 @@ class Publisher(_TopicHandle):
                     self._on_has_subscriber_changed_function(
                         self._publisher, False)
 
-    def __init__(self, domain_participant, topic_name, pub_sub_type, on_has_subscriber_changed_function=None, reliability_kind=None):
+    def __init__(
+            self,
+            domain_participant: object,
+            topic_name: str,
+            pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType),
+            on_has_subscriber_changed_function: Optional[Callable[[
+                Publisher, bool], Any]] = None,
+            reliability_kind: Optional[Any] = None):
         """Constructs a DDS Publisher
 
         :param domain_participant: A DDS Domain Participant wrapper object, as created by provizio_dds.make_domain_participant
@@ -188,7 +193,7 @@ class Publisher(_TopicHandle):
 
         super().__del__()
 
-    def publish(self, data):
+    def publish(self, data: object):
         """Publishes DDS data
 
         :param data: actual data (not Pub Sub Type), f.e. provizio_dds.String
@@ -222,7 +227,16 @@ class Subscriber(_TopicHandle):
                     # Just unmatched the last publisher
                     self._on_has_publisher_changed_function(False)
 
-    def __init__(self, domain_participant, topic_name, pub_sub_type, data_type, on_data_function, on_has_publisher_changed_function=None, reliability_kind=None):
+    def __init__(
+            self,
+            domain_participant: object,
+            topic_name: str,
+            pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType),
+            data_type: TypeVar("data_type"),
+            on_data_function: Callable[[object], Any],  # objectdata_type
+            on_has_publisher_changed_function: Optional[Callable[[
+                bool], Any]] = None,
+            reliability_kind: Optional[Any] = None):
         """Constructs a DDS Subscriber
 
         :param domain_participant: A DDS Domain Participant wrapper object, as created by provizio_dds.make_domain_participant
