@@ -209,6 +209,16 @@ endif(FAST_DDS_INSTALL_DIR)
 if(PYTHON_BINDINGS)
     message(STATUS "Configuring Python bindings...")
 
+    # Python3
+    if(POLICY CMP0094)
+        cmake_policy(SET CMP0094 NEW)
+    endif()
+    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+    set(PYTHON_INCLUDE_PATH ${Python3_INCLUDE_DIRS})
+    set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
+    set(PYTHON_LIBRARIES ${Python3_LIBRARIES})
+    include_directories(SYSTEM ${PYTHON_INCLUDE_PATH})
+
     # SWIG: use standard target name.
     if(POLICY CMP0078)
         cmake_policy(SET CMP0078 NEW)
@@ -225,13 +235,6 @@ if(PYTHON_BINDINGS)
     if("${SWIG_VERSION}" VERSION_LESS "4.0")
         message(FATAL_ERROR "SWIG 4.0 or newer is required, but ${SWIG_VERSION} found!")
     endif("${SWIG_VERSION}" VERSION_LESS "4.0")
-
-    # Python3
-    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
-    set(PYTHON_INCLUDE_PATH ${Python3_INCLUDE_DIRS})
-    set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
-    set(PYTHON_LIBRARIES ${Python3_LIBRARIES})
-    include_directories(SYSTEM ${PYTHON_INCLUDE_PATH})
 
     include_directories(SYSTEM ${FAST_DDS_INCLUDE_DIRS})
 

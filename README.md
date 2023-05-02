@@ -85,13 +85,13 @@ target_link_libraries(<YOUR_CMAKE_TARGET> PUBLIC provizio_dds provizio_dds_types
 **Python (pip):**
 
 ```Bash
-pip3 install -v git+https://github.com/provizio/provizio_dds.git
+python3 -m pip install -v git+https://github.com/provizio/provizio_dds.git
 ```
 
 or
 
 ```Bash
-pip3 install -v git+https://github.com/provizio/provizio_dds.git@TAG_or_BRANCH
+python3 -m pip install -v git+https://github.com/provizio/provizio_dds.git@TAG_or_BRANCH
 ```
 
 ## Publishing Data
