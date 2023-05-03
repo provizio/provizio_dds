@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  check-license-headers:
+    name: Check license headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: .github/workflows/check_license_headers.sh
+
+  build-nix-cpp:
+    name: Build with Static Analysis
+    runs-on: ${{matrix.runner}}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-latest]
+        build_type: [Debug, Release]
+        cc: [gcc, clang]
+        with_python: [OFF, ON]
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: ON
+    steps:
+      - uses: actions/checkout@v3
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}"
+
+  test-nix:
+    name: Test
+    runs-on: ${{matrix.runner}}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-latest]
+        build_type: [Debug, Release]
+        cc: [gcc, clang]
+        with_python: [OFF, ON]
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: OFF
+      ENABLE_ROS_TESTS: OFF
+    steps:
+      - uses: actions/checkout@v3
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
+      - run: .github/workflows/test.sh
+
+  test-nix-pip-package:
+    name: Test pip package
+    runs-on: ${{matrix.runner}}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-latest]
+        cc: [gcc, clang]
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: OFF
+    steps:
+      - uses: actions/checkout@v3
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}"
+      - run: .github/workflows/test_pip_package.sh
+
+  test-preinstalled-fastdds:
+    name: Test with Fast-DDS preinstalled
+    runs-on: ${{matrix.runner}}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-20.04]
+        build_type: [Debug, Release]
+        cc: [gcc, clang]
+        with_python: [OFF, ON]
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: OFF
+      ENABLE_ROS_TESTS: OFF
+    steps:
+      - uses: actions/checkout@v3
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}" /usr/
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS="${ENABLE_ROS_TESTS}"
+      - run: .github/workflows/test.sh
+
+  test-nix-pip-package-preinstalled-fastdds:
+    name: Test pip package with Fast-DDS preinstalled
+    runs-on: ${{matrix.runner}}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-20.04]
+        cc: [gcc, clang]
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: OFF
+    steps:
+      - uses: actions/checkout@v3
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" OFF /usr/
+      - run: .github/workflows/test_pip_package.sh
+
+  test-ros2-compatibility:
+    name: Test compatibility with ROS2
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        build_type: [Debug, Release]
+        cc: [gcc, clang]
+        with_python: [OFF, ON]
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: OFF
+      ENABLE_ROS_TESTS: ON
+    steps:
+      - uses: actions/checkout@v3
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
+      - run: .github/workflows/test.sh
+
+  # Memory and thread sanitiser are not tested due to known issues of both types inside Fast-DDS. May be added in the future when eProsima fixes the issues.
