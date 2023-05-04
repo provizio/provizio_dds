@@ -1,0 +1,5 @@
+build/
+.vscode/
+.clang-format
+.clang-tidy
+*.egg-info/
