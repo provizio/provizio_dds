@@ -18,11 +18,11 @@ include(ExternalProject)
 include(FetchContent)
 
 # Configuration
-set(PROVIZIO_DDS_IDLS_VERSION "master" CACHE STRING "provizio_dds_idls version")
-set(FAST_DDS_VERSION "v2.11.2" CACHE STRING "Fast-DDS version, when not already present in the system")
+set(PROVIZIO_DDS_IDLS_VERSION "feature/APT-3321-FastDDS-2-12" CACHE STRING "provizio_dds_idls version")
+set(FAST_DDS_VERSION "v2.12.0" CACHE STRING "Fast-DDS version, when not already present in the system")
 set(LOOK_FOR_FAST_DDS TRUE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.1" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
-set(FAST_DDS_PYTHON_VERSION "1.2.1" CACHE STRING "Fast-DDS-python version, without v prefix")
+set(FAST_DDS_PYTHON_VERSION "1.3.0" CACHE STRING "Fast-DDS-python version, without v prefix")
 set(PROVIZIO_CODING_STANDARDS_VERSION "v24.02.07" CACHE STRING "Provizio Coding Standards version")
 set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, without v prefix")
 set(ENABLE_TESTS ON CACHE BOOL "Defines whether tests are built and enabled")
@@ -324,13 +324,14 @@ if(PYTHON_BINDINGS)
     if(FAST_DDS_DEPENDENCIES)
         if(TARGET fastdds_python_swig_compilation)
             # Older versions of CMake
-            add_dependencies(fastdds_python_swig_compilation ${FAST_DDS_DEPENDENCIES})
-            add_dependencies(provizio_dds_python_types_swig_compilation ${FAST_DDS_DEPENDENCIES})
+            set(SWIG_COMPILATION_POSTFIX "_swig_compilation")
         else(TARGET fastdds_python_swig_compilation)
             # Newer versions of CMake
-            add_dependencies(fastdds_python ${FAST_DDS_DEPENDENCIES})
-            add_dependencies(provizio_dds_python_types ${FAST_DDS_DEPENDENCIES})
+            set(SWIG_COMPILATION_POSTFIX "")
         endif(TARGET fastdds_python_swig_compilation)
+
+        add_dependencies(fastdds_python${SWIG_COMPILATION_POSTFIX} ${FAST_DDS_DEPENDENCIES})
+        add_dependencies(provizio_dds_python_types${SWIG_COMPILATION_POSTFIX} ${FAST_DDS_DEPENDENCIES})
     endif(FAST_DDS_DEPENDENCIES)
 
     set(FASTDDS_PYTHON_LIBS
