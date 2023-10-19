@@ -123,7 +123,7 @@ class _TopicHandle:
 class Publisher(_TopicHandle):
     """Provides publishing functionality for a DDS data type and topic name specified when constructing"""
 
-    class _WriterListener(DataWriterListener):
+    class _PublisherListener(PublisherListener):
         def __init__(self, publisher, on_has_subscriber_changed_function):
             super().__init__()
             self._publisher = publisher
@@ -164,25 +164,27 @@ class Publisher(_TopicHandle):
         if (reliability_kind is None):
             reliability_kind = qos_defaults.datawriter_reliability_kind
 
+        # Create Listener
+        self._listener = Publisher._PublisherListener(
+            self, on_has_subscriber_changed_function)
+
         # Create Publisher
         self._publisher_qos = PublisherQos()
         self._participant.get().get_default_publisher_qos(self._publisher_qos)
         self._publisher = self._participant.get().create_publisher(
-            self._publisher_qos)
+            self._publisher_qos, self._listener)
 
         # Create DataWriter
-        self._listener = Publisher._WriterListener(
-            self, on_has_subscriber_changed_function)
         self._writer_qos = DataWriterQos()
         self._publisher.get_default_datawriter_qos(self._writer_qos)
         self._writer_qos.reliability().kind = reliability_kind
         self._writer_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
         self._writer = self._publisher.create_datawriter(
-            self._topic, self._writer_qos, self._listener)
+            self._topic, self._writer_qos)
 
     def __del__(self):
         try:
-            self._subscriber.delete_datawriter(self._writer)
+            self._publisher.delete_datawriter(self._writer)
         except:
             pass
 
@@ -190,6 +192,8 @@ class Publisher(_TopicHandle):
             self._participant.get().delete_publisher(self._publisher)
         except:
             pass
+
+        del self._listener
 
         super().__del__()
 
@@ -213,12 +217,15 @@ class Subscriber(_TopicHandle):
             self._on_has_publisher_changed_function = on_has_publisher_changed_function
 
         def on_data_available(self, reader):
+            print("_ReaderListener.on_data_available")
             info = SampleInfo()
             data = self._data_type()
             reader.take_next_sample(data, info)
             self._on_data_function(data)
 
         def on_subscription_matched(self, _, info):
+            print(
+                f"_ReaderListener.on_subscription_matched {info.current_count} {info.current_count_change}")
             if (self._on_has_publisher_changed_function):
                 if (info.current_count > 0 and info.current_count_change == info.current_count):
                     # Just matched the first publisher
@@ -280,4 +287,7 @@ class Subscriber(_TopicHandle):
             self._participant.get().delete_subscriber(self._subscriber)
         except:
             pass
+
+        del self._listener
+
         super().__del__()

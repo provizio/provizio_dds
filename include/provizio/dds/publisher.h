@@ -15,12 +15,13 @@
 #ifndef DDS_PUBLISHER
 #define DDS_PUBLISHER
 
+#include <iostream>
 #include <memory>
 #include <string>
 
 #include <fastdds/dds/publisher/DataWriter.hpp>
-#include <fastdds/dds/publisher/DataWriterListener.hpp>
 #include <fastdds/dds/publisher/Publisher.hpp>
+#include <fastdds/dds/publisher/PublisherListener.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include "provizio/dds/common.h"
@@ -141,12 +142,12 @@ namespace provizio
           private:
             publisher_handle(std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
                              on_has_subscriber_changed_function_type on_has_subscriber_changed_function,
-                             std::unique_ptr<DataWriterListener> &&listener, ReliabilityQosPolicyKind reliability_kind);
+                             std::unique_ptr<PublisherListener> &&listener, ReliabilityQosPolicyKind reliability_kind);
 
             std::shared_ptr<DomainParticipant> domain_participant;
             dds::TypeSupport type_support;
             on_has_subscriber_changed_function_type on_has_subscriber_changed_function;
-            std::unique_ptr<DataWriterListener> listener;
+            std::unique_ptr<PublisherListener> listener;
             Topic *topic = nullptr;
             Publisher *publisher = nullptr;
             DataWriter *data_writer = nullptr;
@@ -215,7 +216,7 @@ namespace provizio
         namespace detail
         {
             template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type>
-            class data_writer_listener : public DataWriterListener
+            class data_writer_listener : public PublisherListener
             {
               public:
                 data_writer_listener(
@@ -226,6 +227,8 @@ namespace provizio
 
                 void on_publication_matched(DataWriter *writer, const PublicationMatchedStatus &info) override
                 {
+                    std::cout << "detail::data_writer_listener::on_publication_matched, info.current_count = "
+                              << info.current_count << ", " << info.current_count_change << std::endl;
                     (void)writer;
                     if (info.current_count > 0 && info.current_count_change == info.current_count)
                     {
@@ -239,6 +242,31 @@ namespace provizio
                     }
                 }
 
+                void on_offered_deadline_missed(DataWriter *writer, const OfferedDeadlineMissedStatus &status) override
+                {
+                    std::cout << "detail::data_writer_listener::on_offered_deadline_missed, status.total_count = "
+                              << status.total_count << std::endl;
+                }
+
+                void on_offered_incompatible_qos(DataWriter *writer,
+                                                 const OfferedIncompatibleQosStatus &status) override
+                {
+                    std::cout << "detail::data_writer_listener::on_offered_incompatible_qos, status.total_count = "
+                              << status.total_count << std::endl;
+                }
+
+                void on_liveliness_lost(DataWriter *writer, const LivelinessLostStatus &status) override
+                {
+                    std::cout << "detail::data_writer_listener::on_liveliness_lost, status.total_count = "
+                              << status.total_count << std::endl;
+                }
+
+                void on_unacknowledged_sample_removed(DataWriter *writer,
+                                                      const InstanceHandle_t & /*instance*/) override
+                {
+                    std::cout << "detail::data_writer_listener::on_unacknowledged_sample_removed" << std::endl;
+                }
+
               private:
                 publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type> &publisher;
             };
@@ -248,8 +276,8 @@ namespace provizio
         publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type>::publisher_handle(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
             const ReliabilityQosPolicyKind reliability_kind)
-            : publisher_handle(std::move(domain_participant), topic_name, nullptr,
-                               std::unique_ptr<DataWriterListener>{}, reliability_kind)
+            : publisher_handle(std::move(domain_participant), topic_name, nullptr, std::unique_ptr<PublisherListener>{},
+                               reliability_kind)
         {
         }
 
@@ -270,7 +298,7 @@ namespace provizio
         publisher_handle<data_pub_sub_type, on_has_subscriber_changed_function_type>::publisher_handle(
             std::shared_ptr<DomainParticipant> domain_participant, const std::string &topic_name,
             on_has_subscriber_changed_function_type on_has_subscriber_changed_function,
-            std::unique_ptr<DataWriterListener> &&listener, const ReliabilityQosPolicyKind reliability_kind)
+            std::unique_ptr<PublisherListener> &&listener, const ReliabilityQosPolicyKind reliability_kind)
             : domain_participant(std::move(domain_participant)), type_support(new data_pub_sub_type()),
               on_has_subscriber_changed_function(std::move(on_has_subscriber_changed_function)),
               listener(std::move(listener))
@@ -283,8 +311,8 @@ namespace provizio
 
             type_support.register_type(this->domain_participant.get());
             topic = this->domain_participant->create_topic(topic_name, type_support->getName(), topic_qos);
-            publisher = this->domain_participant->create_publisher(publisher_qos);
-            data_writer = publisher->create_datawriter(topic, datawriter_qos, this->listener.get());
+            publisher = this->domain_participant->create_publisher(publisher_qos, this->listener.get());
+            data_writer = publisher->create_datawriter(topic, datawriter_qos);
         }
 
         template <typename data_pub_sub_type, typename on_has_subscriber_changed_function_type>
