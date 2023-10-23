@@ -85,12 +85,10 @@ def make_domain_participant(domain_id: int = 0):
                 domain_id, self._participant_qos)
 
         def __del__(self):
-            try:
-                factory = DomainParticipantFactory.get_instance()
-                self._participant.delete_contained_entities()
-                factory.delete_participant(self._participant)
-            except:
-                pass
+            factory = DomainParticipantFactory.get_instance()
+            self._participant.delete_contained_entities()
+            factory.delete_participant(self._participant)
+            del self._participant
 
         def get(self):
             return self._participant
@@ -114,10 +112,7 @@ class _TopicHandle:
             topic_name, self._topic_data_type.getName(), self._topic_qos)
 
     def __del__(self):
-        try:
-            self._participant.get().delete_topic(self._topic)
-        except:
-            pass
+        self._participant.get().delete_topic(self._topic)
 
 
 class Publisher(_TopicHandle):
@@ -126,19 +121,23 @@ class Publisher(_TopicHandle):
     class _WriterListener(DataWriterListener):
         def __init__(self, publisher, on_has_subscriber_changed_function):
             super().__init__()
-            self._publisher = publisher
+            self._publisher = weakref.ref(publisher)
             self._on_has_subscriber_changed_function = on_has_subscriber_changed_function
+
+        def __del__(self):
+            del self._publisher
+            del self._on_has_subscriber_changed_function
 
         def on_publication_matched(self, _, info):
             if (self._on_has_subscriber_changed_function):
                 if (info.current_count > 0 and info.current_count_change == info.current_count):
                     # Just matched the first publisher
                     self._on_has_subscriber_changed_function(
-                        self._publisher, True)
+                        self._publisher(), True)
                 elif (info.current_count == 0 and info.current_count_change < 0):
                     # Just unmatched the last publisher
                     self._on_has_subscriber_changed_function(
-                        self._publisher, False)
+                        self._publisher(), False)
 
     def __init__(
             self,
@@ -181,15 +180,15 @@ class Publisher(_TopicHandle):
             self._topic, self._writer_qos, self._listener)
 
     def __del__(self):
-        try:
-            self._subscriber.delete_datawriter(self._writer)
-        except:
-            pass
+        self._publisher.delete_datawriter(self._writer)
+        del self._writer
 
-        try:
-            self._participant.get().delete_publisher(self._publisher)
-        except:
-            pass
+        self._participant.get().delete_publisher(self._publisher)
+        del self._publisher
+
+        del self._listener
+        del self._writer_qos
+        del self._publisher_qos
 
         super().__del__()
 
@@ -211,6 +210,11 @@ class Subscriber(_TopicHandle):
             self._data_type = data_type
             self._on_data_function = on_data_function
             self._on_has_publisher_changed_function = on_has_publisher_changed_function
+
+        def __del__(self):
+            del self._data_type
+            del self._on_data_function
+            del self._on_has_publisher_changed_function
 
         def on_data_available(self, reader):
             info = SampleInfo()
@@ -271,13 +275,14 @@ class Subscriber(_TopicHandle):
             self._topic, self._reader_qos, self._listener)
 
     def __del__(self):
-        try:
-            self._subscriber.delete_datareader(self._reader)
-        except:
-            pass
+        self._subscriber.delete_datareader(self._reader)
+        del self._reader
 
-        try:
-            self._participant.get().delete_subscriber(self._subscriber)
-        except:
-            pass
+        self._participant.get().delete_subscriber(self._subscriber)
+        del self._subscriber
+
+        del self._listener
+        del self._reader_qos
+        del self._subscriber_qos
+
         super().__del__()

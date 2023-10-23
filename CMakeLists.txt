@@ -322,8 +322,15 @@ if(PYTHON_BINDINGS)
 
     # Make sure Fast-DDS is built prior to SWIG code generation
     if(FAST_DDS_DEPENDENCIES)
-        add_dependencies(fastdds_python_swig_compilation ${FAST_DDS_DEPENDENCIES})
-        add_dependencies(provizio_dds_python_types_swig_compilation ${FAST_DDS_DEPENDENCIES})
+        if(TARGET fastdds_python_swig_compilation)
+            # Older versions of CMake
+            add_dependencies(fastdds_python_swig_compilation ${FAST_DDS_DEPENDENCIES})
+            add_dependencies(provizio_dds_python_types_swig_compilation ${FAST_DDS_DEPENDENCIES})
+        else(TARGET fastdds_python_swig_compilation)
+            # Newer versions of CMake
+            add_dependencies(fastdds_python ${FAST_DDS_DEPENDENCIES})
+            add_dependencies(provizio_dds_python_types ${FAST_DDS_DEPENDENCIES})
+        endif(TARGET fastdds_python_swig_compilation)
     endif(FAST_DDS_DEPENDENCIES)
 
     set(FASTDDS_PYTHON_LIBS
