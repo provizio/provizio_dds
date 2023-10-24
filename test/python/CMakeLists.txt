@@ -40,3 +40,13 @@ add_test(NAME pointcloud2_test
     COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./pointcloud2_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
+
+add_test(NAME python_publisher_no_leaks_test
+    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher_no_leaks_test.py"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+
+add_test(NAME python_subscriber_no_leaks_test
+    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber_no_leaks_test.py"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
