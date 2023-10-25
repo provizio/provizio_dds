@@ -18,7 +18,11 @@ set -e
 
 cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
 
-source ./python_venv.sh
+# Make (or re-make) and activate a test Python virtual environment
+VENV=/tmp/provizio_dds_test_pip_package.venv
+rm -rf ${VENV}
+python3 -m venv ${VENV}
+source ${VENV}/bin/activate
 
 export CC=${CC:-"gcc"}
 if [ -z "${CXX:-}" ]; then
@@ -37,7 +41,7 @@ fi
 cd ../../
 
 # Build and install the package
-pip3 install -v .
+python3 -m pip install -v .
 
 # Test it works fine by executing Python tests directly (without copying provizio_dds.py and other beside the tests)
 python3 test/python/python_publisher.py & python3 test/python/python_subscriber.py

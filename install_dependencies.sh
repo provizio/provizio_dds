@@ -58,7 +58,7 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
     brew install python3
-    pip3 install setuptools
+    python3 -m pip install setuptools
 
     # Install SWIG
     brew install swig
@@ -224,8 +224,8 @@ else
 
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
-    apt install -y --no-install-recommends python3 python3-pip libpython3-dev
-    pip3 install setuptools
+    apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev
+    python3 -m pip install setuptools
 
     # Install SWIG
     if [ "${UBUNTU_18}" = true ]; then
