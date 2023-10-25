@@ -61,6 +61,9 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
 
     # Install SWIG
     brew install swig
+
+    # Make a virtual environment to avoid "error: externally-managed-environment"
+    python3 -m venv /tmp/provizio_dds.venv
   fi
 
   if [[ "${STATIC_ANALYSIS}" != "OFF" ]]; then

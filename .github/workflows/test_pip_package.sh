@@ -18,6 +18,8 @@ set -e
 
 cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
 
+source ./python_venv.sh
+
 export CC=${CC:-"gcc"}
 if [ -z "${CXX:-}" ]; then
     case "${CC}" in

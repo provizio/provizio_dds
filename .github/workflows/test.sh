@@ -18,6 +18,8 @@ set -e
 
 cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
 
+source ./python_venv.sh
+
 # Source ROS, if present
 for ROS_DIR in /opt/ros/* ; do
     if [[ -f "${ROS_DIR}/setup.bash" ]]; then
