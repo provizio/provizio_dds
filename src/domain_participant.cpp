@@ -30,8 +30,12 @@ namespace provizio
 
         std::shared_ptr<DomainParticipant> make_domain_participant(DomainId_t domain_id)
         {
-            return {dds::DomainParticipantFactory::get_instance()->create_participant(domain_id,
-                                                                                      PARTICIPANT_QOS_DEFAULT, nullptr),
+            auto qos = PARTICIPANT_QOS_DEFAULT;
+            qos.wire_protocol().builtin.discovery_config.initial_announcements.count = 150;
+            qos.wire_protocol().builtin.discovery_config.initial_announcements.period =
+                eprosima::fastrtps::Duration_t{0, 100000000u};
+
+            return {dds::DomainParticipantFactory::get_instance()->create_participant(domain_id, qos, nullptr),
                     delete_participant};
         }
     } // namespace dds
