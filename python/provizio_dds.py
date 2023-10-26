@@ -79,8 +79,13 @@ def make_domain_participant(domain_id: int = 0):
     class _DomainParticipant:
         def __init__(self, domain_id):
             factory = DomainParticipantFactory.get_instance()
+
             self._participant_qos = DomainParticipantQos()
             factory.get_default_participant_qos(self._participant_qos)
+            # More reliable matching
+            self._participant_qos.wire_protocol(
+            ).builtin.discovery_config.initial_announcements.count = 150
+            
             self._participant = factory.create_participant(
                 domain_id, self._participant_qos)
 
