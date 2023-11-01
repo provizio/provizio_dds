@@ -50,3 +50,8 @@ add_test(NAME python_subscriber_no_leaks_test
     COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber_no_leaks_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
+
+add_test(NAME python_stop_subscriber_test
+    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_stop_subscriber_test.py"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
