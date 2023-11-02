@@ -25,9 +25,9 @@ python3 -m venv ${VENV}
 source ${VENV}/bin/activate
 
 # Manually install some dependencies in older versions of Python to avoid known incompatibilities in numpy and Cython
-python3 -m pip install wheel
-python_version=$(python -c 'import sys; print("".join(map(str, sys.version_info[:2])))')
-if [[ "${python_version}" -lt "390" ]]; then
+python3 -m pip install wheel setuptools
+python_version=$(python3 -c 'import sys; print("".join(map(str, sys.version_info[:2])))')
+if [[ "${python_version}" -lt "39" ]]; then
     python3 -m pip install "Cython<3" "numpy"
 fi
 

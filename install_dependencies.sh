@@ -58,13 +58,16 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
     brew install python3
-    python3 -m pip install setuptools
+    python3 -m pip install wheel setuptools
 
     # Install SWIG
     brew install swig
 
     # Make a virtual environment to avoid "error: externally-managed-environment"
     python3 -m venv /tmp/provizio_dds.venv
+    source /tmp/provizio_dds.venv/bin/activate
+    python3 -m pip install wheel setuptools
+    deactivate
   fi
 
   if [[ "${STATIC_ANALYSIS}" != "OFF" ]]; then
