@@ -27,7 +27,7 @@ TEST_TOPIC_NAME = "provizio_dds_python_stop_subscriber_test"
 TEST_VALUE = "test"
 MAX_WAIT_TIME = 5
 RECEIVE_NUM_TIMES = 10
-PUBLISH_EVERY_SEC = 0.02
+PUBLISH_EVERY_SEC = 0.05
 
 pid = os.fork()
 if pid > 0:
