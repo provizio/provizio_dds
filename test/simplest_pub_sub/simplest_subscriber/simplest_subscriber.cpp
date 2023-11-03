@@ -36,14 +36,16 @@ int main()
             condition_variable.notify_one();
         });
 
-    std::unique_lock<std::mutex> lock{mutex};
-    condition_variable.wait_for(lock, wait_time, [&]() { return string == expected_value; });
-
-    if (string != expected_value)
     {
-        std::cerr << "simplest_subscriber: " << expected_value << " was expected but "
-                  << (string.empty() ? "nothing" : string) << " was received!" << std::endl;
-        return 1;
+        std::unique_lock<std::mutex> lock{mutex};
+        condition_variable.wait_for(lock, wait_time, [&]() { return string == expected_value; });
+
+        if (string != expected_value)
+        {
+            std::cerr << "simplest_subscriber: " << expected_value << " was expected but "
+                      << (string.empty() ? "nothing" : string) << " was received!" << std::endl;
+            return 1;
+        }
     }
 
     std::cout << "simplest_subscriber: Success" << std::endl;

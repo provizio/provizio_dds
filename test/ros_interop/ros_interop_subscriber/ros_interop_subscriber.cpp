@@ -46,16 +46,20 @@ int main()
         },
         reliability_kind);
 
-    std::unique_lock<std::mutex> lock{mutex};
-    condition_variable.wait_for(lock, wait_time,
-                                [&]() { return string.substr(0, expected_substring.length()) == expected_substring; });
-
-    if (string.substr(0, expected_substring.length()) != expected_substring)
     {
-        std::cerr << expected_substring << "* was expected but " << (string.empty() ? "nothing" : string)
-                  << " was received!" << std::endl;
-        return 1;
+        std::unique_lock<std::mutex> lock{mutex};
+        condition_variable.wait_for(
+            lock, wait_time, [&]() { return string.substr(0, expected_substring.length()) == expected_substring; });
+
+        if (string.substr(0, expected_substring.length()) != expected_substring)
+        {
+            std::cerr << expected_substring << "* was expected but " << (string.empty() ? "nothing" : string)
+                      << " was received!" << std::endl;
+            return 1;
+        }
     }
+
+    std::cout << "ros_interop_subscriber: Success" << std::endl;
 
     return 0;
 }

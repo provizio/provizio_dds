@@ -15,30 +15,9 @@
 # limitations under the License.
 
 # Use as:
-# build.sh [CMake arguments]
+# source python_venv.sh
 
-set -e
-
-cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
-
-source ./python_venv.sh
-
-export CC=${CC:-"gcc"}
-if [ -z "${CXX:-}" ]; then
-    case "${CC}" in
-        gcc)
-            export CXX=g++
-            ;;
-        clang)
-            export CXX=clang++
-            ;;
-        *)
-            ;;
-    esac
+# If the Python virtual environment is there, activate it to avoid "error: externally-managed-environment"
+if [ -d "/tmp/provizio_dds.venv" ]; then
+    source /tmp/provizio_dds.venv/bin/activate
 fi
-
-mkdir -p ../../build
-cd ../../build
-
-cmake .. $@
-cmake --build . -- -j 16
