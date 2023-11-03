@@ -30,8 +30,15 @@ namespace provizio
 
         std::shared_ptr<DomainParticipant> make_domain_participant(DomainId_t domain_id)
         {
-            return {dds::DomainParticipantFactory::get_instance()->create_participant(domain_id,
-                                                                                      PARTICIPANT_QOS_DEFAULT, nullptr),
+            auto qos = PARTICIPANT_QOS_DEFAULT;
+
+            // More reliable matching (only 5 multicast announcements are sent 0.1 seconds apart by default, which is
+            // often not enough when nearing 100% bandwidth load)
+            constexpr std::uint32_t num_initial_discovery_announcements = 150;
+            qos.wire_protocol().builtin.discovery_config.initial_announcements.count =
+                num_initial_discovery_announcements;
+
+            return {dds::DomainParticipantFactory::get_instance()->create_participant(domain_id, qos, nullptr),
                     delete_participant};
         }
     } // namespace dds

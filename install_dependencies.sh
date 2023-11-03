@@ -26,7 +26,8 @@ INSTALL_ROS=${3:-"OFF"}
 FAST_DDS_INSTALL=${4:-"OFF"}
 CC=${CC:-"gcc"}
 
-FAST_DDS_VERSION=${FAST_DDS_VERSION:-v2.10.1}
+FAST_DDS_VERSION=${FAST_DDS_VERSION:-v2.11.2}
+FAST_CDR_VERSION=${FAST_CDR_VERSION:-v1.1.1}
 
 if [[ "${OSTYPE}" == "darwin"* ]]; then
   # macOS
@@ -57,10 +58,16 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
     brew install python3
-    pip3 install setuptools
+    python3 -m pip install wheel setuptools
 
     # Install SWIG
     brew install swig
+
+    # Make a virtual environment to avoid "error: externally-managed-environment"
+    python3 -m venv /tmp/provizio_dds.venv
+    source /tmp/provizio_dds.venv/bin/activate
+    python3 -m pip install wheel setuptools
+    deactivate
   fi
 
   if [[ "${STATIC_ANALYSIS}" != "OFF" ]]; then
@@ -84,6 +91,12 @@ else
     exit 1
   fi
 
+  # Update apt cache
+  apt update
+
+  # Install lsb-release for checking Ubuntu version and accessing https
+  apt install -y --no-install-recommends lsb-release ca-certificates
+
   # Check if running in Ubuntu 18
   UBUNTU_18=false
   if lsb_release -a | grep -q 18; then
@@ -97,12 +110,6 @@ else
     echo "Running in Ubuntu 20 detected..."
     UBUNTU_20=true
   fi
-
-  # Update apt cache
-  apt update
-
-  # Install lsb-release for checking Ubuntu version
-  apt install -y --no-install-recommends lsb-release
 
   # Install GCC/clang
   if [[ "${CC}" == "gcc" ]]; then
@@ -171,8 +178,10 @@ else
       # Fast CDR
       cd /tmp/fastdds
       git clone https://github.com/eProsima/Fast-CDR.git
-      mkdir Fast-CDR/build
-      cd Fast-CDR/build
+      cd Fast-CDR
+      git checkout ${FAST_CDR_VERSION}
+      mkdir build
+      cd build
       cmake .. -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
       cmake --build . --target install
 
@@ -218,8 +227,8 @@ else
 
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
-    apt install -y --no-install-recommends python3 python3-pip libpython3-dev
-    pip3 install setuptools
+    apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev
+    python3 -m pip install setuptools
 
     # Install SWIG
     if [ "${UBUNTU_18}" = true ]; then

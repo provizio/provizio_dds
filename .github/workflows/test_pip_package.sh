@@ -18,6 +18,19 @@ set -e
 
 cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
 
+# Make (or re-make) and activate a test Python virtual environment
+VENV=/tmp/provizio_dds_test_pip_package.venv
+rm -rf ${VENV}
+python3 -m venv ${VENV}
+source ${VENV}/bin/activate
+
+# Manually install some dependencies in older versions of Python to avoid known incompatibilities in numpy and Cython
+python3 -m pip install wheel setuptools
+python_version=$(python3 -c 'import sys; print("".join(map(str, sys.version_info[:2])))')
+if [[ "${python_version}" -lt "39" ]]; then
+    python3 -m pip install "Cython<3" "numpy"
+fi
+
 export CC=${CC:-"gcc"}
 if [ -z "${CXX:-}" ]; then
     case "${CC}" in
@@ -35,8 +48,12 @@ fi
 cd ../../
 
 # Build and install the package
-pip3 install -v .
+python3 -m pip install -v .
 
 # Test it works fine by executing Python tests directly (without copying provizio_dds.py and other beside the tests)
 python3 test/python/python_publisher.py & python3 test/python/python_subscriber.py
 python3 test/python/pointcloud2_test.py
+
+# Deactivate and delete the virtual environment
+deactivate
+rm -rf ${VENV}
