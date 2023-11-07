@@ -357,6 +357,120 @@ def make_radar_point_cloud(header: Header, points: Iterable, is_dense: bool = Tr
     return create_cloud(header, fields, points, is_dense)
 
 
+def create_entities_cloud(
+        header: Header,
+        fields: Sequence,
+        entities: Iterable) -> PointCloud2:
+    """
+    Create a special provizio_dds.PointCloud2 message for entities.
+
+    :param header: The point cloud header. (Type: provizio_dds.Header)
+    :param fields: The entities point cloud fields. (Type: Sequence of provizio_dds.PointField)
+    :param entities: The entities to be sent. List of iterables, i.e. one iterable
+                   for each entity, with the elements of each iterable being the
+                   values of the fields for that entity (in the same order as
+                   the fields parameter)
+    :param is_dense: True if there are no invalid points
+    :return: The point cloud as provizio_dds.PointCloud2
+    """
+    entities_cloud = create_cloud(header, fields, entities)
+
+    return entities_cloud
+
+
+def make_radar_entities(
+    header: Header, entities: Iterable, is_dense: bool = True
+) -> PointCloud2:
+    """
+    Create a PointCloud2 containing entities
+    (entity_id, entity_class, x, y, z, radar_relative_radial_velocity, ground_relative_radial_velocity, orientation, size, entity_confidence, entity_class_confidence) fields.
+
+    :param header: The point cloud header. (Type: Header)
+    :param entities: The point cloud entities. (Type: Iterable)
+    :param is_dense: True if there are no invalid entities
+    :return: The point cloud containing entities as PointCloud2.
+    """
+    fields = [None] * 11
+    # entity_id
+    fields[0] = PointField()
+    fields[0].offset(0)
+    fields[0].count(1)
+    fields[0].datatype(UINT32)
+    fields[0].name("entity_id")
+
+    # entity_class
+    fields[1] = PointField()
+    fields[1].offset(4)
+    fields[1].count(1)
+    fields[1].datatype(UINT8)
+    fields[1].name("entity_class")
+
+    # x
+    fields[2] = PointField()
+    fields[2].offset(5)
+    fields[2].count(1)
+    fields[2].datatype(FLOAT32)
+    fields[2].name("x")
+
+    # y
+    fields[3] = PointField()
+    fields[3].offset(9)
+    fields[3].count(1)
+    fields[3].datatype(FLOAT32)
+    fields[3].name("y")
+
+    # z
+    fields[4] = PointField()
+    fields[4].offset(13)
+    fields[4].count(1)
+    fields[4].datatype(FLOAT32)
+    fields[4].name("z")
+
+    # radar_relative_radial_velocity
+    fields[5] = PointField()
+    fields[5].offset(17)
+    fields[5].count(1)
+    fields[5].datatype(FLOAT32)
+    fields[5].name("radar_relative_radial_velocity")
+
+    # radar_relative_radial_velocity
+    fields[6] = PointField()
+    fields[6].offset(21)
+    fields[6].count(1)
+    fields[6].datatype(FLOAT32)
+    fields[6].name("ground_relative_radial_velocity")
+
+    # orientation (x, y, z, w)
+    fields[7] = PointField()
+    fields[7].offset(25)
+    fields[7].count(4)
+    fields[7].datatype(FLOAT32)
+    fields[7].name("orientation")
+
+    # size (x, y, z)
+    fields[8] = PointField()
+    fields[8].offset(41)
+    fields[8].count(3)
+    fields[8].datatype(FLOAT32)
+    fields[8].name("size")
+
+    # entity_confidence
+    fields[9] = PointField()
+    fields[9].offset(53)
+    fields[9].count(1)
+    fields[9].datatype(UINT8)
+    fields[9].name("entity_confidence")
+
+    # entity_class_confidence
+    fields[10] = PointField()
+    fields[10].offset(54)
+    fields[10].count(1)
+    fields[10].datatype(UINT8)
+    fields[10].name("entity_class_confidence")
+
+    return create_entities_cloud(header, fields, entities, is_dense)
+
+
 def make_header(timestamp_sec: int, timestamp_nanosec: int, frame_id: str) -> Header:
     """
     Create a provizio_dds.Header
