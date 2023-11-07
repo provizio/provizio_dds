@@ -238,6 +238,7 @@ else
         cd /tmp
         wget -c https://github.com/swig/swig/archive/refs/tags/v4.1.1.tar.gz -O - | tar -xz
         cd swig-4.1.1
+        ./autogen.sh
         ./configure
         make -j8
         make install
