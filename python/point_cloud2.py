@@ -419,7 +419,7 @@ def make_radar_entities(
     fields[5].name("radar_relative_radial_velocity")
     offset += 4
 
-    # radar_relative_radial_velocity
+    # ground_relative_radial_velocity
     fields[6] = PointField()
     fields[6].offset(offset)
     fields[6].count(1)
