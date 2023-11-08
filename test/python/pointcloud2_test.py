@@ -73,8 +73,8 @@ assert entities_cloud.fields()[5].name() == "radar_relative_radial_velocity"
 assert entities_cloud.fields()[6].name() == "ground_relative_radial_velocity"
 assert entities_cloud.fields()[7].name() == "orientation"
 assert entities_cloud.fields()[8].name() == "size"
-assert entities_cloud.fields()[8].name() == "entity_confidence"
-assert entities_cloud.fields()[8].name() == "entity_class_confidence"
+assert entities_cloud.fields()[9].name() == "entity_confidence"
+assert entities_cloud.fields()[10].name() == "entity_class_confidence"
 
 # Read it
 print("Reading the PointCloud2 entities and checking its data...")
@@ -82,3 +82,5 @@ print("Reading the PointCloud2 entities and checking its data...")
 read_entities = provizio_dds.point_cloud2.read_points_list(entities_cloud)
 assert str(
     read_entities[0]) == "Point(track_id=99, entity_class=4, x=20.5, y=-2.0, z=1.0, radar_relative_radial_velocity=10.2, ground_relative_radial_velocity=25.0, orientation=[0, 0, 0, 1], size=[2, 5, 2], entity_confidence=254, entity_class_confidence=254)", "Got:" + str(read_entities[0])
+
+print("Success")
