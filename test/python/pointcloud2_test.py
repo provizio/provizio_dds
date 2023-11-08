@@ -53,4 +53,32 @@ assert str(
 assert str(
     read_points[1]) == "Point(x=1.0, y=2.0, z=3.0, radar_relative_radial_velocity=4.0, signal_to_noise_ratio=5.0, ground_relative_radial_velocity=nan)", "Got:" + str(read_points[1])
 
-print("Success")
+print("Success reading PointCloud2 data")
+
+
+print("Creating a PointCloud2 embedding entities... ")
+entities = [[99, 4, 20.5, -2.0, 1.0, 10.2, 25.0, 0, 0, 0, 1, 2, 5, 2, 254, 254],
+            [100, 2, 10.0, 2.0, 1.0, -10.0, 0.0, 0, 0, 0, 1, float('nan'), float('nan'), float('nan'), 254, 12]]
+
+entities_cloud = provizio_dds.point_cloud2.make_radar_entities(provizio_dds.point_cloud2.make_header(10, 20, "test_entities"), entities)
+
+# Check the entities cloud
+print("Checking the embedded entities in PointCloud2 metadata...")
+assert entities_cloud.fields()[0].name() == "track_id"
+assert entities_cloud.fields()[1].name() == "entity_class"
+assert entities_cloud.fields()[2].name() == "x"
+assert entities_cloud.fields()[3].name() == "y"
+assert entities_cloud.fields()[4].name() == "z"
+assert entities_cloud.fields()[5].name() == "radar_relative_radial_velocity"
+assert entities_cloud.fields()[6].name() == "ground_relative_radial_velocity"
+assert entities_cloud.fields()[7].name() == "orientation"
+assert entities_cloud.fields()[8].name() == "size"
+assert entities_cloud.fields()[8].name() == "entity_confidence"
+assert entities_cloud.fields()[8].name() == "entity_class_confidence"
+
+# Read it
+print("Reading the PointCloud2 entities and checking its data...")
+
+read_entities = provizio_dds.point_cloud2.read_points_list(entities_cloud)
+assert str(
+    read_entities[0]) == "Point(track_id=99, entity_class=4, x=20.5, y=-2.0, z=1.0, radar_relative_radial_velocity=10.2, ground_relative_radial_velocity=25.0, orientation=[0, 0, 0, 1], size=[2, 5, 2], entity_confidence=254, entity_class_confidence=254)", "Got:" + str(read_entities[0])
