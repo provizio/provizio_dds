@@ -80,7 +80,6 @@ assert entities_cloud.fields()[10].name() == "entity_class_confidence"
 print("Reading the PointCloud2 entities and checking its data...")
 
 read_entities = provizio_dds.point_cloud2.read_points(entities_cloud)
-assert str(
-    read_entities[0]) == "(99, 4, 20.5, -2.0, 1.0, 10.2, 25.0, 0, 0, 0, 1, 2, 5, 2, 254, 254)", "Got:" + str(read_entities[0])
+assert str(read_entities[0]) == "(99, 4, 20.5, -2., 1., 10.2, 25., 0., 0., 0., 1., 2., 5., 2., 254, 254)", "Got:" + str(read_entities[0])
 
 print("Success")
