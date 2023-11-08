@@ -79,8 +79,8 @@ assert entities_cloud.fields()[10].name() == "entity_class_confidence"
 # Read it
 print("Reading the PointCloud2 entities and checking its data...")
 
-read_entities = provizio_dds.point_cloud2.read_points_list(entities_cloud)
+read_entities = provizio_dds.point_cloud2.read_points(entities_cloud)
 assert str(
-    read_entities[0]) == "Point(track_id=99, entity_class=4, x=20.5, y=-2.0, z=1.0, radar_relative_radial_velocity=10.2, ground_relative_radial_velocity=25.0, orientation=[0, 0, 0, 1], size=[2, 5, 2], entity_confidence=254, entity_class_confidence=254)", "Got:" + str(read_entities[0])
+    read_entities[0]) == "(99, 4, 20.5, -2.0, 1.0, 10.2, 25.0, 0, 0, 0, 1, 2, 5, 2, 254, 254)", "Got:" + str(read_entities[0])
 
 print("Success")
