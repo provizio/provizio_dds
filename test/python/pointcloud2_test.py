@@ -64,7 +64,7 @@ entities_cloud = provizio_dds.point_cloud2.make_radar_entities(provizio_dds.poin
 
 # Check the entities cloud
 print("Checking the embedded entities in PointCloud2 metadata...")
-assert entities_cloud.fields()[0].name() == "track_id"
+assert entities_cloud.fields()[0].name() == "entity_id"
 assert entities_cloud.fields()[1].name() == "entity_class"
 assert entities_cloud.fields()[2].name() == "x"
 assert entities_cloud.fields()[3].name() == "y"
