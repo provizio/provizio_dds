@@ -118,13 +118,19 @@ else
       add-apt-repository -y ppa:ubuntu-toolchain-r/test
       apt update
       apt install -y --no-install-recommends gcc-9 g++-9
-      ln -s /usr/bin/gcc-9 /usr/bin/gcc || echo "Warning: failed to update /usr/bin/gcc to use version 9. You may use export CC=gcc-9 instead."
-      ln -s /usr/bin/g++-9 /usr/bin/g++ || echo "Warning: failed to update /usr/bin/g++ to use version 9. You may use export CXX=g++-9 instead."
+      update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 100
+      update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 100
     else
       apt install -y --no-install-recommends gcc g++
     fi
   else
-    apt install -y --no-install-recommends clang
+    if [ "${UBUNTU_18}" = true ]; then
+      apt install -y --no-install-recommends clang-10
+      update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100
+      update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-10 100
+    else
+      apt install -y --no-install-recommends clang
+    fi
   fi
 
   # Install make
@@ -153,7 +159,16 @@ else
 
   if [[ "${STATIC_ANALYSIS}" != "OFF" ]]; then
     # Install cppcheck, clang-format and clang-tidy (and clang for proper clang-tidy checks)
-    apt install -y --no-install-recommends clang clang-format clang-tidy cppcheck
+    if [ "${UBUNTU_18}" = true ]; then
+      apt install -y --no-install-recommends clang-10 clang-format-10 clang-tidy-10
+
+      update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-10 100
+      update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100
+      update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-10 100
+      update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-10 100
+    else
+      apt install -y --no-install-recommends clang clang-format clang-tidy cppcheck
+    fi
   fi
 
   if [[ "${FAST_DDS_INSTALL}" != "OFF" ]]; then
@@ -238,6 +253,7 @@ else
         cd /tmp
         wget -c https://github.com/swig/swig/archive/refs/tags/v4.1.1.tar.gz -O - | tar -xz
         cd swig-4.1.1
+        ./autogen.sh
         ./configure
         make -j8
         make install
