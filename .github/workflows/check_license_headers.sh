@@ -16,6 +16,9 @@
 
 set -e
 
+# List of all excluded files
+EXCLUDED=("./python/gps_utils.py")
+
 cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
 cd ../..
 
@@ -25,6 +28,13 @@ check_license_header() {
     FAILURE_PREFIX="License header is missing or invalid in"
     FILE=$1
     COMMENT_MARK=$2
+
+    for EX in "${EXCLUDED[@]}"; do
+        if [[ "${EX}" == "${FILE}" ]]; then
+            # Ignore the check for this file
+            return
+        fi
+    done
 
     echo "${OUTPUT_PREFIX} ${FILE}"
     grep -q "${COMMENT_MARK} Copyright 2[0-9][0-9][0-9] Provizio Ltd." "${FILE}" || (echo "${FAILURE_PREFIX} ${FILE}"; exit 1)

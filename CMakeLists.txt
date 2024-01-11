@@ -23,7 +23,7 @@ set(FAST_DDS_VERSION "v2.11.2" CACHE STRING "Fast-DDS version, when not already 
 set(LOOK_FOR_FAST_DDS TRUE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.1" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
 set(FAST_DDS_PYTHON_VERSION "1.2.1" CACHE STRING "Fast-DDS-python version, without v prefix")
-set(PROVIZIO_CODING_STANDARDS_VERSION "v23.04.20" CACHE STRING "Provizio Coding Standards version")
+set(PROVIZIO_CODING_STANDARDS_VERSION "v24.02.07" CACHE STRING "Provizio Coding Standards version")
 set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, without v prefix")
 set(ENABLE_TESTS ON CACHE BOOL "Defines whether tests are built and enabled")
 set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be generated")
@@ -344,6 +344,8 @@ if(PYTHON_BINDINGS)
     set(PROVIZIO_DDS_PYTHON_LIBS
         "${CMAKE_CURRENT_SOURCE_DIR}/python/provizio_dds.py"
         "${CMAKE_CURRENT_SOURCE_DIR}/python/point_cloud2.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/accumulation.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/gps_utils.py"
     )
     set(PROVIZIO_DDS_ALL_PYTHON_LIBS
         ${FASTDDS_PYTHON_LIBS}

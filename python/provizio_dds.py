@@ -18,20 +18,25 @@ internal Provizio software components. Built using eProsima Fast-DDS DDS
 implementation (Apache License 2.0).
 """
 import os
+import traceback
 from typing import Any, Callable, Optional, TypeVar
 
 # until https://bugs.python.org/issue46276 is fixed we can apply this workaround
 # on windows
-if os.name == 'nt':
+if os.name == "nt":
     import win32api
-    win32api.LoadLibrary('provizio_dds_python_types')
+
+    win32api.LoadLibrary("provizio_dds_python_types")
 
 from provizio_dds_python_types import *
 from fastdds import *
+
 if __package__ or "." in __name__:
     from . import point_cloud2
+    from . import accumulation
 else:
     import point_cloud2
+    import accumulation
 
 
 class QosDefaults:
@@ -52,17 +57,21 @@ class QosDefaults:
         :param pub_sub_type: The DDS PubSub Type, f.e. provizio_dds.StringPubSubType
         """
         try:
-            self.datawriter_reliability_kind = QosDefaults.datawriter_reliability_kind_per_type[
-                pub_sub_type]
+            self.datawriter_reliability_kind = (
+                QosDefaults.datawriter_reliability_kind_per_type[pub_sub_type]
+            )
         except KeyError:
-            self.datawriter_reliability_kind = QosDefaults.datawriter_reliability_kind_per_type[
-                None]
+            self.datawriter_reliability_kind = (
+                QosDefaults.datawriter_reliability_kind_per_type[None]
+            )
         try:
-            self.datareader_reliability_kind = QosDefaults.datareader_reliability_kind_per_type[
-                pub_sub_type]
+            self.datareader_reliability_kind = (
+                QosDefaults.datareader_reliability_kind_per_type[pub_sub_type]
+            )
         except KeyError:
-            self.datareader_reliability_kind = QosDefaults.datareader_reliability_kind_per_type[
-                None]
+            self.datareader_reliability_kind = (
+                QosDefaults.datareader_reliability_kind_per_type[None]
+            )
         try:
             self.memory_policy = QosDefaults.memory_policy_per_type[pub_sub_type]
         except KeyError:
@@ -83,11 +92,13 @@ def make_domain_participant(domain_id: int = 0):
             self._participant_qos = DomainParticipantQos()
             factory.get_default_participant_qos(self._participant_qos)
             # More reliable matching
-            self._participant_qos.wire_protocol(
-            ).builtin.discovery_config.initial_announcements.count = 150
-            
+            self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.count = (
+                150
+            )
+
             self._participant = factory.create_participant(
-                domain_id, self._participant_qos)
+                domain_id, self._participant_qos
+            )
 
         def __del__(self):
             factory = DomainParticipantFactory.get_instance()
@@ -114,7 +125,8 @@ class _TopicHandle:
         self._topic_qos = TopicQos()
         self._participant.get().get_default_topic_qos(self._topic_qos)
         self._topic = self._participant.get().create_topic(
-            topic_name, self._topic_data_type.getName(), self._topic_qos)
+            topic_name, self._topic_data_type.getName(), self._topic_qos
+        )
 
     def __del__(self):
         self._participant.get().delete_topic(self._topic)
@@ -127,31 +139,44 @@ class Publisher(_TopicHandle):
         def __init__(self, publisher, on_has_subscriber_changed_function):
             super().__init__()
             self._publisher = weakref.ref(publisher)
-            self._on_has_subscriber_changed_function = on_has_subscriber_changed_function
+            self._on_has_subscriber_changed_function = (
+                on_has_subscriber_changed_function
+            )
 
         def __del__(self):
             del self._publisher
             del self._on_has_subscriber_changed_function
 
         def on_publication_matched(self, _, info):
-            if (self._on_has_subscriber_changed_function):
-                if (info.current_count > 0 and info.current_count_change == info.current_count):
-                    # Just matched the first publisher
-                    self._on_has_subscriber_changed_function(
-                        self._publisher(), True)
-                elif (info.current_count == 0 and info.current_count_change < 0):
-                    # Just unmatched the last publisher
-                    self._on_has_subscriber_changed_function(
-                        self._publisher(), False)
+            try:
+                if self._on_has_subscriber_changed_function:
+                    if (
+                        info.current_count > 0
+                        and info.current_count_change == info.current_count
+                    ):
+                        # Just matched the first publisher
+                        self._on_has_subscriber_changed_function(
+                            self._publisher(), True
+                        )
+                    elif info.current_count == 0 and info.current_count_change < 0:
+                        # Just unmatched the last publisher
+                        self._on_has_subscriber_changed_function(
+                            self._publisher(), False
+                        )
+            except Exception as e:
+                traceback.print_exc()
+                raise e
 
     def __init__(
-            self,
-            domain_participant: object,
-            topic_name: str,
-            pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType),
-            on_has_subscriber_changed_function: Optional[Callable[[
-                Publisher, bool], Any]] = None,
-            reliability_kind: Optional[Any] = None):
+        self,
+        domain_participant: object,
+        topic_name: str,
+        pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType),
+        on_has_subscriber_changed_function: Optional[
+            Callable[[Publisher, bool], Any]
+        ] = None,
+        reliability_kind: Optional[Any] = None,
+    ):
         """Constructs a DDS Publisher
 
         :param domain_participant: A DDS Domain Participant wrapper object, as created by provizio_dds.make_domain_participant
@@ -165,24 +190,25 @@ class Publisher(_TopicHandle):
 
         qos_defaults = QosDefaults(pub_sub_type)
 
-        if (reliability_kind is None):
+        if reliability_kind is None:
             reliability_kind = qos_defaults.datawriter_reliability_kind
 
         # Create Publisher
         self._publisher_qos = PublisherQos()
         self._participant.get().get_default_publisher_qos(self._publisher_qos)
-        self._publisher = self._participant.get().create_publisher(
-            self._publisher_qos)
+        self._publisher = self._participant.get().create_publisher(self._publisher_qos)
 
         # Create DataWriter
         self._listener = Publisher._WriterListener(
-            self, on_has_subscriber_changed_function)
+            self, on_has_subscriber_changed_function
+        )
         self._writer_qos = DataWriterQos()
         self._publisher.get_default_datawriter_qos(self._writer_qos)
         self._writer_qos.reliability().kind = reliability_kind
         self._writer_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
         self._writer = self._publisher.create_datawriter(
-            self._topic, self._writer_qos, self._listener)
+            self._topic, self._writer_qos, self._listener
+        )
 
     def __del__(self):
         self._publisher.delete_datawriter(self._writer)
@@ -210,7 +236,9 @@ class Subscriber(_TopicHandle):
     """Provides subscription functionality for a DDS data type and topic name specified when constructing"""
 
     class _ReaderListener(DataReaderListener):
-        def __init__(self, data_type, on_data_function, on_has_publisher_changed_function):
+        def __init__(
+            self, data_type, on_data_function, on_has_publisher_changed_function
+        ):
             super().__init__()
             self._data_type = data_type
             self._on_data_function = on_data_function
@@ -225,27 +253,38 @@ class Subscriber(_TopicHandle):
             info = SampleInfo()
             data = self._data_type()
             reader.take_next_sample(data, info)
-            self._on_data_function(data)
+            try:
+                self._on_data_function(data)
+            except Exception as e:
+                traceback.print_exc()
+                raise e
 
         def on_subscription_matched(self, _, info):
-            if (self._on_has_publisher_changed_function):
-                if (info.current_count > 0 and info.current_count_change == info.current_count):
-                    # Just matched the first publisher
-                    self._on_has_publisher_changed_function(True)
-                elif (info.current_count == 0 and info.current_count_change < 0):
-                    # Just unmatched the last publisher
-                    self._on_has_publisher_changed_function(False)
+            try:
+                if self._on_has_publisher_changed_function:
+                    if (
+                        info.current_count > 0
+                        and info.current_count_change == info.current_count
+                    ):
+                        # Just matched the first publisher
+                        self._on_has_publisher_changed_function(True)
+                    elif info.current_count == 0 and info.current_count_change < 0:
+                        # Just unmatched the last publisher
+                        self._on_has_publisher_changed_function(False)
+            except Exception as e:
+                traceback.print_exc()
+                raise e
 
     def __init__(
-            self,
-            domain_participant: object,
-            topic_name: str,
-            pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType),
-            data_type: TypeVar("data_type"),
-            on_data_function: Callable[[object], Any],  # objectdata_type
-            on_has_publisher_changed_function: Optional[Callable[[
-                bool], Any]] = None,
-            reliability_kind: Optional[Any] = None):
+        self,
+        domain_participant: object,
+        topic_name: str,
+        pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType),
+        data_type: TypeVar("data_type"),
+        on_data_function: Callable[[object], Any],  # objectdata_type
+        on_has_publisher_changed_function: Optional[Callable[[bool], Any]] = None,
+        reliability_kind: Optional[Any] = None,
+    ):
         """Constructs a DDS Subscriber
 
         :param domain_participant: A DDS Domain Participant wrapper object, as created by provizio_dds.make_domain_participant
@@ -260,24 +299,27 @@ class Subscriber(_TopicHandle):
 
         qos_defaults = QosDefaults(pub_sub_type)
 
-        if (reliability_kind is None):
+        if reliability_kind is None:
             reliability_kind = qos_defaults.datareader_reliability_kind
 
         # Create Subscriber
         self._subscriber_qos = SubscriberQos()
         self._participant.get().get_default_subscriber_qos(self._subscriber_qos)
         self._subscriber = self._participant.get().create_subscriber(
-            self._subscriber_qos)
+            self._subscriber_qos
+        )
 
         # Create DataReader
         self._listener = Subscriber._ReaderListener(
-            data_type, on_data_function, on_has_publisher_changed_function)
+            data_type, on_data_function, on_has_publisher_changed_function
+        )
         self._reader_qos = DataReaderQos()
         self._subscriber.get_default_datareader_qos(self._reader_qos)
         self._reader_qos.reliability().kind = reliability_kind
         self._reader_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
         self._reader = self._subscriber.create_datareader(
-            self._topic, self._reader_qos, self._listener)
+            self._topic, self._reader_qos, self._listener
+        )
 
     def __del__(self):
         self._subscriber.delete_datareader(self._reader)

@@ -1,7 +1,7 @@
 set(TEST_PATH "${CMAKE_CURRENT_BINARY_DIR}")
 
-# Install numpy, copy tests and all dependencies to the same test directory
-add_custom_target(python_tests ALL "${PYTHON_EXECUTABLE}" -m pip install \"numpy>=1.16\")
+# Install dependencies, copy tests and all dependencies to the same test directory
+add_custom_target(python_tests ALL "${PYTHON_EXECUTABLE}" -m pip install \"numpy>=1.16\" \"transforms3d>=0.4.1\")
 file(GLOB TEST_SCRIPTS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
 foreach(FILE ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${TEST_SCRIPTS})
     add_custom_command(TARGET python_tests POST_BUILD
@@ -53,5 +53,10 @@ add_test(NAME python_subscriber_no_leaks_test
 
 add_test(NAME python_stop_subscriber_test
     COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_stop_subscriber_test.py"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+
+add_test(NAME accumulation_test
+    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./accumulation_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
