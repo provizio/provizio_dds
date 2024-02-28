@@ -213,7 +213,7 @@ class PointCloudsAccumulator:
     def accumulate(
         self,
         radar_position_id: str,
-        points: [[float]],
+        points: List[List[float]],
         ego_localization_when_received: RigidTransform,
         radar_extrinsics: RigidTransform = None,
     ):
@@ -221,7 +221,7 @@ class PointCloudsAccumulator:
 
         Args:
             radar_position_id (str): Radar position id the point cloud originates from, such as "provizio_radar_front_center".
-            points ([[float]]): A list of radar points to accumulate, each being a list of floats matching the format used in provizio_dds.point_cloud2.
+            points (List[List[float]]): A list of radar points to accumulate, each being a list of floats matching the format used in provizio_dds.point_cloud2.
             ego_localization_when_received (RigidTransform): RigidTransform representing the ego position and orientation in some local Euclidean reference frame, usually ENU (see https://en.wikipedia.org/wiki/Local_tangent_plane_coordinates).
             radar_extrinsics (RigidTransform, optional): When provided specifies the radar position and orientation relative to the ego coordinate frame. Defaults to None, which stands for keeping previous extrinsics of that radar if any, or radar frame = ego frame otherwise.
 
@@ -257,8 +257,11 @@ class PointCloudsAccumulator:
             if self.max_frames_without_filter <= 0:
                 points = list(filter(self.point_filter, points))
             elif len(buffer) >= self.max_frames_without_filter:
-                buffer[-self.max_frames_without_filter].points = filter(
-                    self.point_filter, buffer[-self.max_frames_without_filter].points
+                buffer[-self.max_frames_without_filter].points = list(
+                    filter(
+                        self.point_filter,
+                        buffer[-self.max_frames_without_filter].points,
+                    )
                 )
 
         buffer.append(
@@ -274,11 +277,11 @@ class PointCloudsAccumulator:
                 "allow_no_extrinsics is False so radar_extrinsics must be specified!"
             )
 
-    def get_points_local_frame_relative(self) -> [TransformedPoint]:
+    def get_points_local_frame_relative(self) -> List[TransformedPoint]:
         """Returns all currently accumulated points with positions relative to the same coordinate frame as localization uses (usually, local ENU).
 
         Returns:
-            [TransformedPoint]: A list of TransformedPoint.
+            List[TransformedPoint]: A list of TransformedPoint.
         """
         return_points = []
 
@@ -316,14 +319,14 @@ class PointCloudsAccumulator:
 
     def get_points_ego_relative(
         self, ego_localization_now: RigidTransform
-    ) -> [TransformedPoint]:
+    ) -> List[TransformedPoint]:
         """Returns all currently accumulated points with positions relative to ego_localization_now.
 
         Args:
             ego_localization_now (RigidTransform): A RigidTransform in the same coordinate frame as localization uses (usually, local ENU).
 
         Returns:
-            [TransformedPoint]: A list of TransformedPoint.
+            List[TransformedPoint]: A list of TransformedPoint.
         """
         return_points = self.get_points_local_frame_relative()
         to_ego_space_matrix = ego_localization_now.inversed_matrix()
@@ -517,21 +520,21 @@ class DDSPointCloudsAccumulator:
             if self._localization_subscriber is not None:
                 del self._localization_subscriber
 
-    def get_points_local_frame_relative(self) -> [TransformedPoint]:
+    def get_points_local_frame_relative(self) -> List[TransformedPoint]:
         """Returns all currently accumulated points with positions relative to the same coordinate frame as localization uses (usually, local ENU).
 
         Returns:
-            [TransformedPoint]: A list of TransformedPoint.
+            List[TransformedPoint]: A list of TransformedPoint.
         """
 
         with self._mutex:
             return self._accumulator.get_points_local_frame_relative()
 
-    def get_points_ego_relative(self) -> [TransformedPoint]:
+    def get_points_ego_relative(self) -> List[TransformedPoint]:
         """Returns all currently accumulated points with positions relative to the current ego position/orientation.
 
         Returns:
-            [TransformedPoint]: A list of TransformedPoint.
+            List[TransformedPoint]: A list of TransformedPoint.
         """
 
         with self._mutex:

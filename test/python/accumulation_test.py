@@ -18,6 +18,7 @@ import provizio_dds
 from math import radians, isclose, sqrt, pi, cos
 import time
 import threading
+from typing import List
 
 
 def test_accumulate_0_accumulated_point_clouds():
@@ -324,17 +325,17 @@ def test_accumulate_snr_and_velocity_filters():
                     allow_no_extrinsics=True,
                 )
 
-                expected_unfiltered_num_accumulated_points = 0
-                expected_filtered_num_accumulated_points = 0
+                expected_unfiltered_accumulated_points = []
+                expected_filtered_accumulated_points = []
                 points = []
                 for snr in snrs:
                     for velocity in velocities:
                         points.append([1, 2, 3, 4, snr, velocity])
 
                         if snr >= snr_threshold:
-                            expected_unfiltered_num_accumulated_points += 1
+                            expected_unfiltered_accumulated_points.append(points[-1])
                             if velocity >= velocity_threshold:
-                                expected_filtered_num_accumulated_points += 1
+                                expected_filtered_accumulated_points.append(points[-1])
 
                 # Empty yet
                 assert len(accumulator.get_points_local_frame_relative()) == 0
@@ -348,10 +349,21 @@ def test_accumulate_snr_and_velocity_filters():
 
                 if max_frames_without_filter > 0:
                     # Nothing is filtered yet
-                    assert (
-                        len(accumulator.get_points_local_frame_relative())
-                        == expected_unfiltered_num_accumulated_points
+                    points_local_frame_relative = (
+                        accumulator.get_points_local_frame_relative()
                     )
+                    assert len(points_local_frame_relative) == len(
+                        expected_unfiltered_accumulated_points
+                    )
+                    for i in range(len(points_local_frame_relative)):
+                        assert (
+                            points_local_frame_relative[i].ground_relative_velocity
+                            == expected_unfiltered_accumulated_points[i][5]
+                        )
+                        assert (
+                            points_local_frame_relative[i].snr
+                            == expected_unfiltered_accumulated_points[i][4]
+                        )
 
                 # Accumulate after, till the filter is applied
                 for accumulate_after in range(max_frames_without_filter):
@@ -362,10 +374,21 @@ def test_accumulate_snr_and_velocity_filters():
                     )
 
                 # Filter has been applied now
-                assert (
-                    len(accumulator.get_points_local_frame_relative())
-                    == expected_filtered_num_accumulated_points
+                points_local_frame_relative = (
+                    accumulator.get_points_local_frame_relative()
                 )
+                assert len(points_local_frame_relative) == len(
+                    expected_filtered_accumulated_points
+                )
+                for i in range(len(points_local_frame_relative)):
+                    assert (
+                        points_local_frame_relative[i].ground_relative_velocity
+                        == expected_filtered_accumulated_points[i][5]
+                    )
+                    assert (
+                        points_local_frame_relative[i].snr
+                        == expected_filtered_accumulated_points[i][4]
+                    )
 
 
 def test_accumulate_radar_filter():
@@ -926,7 +949,7 @@ def publish_nav_sat_fix(
 
 def publish_pc2(
     publisher,
-    points: [[float]],
+    points: List[List[float]],
     radar_id: str,
     timestamp_sec: int = 0,
     timestamp_nanosec: int = 0,
@@ -1758,7 +1781,9 @@ def test_accumulate_dds_on_pc2_callback():
         nonlocal num_accumulated
         with mutex:
             num_accumulated = len(accumulator.get_points_local_frame_relative())
-            print(f"test_accumulate_dds_on_pc2_callback on_point_cloud called, {num_accumulated} points were accumulated")
+            print(
+                f"test_accumulate_dds_on_pc2_callback on_point_cloud called, {num_accumulated} points were accumulated"
+            )
 
     dds_accumulator = provizio_dds.accumulation.DDSPointCloudsAccumulator(
         1,
