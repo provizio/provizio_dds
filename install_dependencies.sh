@@ -28,6 +28,7 @@ CC=${CC:-"gcc"}
 
 FAST_DDS_VERSION=${FAST_DDS_VERSION:-v2.11.2}
 FAST_CDR_VERSION=${FAST_CDR_VERSION:-v1.1.1}
+SWIG_VERSION=${SWIG_VERSION:-4.1.1}
 
 if [[ "${OSTYPE}" == "darwin"* ]]; then
   # macOS
@@ -60,8 +61,17 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
     brew install python3
     python3 -m pip install wheel setuptools
 
-    # Install SWIG
-    brew install swig
+    # Install SWIG and its dependencies
+    brew install pcre2 automake
+    (
+      cd /tmp
+      wget -c https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz -O - | tar -xz
+      cd swig-${SWIG_VERSION}
+      ./autogen.sh
+      ./configure
+      make -j8
+      make install
+    )
 
     # Make a virtual environment to avoid "error: externally-managed-environment"
     python3 -m venv /tmp/provizio_dds.venv
@@ -251,8 +261,8 @@ else
       (
         apt install -y --no-install-recommends wget libpcre2-dev
         cd /tmp
-        wget -c https://github.com/swig/swig/archive/refs/tags/v4.1.1.tar.gz -O - | tar -xz
-        cd swig-4.1.1
+        wget -c https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz -O - | tar -xz
+        cd swig-${SWIG_VERSION}
         ./autogen.sh
         ./configure
         make -j8
