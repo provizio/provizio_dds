@@ -259,7 +259,9 @@ else
     if [ "${UBUNTU_18}" = true ]; then
       if ! swig -version; then
       (
-        apt install -y --no-install-recommends wget libpcre2-dev
+        set -eu
+
+        apt install -y --no-install-recommends wget libpcre2-dev automake bison byacc
         cd /tmp
         wget -c https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz -O - | tar -xz
         cd swig-${SWIG_VERSION}
@@ -274,3 +276,5 @@ else
     fi
   fi
 fi
+
+echo "Done installing provizio_dds build dependencies!"
