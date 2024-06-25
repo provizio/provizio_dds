@@ -1,0 +1,11 @@
+Package: provizio-dds
+Version: 2024.06.25
+Section: provizio
+Priority: optional
+Architecture: arm64
+Tags: hardware::radar
+Pre-Depends: bash (>= 4.3), python3-numpy
+Depends: 
+Breaks:
+Maintainer: Provizio <support@provizio.ai>
+Description: Provizio DDS Python Library
