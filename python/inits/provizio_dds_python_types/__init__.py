@@ -23,4 +23,5 @@ if platform != "win32":
     ctypes.cdll.LoadLibrary(os.path.dirname(
         __file__) + "/libprovizio_dds_types." + extension)
 
+import fastdds
 from provizio_dds_python_types.provizio_dds_python_types import *

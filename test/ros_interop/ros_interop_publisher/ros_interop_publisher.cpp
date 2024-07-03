@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <iostream>
+#include <thread>
 
 #include "provizio/dds/publisher.h"
 

@@ -19,10 +19,10 @@ import provizio_dds
 
 # Create a PointCloud2
 print("Creating a PointCloud2...")
-points = [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
-          [1.0, 2.0, 3.0, 4.0, 5.0, float('nan')]]
+points = [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6], [1.0, 2.0, 3.0, 4.0, 5.0, float("nan")]]
 cloud = provizio_dds.point_cloud2.make_radar_point_cloud(
-    provizio_dds.point_cloud2.make_header(10, 20, "test_frame"), points)
+    provizio_dds.point_cloud2.make_header(10, 20, "test_frame"), points
+)
 
 # Check the cloud
 print("Checking the PointCloud2 metadata...")
@@ -48,19 +48,54 @@ assert cloud.fields()[5].name() == "ground_relative_radial_velocity"
 # Read it
 print("Reading the PointCloud2 and checking its data...")
 read_points = provizio_dds.point_cloud2.read_points_list(cloud)
-assert str(
-    read_points[0]) == "Point(x=0.1, y=0.2, z=0.3, radar_relative_radial_velocity=0.4, signal_to_noise_ratio=0.5, ground_relative_radial_velocity=0.6)", "Got:" + str(read_points[0])
-assert str(
-    read_points[1]) == "Point(x=1.0, y=2.0, z=3.0, radar_relative_radial_velocity=4.0, signal_to_noise_ratio=5.0, ground_relative_radial_velocity=nan)", "Got:" + str(read_points[1])
+assert (
+    str(read_points[0])
+    == "Point(x=0.1, y=0.2, z=0.3, radar_relative_radial_velocity=0.4, signal_to_noise_ratio=0.5, ground_relative_radial_velocity=0.6)"
+) or (
+    str(read_points[0])
+    == "Point(x=np.float32(0.1), y=np.float32(0.2), z=np.float32(0.3), radar_relative_radial_velocity=np.float32(0.4), signal_to_noise_ratio=np.float32(0.5), ground_relative_radial_velocity=np.float32(0.6))"
+), "Got:" + str(
+    read_points[0]
+)
+assert (
+    str(read_points[1])
+    == "Point(x=1.0, y=2.0, z=3.0, radar_relative_radial_velocity=4.0, signal_to_noise_ratio=5.0, ground_relative_radial_velocity=nan)"
+) or (
+    str(read_points[1])
+    == "Point(x=np.float32(1.0), y=np.float32(2.0), z=np.float32(3.0), radar_relative_radial_velocity=np.float32(4.0), signal_to_noise_ratio=np.float32(5.0), ground_relative_radial_velocity=np.float32(nan))"
+), "Got:" + str(
+    read_points[1]
+)
 
 print("Success reading PointCloud2 data")
 
 
 print("Creating a PointCloud2 embedding entities... ")
-entities = [[99, 4, 20.5, -2.0, 1.0, 10.2, 25.0, 0, 0, 0, 1, 2, 5, 2, 254, 254],
-            [100, 2, 10.0, 2.0, 1.0, -10.0, 0.0, 0, 0, 0, 1, float('nan'), float('nan'), float('nan'), 254, 12]]
+entities = [
+    [99, 4, 20.5, -2.0, 1.0, 10.2, 25.0, 0, 0, 0, 1, 2, 5, 2, 254, 254],
+    [
+        100,
+        2,
+        10.0,
+        2.0,
+        1.0,
+        -10.0,
+        0.0,
+        0,
+        0,
+        0,
+        1,
+        float("nan"),
+        float("nan"),
+        float("nan"),
+        254,
+        12,
+    ],
+]
 
-entities_cloud = provizio_dds.point_cloud2.make_radar_entities(provizio_dds.point_cloud2.make_header(10, 20, "test_entities"), entities)
+entities_cloud = provizio_dds.point_cloud2.make_radar_entities(
+    provizio_dds.point_cloud2.make_header(10, 20, "test_entities"), entities
+)
 
 # Check the entities cloud
 print("Checking the embedded entities in PointCloud2 metadata...")
@@ -80,6 +115,14 @@ assert entities_cloud.fields()[10].name() == "entity_class_confidence"
 print("Reading the PointCloud2 entities and checking its data...")
 
 read_entities = provizio_dds.point_cloud2.read_points(entities_cloud)
-assert str(read_entities[0]) == "(99, 4, 20.5, -2., 1., 10.2, 25., 0., 0., 0., 1., 2., 5., 2., 254, 254)", "Got:" + str(read_entities[0])
+assert (
+    str(read_entities[0])
+    == "(99, 4, 20.5, -2., 1., 10.2, 25., 0., 0., 0., 1., 2., 5., 2., 254, 254)"
+) or (
+    str(read_entities[0])
+    == "(99, 4, 20.5, -2.0, 1.0, 10.2, 25.0, 0.0, 0.0, 0.0, 1.0, 2.0, 5.0, 2.0, 254, 254)"
+), "Got:" + str(
+    read_entities[0]
+)
 
 print("Success")
