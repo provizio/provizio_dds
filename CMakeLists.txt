@@ -8,7 +8,7 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-# WARRANTIES OR CONDITIONS OF ANY KIND, either/  express or implied. See the
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under
 # the License.
 
@@ -18,7 +18,7 @@ include(ExternalProject)
 include(FetchContent)
 
 # Configuration
-set(PROVIZIO_DDS_IDLS_VERSION "feature/APT-5060-FastDDS-2-14" CACHE STRING "provizio_dds_idls version")
+set(PROVIZIO_DDS_IDLS_VERSION "master" CACHE STRING "provizio_dds_idls version")
 set(FAST_DDS_VERSION "v2.14.2" CACHE STRING "Fast-DDS version, when not already present in the system")
 set(LOOK_FOR_FAST_DDS TRUE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.1" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
