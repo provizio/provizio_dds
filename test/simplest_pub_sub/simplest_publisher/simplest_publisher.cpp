@@ -42,7 +42,8 @@ int main()
         std::this_thread::sleep_for(publish_period);
     }
 
-    std::cout << "simplest_publisher: Successfully published " << successful_times << " times" << std::endl;
+    std::cout << "simplest_publisher: Successfully published " << successful_times << " times out of " << publish_times
+              << " attempts" << std::endl;
 
     return successful_times > 0 ? 0 : 1;
 }
