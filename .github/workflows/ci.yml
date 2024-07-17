@@ -17,7 +17,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-latest]
+        runner: [ubuntu-latest, ubuntu-20.04, macos-latest]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -34,7 +34,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-latest]
+        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-13]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -53,7 +53,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-latest]
+        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-13]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}

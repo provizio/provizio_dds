@@ -28,7 +28,7 @@ source ${VENV}/bin/activate
 python3 -m pip install wheel setuptools
 python_version=$(python3 -c 'import sys; print("".join(map(str, sys.version_info[:2])))')
 if [[ "${python_version}" -lt "39" ]]; then
-    python3 -m pip install "Cython<3" "numpy"
+    python3 -m pip install "Cython<3" "numpy>=1.16"
 fi
 
 export CC=${CC:-"gcc"}

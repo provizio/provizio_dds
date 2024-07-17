@@ -19,10 +19,10 @@ include(FetchContent)
 
 # Configuration
 set(PROVIZIO_DDS_IDLS_VERSION "master" CACHE STRING "provizio_dds_idls version")
-set(FAST_DDS_VERSION "v2.11.2" CACHE STRING "Fast-DDS version, when not already present in the system")
+set(FAST_DDS_VERSION "v2.14.2" CACHE STRING "Fast-DDS version, when not already present in the system")
 set(LOOK_FOR_FAST_DDS TRUE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.1" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
-set(FAST_DDS_PYTHON_VERSION "1.2.1" CACHE STRING "Fast-DDS-python version, without v prefix")
+set(FAST_DDS_PYTHON_VERSION "1.3.2" CACHE STRING "Fast-DDS-python version, without v prefix")
 set(PROVIZIO_CODING_STANDARDS_VERSION "v24.02.07" CACHE STRING "Provizio Coding Standards version")
 set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, without v prefix")
 set(ENABLE_TESTS ON CACHE BOOL "Defines whether tests are built and enabled")
@@ -246,13 +246,28 @@ if(PYTHON_BINDINGS)
     FetchContent_Populate(fast_dds_python)
     set(FASTDDS_PYTHON_CMAKE_DIR "${fast_dds_python_SOURCE_DIR}/fastdds_python")
     set(FASTDDS_PYTHON_CMAKE_FILE "${FASTDDS_PYTHON_CMAKE_DIR}/CMakeLists.txt")
+    set(FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER "${CMAKE_CURRENT_BINARY_DIR}/FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER.h")
+    file(WRITE
+        "${FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER}"
+
+        "#include \"fastdds/rtps/attributes/ThreadSettings.hpp\"
+         using namespace eprosima::fastdds::rtps;"
+    )
     file(WRITE
         "${FASTDDS_PYTHON_CMAKE_FILE}"
 
         "project(fastdds_python VERSION ${FAST_DDS_PYTHON_VERSION})
         
         # Disable treating warnings as errors in Fast-DDS-python
-        add_compile_options(-Wno-error -Wno-unused-parameter)
+        add_compile_options(-Wno-error -Wno-unused-parameter -Wno-sign-compare -Wno-deprecated-declarations)
+
+        # Adds missing ThreadSettings definition
+        if(MSVC)
+            add_definitions(/FI\"${FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER}\")
+        else(MSVC)
+            # GCC or Clang
+            add_definitions(-include \"${FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER}\")
+        endif(MSVC)
         
         add_subdirectory(src/swig)
         "
@@ -318,19 +333,21 @@ if(PYTHON_BINDINGS)
         provizio_dds_types
         fastrtps
         fastcdr
+        fastdds_python
     )
 
     # Make sure Fast-DDS is built prior to SWIG code generation
     if(FAST_DDS_DEPENDENCIES)
         if(TARGET fastdds_python_swig_compilation)
             # Older versions of CMake
-            add_dependencies(fastdds_python_swig_compilation ${FAST_DDS_DEPENDENCIES})
-            add_dependencies(provizio_dds_python_types_swig_compilation ${FAST_DDS_DEPENDENCIES})
+            set(SWIG_COMPILATION_POSTFIX "_swig_compilation")
         else(TARGET fastdds_python_swig_compilation)
             # Newer versions of CMake
-            add_dependencies(fastdds_python ${FAST_DDS_DEPENDENCIES})
-            add_dependencies(provizio_dds_python_types ${FAST_DDS_DEPENDENCIES})
+            set(SWIG_COMPILATION_POSTFIX "")
         endif(TARGET fastdds_python_swig_compilation)
+
+        add_dependencies(fastdds_python${SWIG_COMPILATION_POSTFIX} ${FAST_DDS_DEPENDENCIES})
+        add_dependencies(provizio_dds_python_types${SWIG_COMPILATION_POSTFIX} ${FAST_DDS_DEPENDENCIES})
     endif(FAST_DDS_DEPENDENCIES)
 
     set(FASTDDS_PYTHON_LIBS
