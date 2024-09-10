@@ -23,22 +23,27 @@ int main()
 {
     const std::string topic_name{"provizio_dds_test_simplest_pub_sub_topic"};
     const std::string string{"provizio_dds_test"};
-    const std::chrono::milliseconds wait_time{200};
+    const std::chrono::milliseconds publish_period{200};
+    const std::chrono::milliseconds initial_wait_time{1000}; // Give enough time for subscriber to run
     const int publish_times = 15;
 
+    std::this_thread::sleep_for(initial_wait_time);
     auto publisher = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(
         provizio::dds::make_domain_participant(), topic_name);
 
     std_msgs::msg::String message;
     message.data(string);
     int successful_times = 0;
+
+    std::cout << "simplest_publisher: Publishing..." << std::endl;
     for (int i = 0; i < publish_times; ++i)
     {
         successful_times += publisher->publish(message) ? 1 : 0;
-        std::this_thread::sleep_for(wait_time);
+        std::this_thread::sleep_for(publish_period);
     }
 
-    std::cout << "simplest_publisher: Successfully published " << successful_times << " times" << std::endl;
+    std::cout << "simplest_publisher: Successfully published " << successful_times << " times out of " << publish_times
+              << " attempts" << std::endl;
 
     return successful_times > 0 ? 0 : 1;
 }

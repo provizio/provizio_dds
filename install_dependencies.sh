@@ -26,8 +26,9 @@ INSTALL_ROS=${3:-"OFF"}
 FAST_DDS_INSTALL=${4:-"OFF"}
 CC=${CC:-"gcc"}
 
-FAST_DDS_VERSION=${FAST_DDS_VERSION:-v2.11.2}
-FAST_CDR_VERSION=${FAST_CDR_VERSION:-v1.1.1}
+FAST_DDS_VERSION=${FAST_DDS_VERSION:-v2.14.2}
+FAST_CDR_VERSION=${FAST_CDR_VERSION:-v2.2.2}
+SWIG_VERSION=${SWIG_VERSION:-4.1.1}
 
 if [[ "${OSTYPE}" == "darwin"* ]]; then
   # macOS
@@ -58,9 +59,8 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
     brew install python3
-    python3 -m pip install wheel setuptools
 
-    # Install SWIG
+    # Install SWIG and its dependencies, if not yet installed
     brew install swig
 
     # Make a virtual environment to avoid "error: externally-managed-environment"
@@ -96,6 +96,9 @@ else
 
   # Install lsb-release for checking Ubuntu version and accessing https
   apt install -y --no-install-recommends lsb-release ca-certificates
+
+  # Install build-essential
+  apt install -y --no-install-recommends build-essential
 
   # Check if running in Ubuntu 18
   UBUNTU_18=false
@@ -137,7 +140,7 @@ else
   apt install -y --no-install-recommends make
 
   # Install CMake
-  if [ "${UBUNTU_18}" = true ]; then
+  if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_20}" = true ]; then
       apt install -y software-properties-common lsb-release wget
       wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null
       apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main"
@@ -249,10 +252,12 @@ else
     if [ "${UBUNTU_18}" = true ]; then
       if ! swig -version; then
       (
-        apt install -y --no-install-recommends wget libpcre2-dev
+        set -eu
+
+        apt install -y --no-install-recommends wget libpcre2-dev automake bison byacc
         cd /tmp
-        wget -c https://github.com/swig/swig/archive/refs/tags/v4.1.1.tar.gz -O - | tar -xz
-        cd swig-4.1.1
+        wget -c https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz -O - | tar -xz
+        cd swig-${SWIG_VERSION}
         ./autogen.sh
         ./configure
         make -j8
@@ -262,5 +267,14 @@ else
     else
       apt install -y --no-install-recommends swig
     fi
+
+    # Install specific Cython in older versions of Python (see https://github.com/numpy/numpy/issues/24377)
+    python_version=$(python3 -c 'import sys; print("".join(map(str, sys.version_info[:2])))')
+    if [[ "${python_version}" -lt "39" ]]; then
+        python3 -m pip install "Cython<3"
+        python3 -m pip install "numpy>=1.16"
+    fi
   fi
 fi
+
+echo "Done installing provizio_dds build dependencies!"

@@ -144,7 +144,7 @@ message.data("Hello World!")
 publisher.publish(message)
 ```
 
-For more details see [python/provizio_dds.py](python/provizio_dds.py).
+For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/python/python_publisher.py](test/python/python_publisher.py).
 
 ## Receiving Data
 
@@ -188,4 +188,33 @@ subscriber = provizio_dds.Subscriber(
 input("Press Enter to continue...") # Wait for any user input
 ```
 
-For more details see [python/provizio_dds.py](python/provizio_dds.py).
+For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/python/python_subscriber.py](test/python/python_subscriber.py).
+
+## Points Accumulation and Multi-Radar Fusion
+
+Point clouds accumulation keeps some of reflected points (normally ones from static objects) "visible" for a number of frames after they were originally received. It makes point clouds much denser and features of objects much clearer - similar to long exposure of dark scenes in photography. Usually, accumulation requires at least 2 types of inputs: point clouds and localization (both odometry and GNSS are supported). In case of static ego or single frame multi-radar fusion, accumulation can be used without odometry/localization inputs. When Provizio radar odometry is used it effectively turns into a SLAM (Simultaneous Localization and Mapping) solution, but external localization/odometry source is also supported.
+Accumulation is also used for fusion of point clouds from multiple radars in a vehicle. In this case sensors extrinsics calibration data is required.
+
+### Example of Point Clouds Accumulation
+
+![Point Clouds Accumulation](media/point_clouds_accumulation.png)
+
+### Python Example
+
+```Python
+import provizio_dds
+
+max_accumulate_frames_per_radar = 30
+# By default, relies on rt/provizio_radar_odometry as a localization data source and rt/provizio_extrinsics as sensors extrinsics data source
+points_accumulator = provizio_dds.accumulation.DDSPointCloudsAccumulator(max_accumulate_frames_per_radar)
+
+# Then some time later, when data was received
+print(f"Accumulated, relative to the local frame:")
+for point in points_accumulator.get_points_local_frame_relative():
+    print(f"x = {point.position[0]}, y = {point.position[1]}, z = {point.position[2]}, ground_relative_velocity = {point.ground_relative_velocity}, snr = {point.snr}")
+print(f"Accumulated, relative to the current ego position:")
+for point in points_accumulator.get_points_ego_relative():
+    print(f"x = {point.position[0]}, y = {point.position[1]}, z = {point.position[2]}, ground_relative_velocity = {point.ground_relative_velocity}, snr = {point.snr}")
+```
+
+For more details see [python/accumulation.py](python/accumulation.py) and [test/python/accumulation_test.py](test/python/accumulation_test.py).
