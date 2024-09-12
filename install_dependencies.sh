@@ -51,7 +51,7 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
   fi
 
   # Install CMake
-  brew install cmake
+  brew install cmake ninja
 
   # Install openssl
   brew install openssl
@@ -137,7 +137,7 @@ else
   fi
 
   # Install make
-  apt install -y --no-install-recommends make
+  apt install -y --no-install-recommends make ninja-build
 
   # Install CMake
   if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_20}" = true ]; then
@@ -190,7 +190,7 @@ else
       git clone https://github.com/eProsima/foonathan_memory_vendor.git
       mkdir foonathan_memory_vendor/build
       cd foonathan_memory_vendor/build
-      cmake .. -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
+      cmake .. -G Ninja -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
       cmake --build . --target install
 
       # Fast CDR
@@ -200,7 +200,7 @@ else
       git checkout ${FAST_CDR_VERSION}
       mkdir build
       cd build
-      cmake .. -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
+      cmake .. -G Ninja -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
       cmake --build . --target install
 
       # Fast DDS
@@ -210,7 +210,7 @@ else
       git checkout ${FAST_DDS_VERSION}
       mkdir build
       cd build
-      cmake ..  -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
+      cmake .. -G Ninja -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
       cmake --build . --target install
     )
   fi

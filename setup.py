@@ -14,6 +14,7 @@
 
 from setuptools import setup
 import os
+import os.path
 
 
 class CMakeBuildError(Exception):
@@ -29,13 +30,16 @@ install_dir = build_dir + "/install"
 target_dir = build_dir + "/packages"
 os.makedirs(build_dir, exist_ok=True)
 # TODO: Windows support
-if (
-    os.system(
-        f'cd "{build_dir}" && cmake "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" "{source_dir}" && cmake --build . --target install -- -j8'
-    )
-    != 0
-):
-    raise CMakeBuildError()
+if os.path.isfile(f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types.so"):
+    print(f"Already built in {build_dir}, only packaging...")
+else:
+    if (
+        os.system(
+            f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" "{source_dir}" && cmake --build . --target install -- -j8'
+        )
+        != 0
+    ):
+        raise CMakeBuildError()
 
 # Read README.md text
 with open(source_dir + "/README.md", "r") as readme_file:

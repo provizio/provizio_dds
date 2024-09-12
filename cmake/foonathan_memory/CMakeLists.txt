@@ -21,6 +21,7 @@ if(NOT foonathan_memory_FOUND)
     ExternalProject_Add(libfoonathan_memory
         GIT_REPOSITORY "https://github.com/${FOONATHAN_MEMORY_GITHUB_PROJECT}.git"
         GIT_TAG "${FOONATHAN_MEMORY_VENDOR_VERSION}"
+        UPDATE_COMMAND ""
         PREFIX "${FOONATHAN_MEMORY_PREFIX}"
         SOURCE_DIR "${FOONATHAN_MEMORY_SOURCE_DIR}"
         BINARY_DIR "${FOONATHAN_MEMORY_BINARY_DIR}"

@@ -40,5 +40,5 @@ fi
 mkdir -p ../../build
 cd ../../build
 
-cmake .. $@
+cmake .. -G Ninja $@
 cmake --build . -- -j 16
