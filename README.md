@@ -18,7 +18,7 @@ built-in data types.
 
 ## Build dependencies
 
-**Common:**
+**C++:**
 
 - Linux or macOS
 - CMake
@@ -29,13 +29,13 @@ built-in data types.
 
 **Python:**
 
-- All in **Common** list
+- Linux or macOS
+- Git
 - Python 3
 - Pip 3
-- SWIG 4+
-- libpython3-dev
-- setuptools
-- numpy>=1.16
+- unzip
+
+When using non-binary-prebuilt configurations (i.e. any macOS, Linux Debug, non-x64/non-aarch64, non-master provizio_dds_idls) all the C++ dependencies will also be required.
 
 There is a convenience Bash script to install all dependencies in *apt*-featuring Linux and macOS. In Linux it's to be executed with root privileges, f.e. using `sudo`.
 

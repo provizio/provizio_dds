@@ -100,6 +100,12 @@ else
   # Install build-essential
   apt install -y --no-install-recommends build-essential
 
+  # Install patchelf
+  apt install -y --no-install-recommends patchelf
+
+  # Install unzip
+  apt install -y --no-install-recommends unzip
+
   # Check if running in Ubuntu 18
   UBUNTU_18=false
   if lsb_release -a | grep -q 18; then

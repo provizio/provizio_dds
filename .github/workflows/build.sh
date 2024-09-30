@@ -19,7 +19,7 @@
 
 set -e
 
-cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
+cd "$(cd "$(dirname "$0")" && pwd -P)"
 
 source ./python_venv.sh
 
