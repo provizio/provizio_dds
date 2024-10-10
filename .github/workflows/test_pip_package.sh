@@ -16,7 +16,7 @@
 
 set -e
 
-cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
+cd "$(cd "$(dirname "$0")" && pwd -P)"
 
 # Make (or re-make) and activate a test Python virtual environment
 VENV=/tmp/provizio_dds_test_pip_package.venv

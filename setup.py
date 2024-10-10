@@ -15,6 +15,7 @@
 from setuptools import setup
 import os
 import os.path
+from sys import platform
 
 
 class CMakeBuildError(Exception):
@@ -31,15 +32,36 @@ target_dir = build_dir + "/packages"
 os.makedirs(build_dir, exist_ok=True)
 # TODO: Windows support
 if os.path.isfile(f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types.so"):
-    print(f"Already built in {build_dir}, only packaging...")
+    print(f"Already built in {build_dir}, only packaging...", flush=True)
 else:
-    if (
-        os.system(
-            f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" "{source_dir}" && cmake --build . --target install -- -j8'
+    needs_building = True
+
+    # Check if there is a prebuilt cache for our configuration
+    if platform == "linux":
+        bin_cache_config_name = (
+            os.popen(source_dir + "/bin_cache_config_name.sh").read().strip()
         )
-        != 0
-    ):
-        raise CMakeBuildError()
+        cache_zip = source_dir + "/cache/" + bin_cache_config_name + ".zip"
+        if os.path.isfile(cache_zip):
+            if (
+                os.system(
+                    f'unzip -q "{cache_zip}" -d "{build_dir}" && mv -f "{build_dir}/{bin_cache_config_name}/python" "{target_dir}" && cp -f "{target_dir}/version.txt" "{build_dir}/"'
+                )
+                != 0
+            ):
+                raise Exception("Failed to extract/move bin cache!")
+            print(f"Bin cache located and will be used: {bin_cache_config_name}")
+            needs_building = False
+
+    if needs_building:
+        print("Building C++ libraries from source...", flush=True)
+        if (
+            os.system(
+                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" "{source_dir}" && cmake --build . --target install -- -j8'
+            )
+            != 0
+        ):
+            raise CMakeBuildError()
 
 # Read README.md text
 with open(source_dir + "/README.md", "r") as readme_file:
@@ -70,5 +92,5 @@ setup(
         "provizio_dds_python_types": f"{target_dir}/provizio_dds_python_types",
         "provizio_dds": f"{target_dir}/provizio_dds",
     },
-    package_data={"": ["*.so", "*.dll", "*.dylib"]},
+    package_data={"": ["*.so*", "*.dll", "*.dylib"]},
 )

@@ -19,7 +19,7 @@ set -e
 # List of all excluded files
 EXCLUDED=("./python/gps_utils.py")
 
-cd $(cd -P -- "$(dirname -- "$0")" && pwd -P)
+cd "$(cd "$(dirname "$0")" && pwd -P)"
 cd ../..
 
 # Use as check_license_header file_to_check comment_mark
