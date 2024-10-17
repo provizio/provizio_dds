@@ -26,6 +26,12 @@ STATIC_ANALYSIS=${3:-"OFF"}
 
 cd "$(cd "$(dirname "$0")" && pwd -P)"
 
+# In aarch64, make sure libstdc++.so.6.0.28 is used, to be compatible with both Orin and TX2
+if [[ "$(uname -i)" == "aarch64" && "$(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6)" != "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28" ]]; then
+  echo "/usr/lib/aarch64-linux-gnu/libstdc++.so.6 is $(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6) while /usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28 is required for compatibility!"
+  exit 1
+fi
+
 source ./python_venv.sh
 
 cd ../..
