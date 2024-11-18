@@ -52,10 +52,14 @@
 
 import array
 from collections import namedtuple
+import ctypes
 import sys
 from typing import Iterable, List, NamedTuple, Optional, Sequence
 import numpy as np
-from numpy.lib.recfunctions import structured_to_unstructured, unstructured_to_structured
+from numpy.lib.recfunctions import (
+    structured_to_unstructured,
+    unstructured_to_structured,
+)
 from provizio_dds_python_types import *
 
 
@@ -80,15 +84,16 @@ _DATATYPES_SIZES[FLOAT32] = 4
 _DATATYPES_SIZES[FLOAT64] = 8
 
 
-DUMMY_FIELD_PREFIX = 'unnamed_field'
+DUMMY_FIELD_PREFIX = "unnamed_field"
 
 
 def read_points(
-        cloud: PointCloud2,
-        field_names: Optional[List[str]] = None,
-        skip_nans: bool = False,
-        uvs: Optional[Iterable] = None,
-        reshape_organized_cloud: bool = False) -> np.ndarray:
+    cloud: PointCloud2,
+    field_names: Optional[List[str]] = None,
+    skip_nans: bool = False,
+    uvs: Optional[Iterable] = None,
+    reshape_organized_cloud: bool = False,
+) -> np.ndarray:
     """
     Read points from a provizio_dds.PointCloud2 message.
 
@@ -102,24 +107,29 @@ def read_points(
     :param reshape_organized_cloud: Returns the array as an 2D organized point cloud if set.
     :return: Structured NumPy array containing all points.
     """
-    assert isinstance(cloud, PointCloud2), \
-        'Cloud is not a provizio_dds.PointCloud2'
+    assert isinstance(cloud, PointCloud2), "Cloud is not a provizio_dds.PointCloud2"
 
     # Cast bytes to numpy array
     points = np.ndarray(
-        shape=(cloud.width() * cloud.height(), ),
+        shape=(cloud.width() * cloud.height(),),
         dtype=dtype_from_fields(cloud.fields(), point_step=cloud.point_step()),
-        buffer=bytearray(cloud.data()))
+        buffer=bytearray(
+            ctypes.cast(int(cloud.data().get_buffer()), ctypes.POINTER(ctypes.c_uint8))[
+                : cloud.data().size()
+            ]
+        ),
+    )
 
     # Keep only the requested fields
     if field_names is not None:
-        assert all(field_name in points.dtype.names for field_name in field_names), \
-            'Requests field is not in the fields of the PointCloud!'
+        assert all(
+            field_name in points.dtype.names for field_name in field_names
+        ), "Requests field is not in the fields of the PointCloud!"
         # Mask fields
         points = points[list(field_names)]
 
     # Swap array if byte order does not match
-    if bool(sys.byteorder != 'little') != bool(cloud.is_bigendian()):
+    if bool(sys.byteorder != "little") != bool(cloud.is_bigendian()):
         points = points.byteswap(inplace=True)
 
     # Check if we want to drop points with nan values
@@ -128,8 +138,7 @@ def read_points(
         not_nan_mask = np.ones(len(points), dtype=bool)
         for field_name in points.dtype.names:
             # Only keep points without any non values in the mask
-            not_nan_mask = np.logical_and(
-                not_nan_mask, ~np.isnan(points[field_name]))
+            not_nan_mask = np.logical_and(not_nan_mask, ~np.isnan(points[field_name]))
         # Select these points
         points = points[not_nan_mask]
 
@@ -149,11 +158,12 @@ def read_points(
 
 
 def read_points_numpy(
-        cloud: PointCloud2,
-        field_names: Optional[List[str]] = None,
-        skip_nans: bool = False,
-        uvs: Optional[Iterable] = None,
-        reshape_organized_cloud: bool = False) -> np.ndarray:
+    cloud: PointCloud2,
+    field_names: Optional[List[str]] = None,
+    skip_nans: bool = False,
+    uvs: Optional[Iterable] = None,
+    reshape_organized_cloud: bool = False,
+) -> np.ndarray:
     """
     Read equally typed fields from provizio_dds.PointCloud2 message as a unstructured numpy array.
 
@@ -172,18 +182,21 @@ def read_points_numpy(
     :param reshape_organized_cloud: Returns the array as an 2D organized point cloud if set.
     :return: Numpy array containing all points.
     """
-    assert all(cloud.fields()[0].datatype() == field.datatype() for field in cloud.fields()[1:]), \
-        'All fields need to have the same datatype. Use `read_points()` otherwise.'
+    assert all(
+        cloud.fields()[0].datatype() == field.datatype() for field in cloud.fields()[1:]
+    ), "All fields need to have the same datatype. Use `read_points()` otherwise."
     structured_numpy_array = read_points(
-        cloud, field_names, skip_nans, uvs, reshape_organized_cloud)
+        cloud, field_names, skip_nans, uvs, reshape_organized_cloud
+    )
     return structured_to_unstructured(structured_numpy_array)
 
 
 def read_points_list(
-        cloud: PointCloud2,
-        field_names: Optional[List[str]] = None,
-        skip_nans: bool = False,
-        uvs: Optional[Iterable] = None) -> List[NamedTuple]:
+    cloud: PointCloud2,
+    field_names: Optional[List[str]] = None,
+    skip_nans: bool = False,
+    uvs: Optional[Iterable] = None,
+) -> List[NamedTuple]:
     """
     Read points from a provizio_dds.PointCloud2 message.
 
@@ -199,17 +212,15 @@ def read_points_list(
                 coordinates. (Type: Iterable, Default: None]
     :return: List of namedtuples containing the values for each point
     """
-    assert isinstance(cloud, PointCloud2), \
-        'cloud is not a provizio_dds.PointCloud2'
+    assert isinstance(cloud, PointCloud2), "cloud is not a provizio_dds.PointCloud2"
 
     if field_names is None:
         fields = cloud.fields()
         field_names = [fields[i].name() for i in range(len(fields))]
 
-    Point = namedtuple('Point', field_names)
+    Point = namedtuple("Point", field_names)
 
-    return [Point._make(p) for p in read_points(cloud, field_names,
-                                                skip_nans, uvs)]
+    return [Point._make(p) for p in read_points(cloud, field_names, skip_nans, uvs)]
 
 
 def dtype_from_fields(fields: Sequence, point_step: Optional[int] = None) -> np.dtype:
@@ -229,8 +240,8 @@ def dtype_from_fields(fields: Sequence, point_step: Optional[int] = None) -> np.
         # Datatype as numpy datatype
         datatype = _DATATYPES[fields[i].datatype()]
         # Name field
-        if fields[i].name == '':
-            name = f'{DUMMY_FIELD_PREFIX}_{i}'
+        if fields[i].name == "":
+            name = f"{DUMMY_FIELD_PREFIX}_{i}"
         else:
             name = fields[i].name()
         # Handle fields with count > 1 by creating subfields with a suffix consiting
@@ -240,32 +251,33 @@ def dtype_from_fields(fields: Sequence, point_step: Optional[int] = None) -> np.
         for a in range(field_count):
             # Add suffix if we have multiple subfields
             if field_count > 1:
-                subfield_name = f'{name}_{a}'
+                subfield_name = f"{name}_{a}"
             else:
                 subfield_name = name
-            assert subfield_name not in field_names, 'Duplicate field names are not allowed!'
+            assert (
+                subfield_name not in field_names
+            ), "Duplicate field names are not allowed!"
             field_names.append(subfield_name)
             # Create new offset that includes subfields
-            field_offsets.append(fields[i].offset() + a *
-                                 _DATATYPES_SIZES[fields[i].datatype()])
+            field_offsets.append(
+                fields[i].offset() + a * _DATATYPES_SIZES[fields[i].datatype()]
+            )
             field_datatypes.append(datatype.str)
 
     # Create dtype
     dtype_dict = {
-        'names': field_names,
-        'formats': field_datatypes,
-        'offsets': field_offsets
+        "names": field_names,
+        "formats": field_datatypes,
+        "offsets": field_offsets,
     }
     if point_step is not None:
-        dtype_dict['itemsize'] = point_step
+        dtype_dict["itemsize"] = point_step
     return np.dtype(dtype_dict)
 
 
 def create_cloud(
-        header: Header,
-        fields: Sequence,
-        points: Iterable,
-        is_dense: bool = True) -> PointCloud2:
+    header: Header, fields: Sequence, points: Iterable, is_dense: bool = True
+) -> PointCloud2:
     """
     Create a provizio_dds.PointCloud2 message.
 
@@ -282,28 +294,30 @@ def create_cloud(
     if isinstance(points, np.ndarray):
         # Check if this is an unstructured array
         if points.dtype.names is None:
-            assert all(fields[0].datatype == field.datatype for field in fields[1:]), \
-                'All fields need to have the same datatype. Pass a structured NumPy array \
-                    with multiple dtypes otherwise.'
+            assert all(
+                fields[0].datatype == field.datatype for field in fields[1:]
+            ), "All fields need to have the same datatype. Pass a structured NumPy array \
+                    with multiple dtypes otherwise."
             # Convert unstructured to structured array
-            points = unstructured_to_structured(
-                points,
-                dtype=dtype_from_fields(fields))
+            points = unstructured_to_structured(points, dtype=dtype_from_fields(fields))
         else:
-            assert points.dtype == dtype_from_fields(fields), \
-                'PointFields and structured NumPy array dtype do not match for all fields! \
-                    Check their field order, names and types.'
+            assert points.dtype == dtype_from_fields(
+                fields
+            ), "PointFields and structured NumPy array dtype do not match for all fields! \
+                    Check their field order, names and types."
     else:
         # Cast python objects to structured NumPy array (slow)
         points = np.array(
             # Points need to be tuples in the structured array
             list(map(tuple, points)),
-            dtype=dtype_from_fields(fields))
+            dtype=dtype_from_fields(fields),
+        )
 
     # Handle organized clouds
-    assert len(points.shape) <= 2, \
-        'Too many dimensions for organized cloud! \
-            Points can only be organized in max. two dimensional space'
+    assert (
+        len(points.shape) <= 2
+    ), "Too many dimensions for organized cloud! \
+            Points can only be organized in max. two dimensional space"
     height = 1
     width = points.shape[0]
     # Check if input points are an organized cloud (2D array of points)
@@ -312,8 +326,8 @@ def create_cloud(
 
     # Convert numpy points to array.array
     memory_view = memoryview(points)
-    casted = memory_view.cast('B')
-    array_array = array.array('B')
+    casted = memory_view.cast("B")
+    array_array = array.array("B")
     array_array.frombytes(casted)
 
     # Put everything together
@@ -322,7 +336,7 @@ def create_cloud(
     cloud.height(height)
     cloud.width(width)
     cloud.is_dense(is_dense)
-    cloud.is_bigendian(sys.byteorder != 'little')
+    cloud.is_bigendian(sys.byteorder != "little")
     cloud.fields(fields)
     cloud.point_step(points.dtype.itemsize)
     cloud.row_step(points.dtype.itemsize * width)
@@ -331,7 +345,9 @@ def create_cloud(
     return cloud
 
 
-def make_radar_point_cloud(header: Header, points: Iterable, is_dense: bool = True) -> PointCloud2:
+def make_radar_point_cloud(
+    header: Header, points: Iterable, is_dense: bool = True
+) -> PointCloud2:
     """
     Create a provizio_dds.PointCloud2 message with
     (x, y, z, radar_relative_radial_velocity, signal_to_noise_ratio, ground_relative_radial_velocity) fields.
@@ -357,9 +373,7 @@ def make_radar_point_cloud(header: Header, points: Iterable, is_dense: bool = Tr
     return create_cloud(header, fields, points, is_dense)
 
 
-def make_radar_entities(
-    header: Header, entities: Iterable
-) -> PointCloud2:
+def make_radar_entities(header: Header, entities: Iterable) -> PointCloud2:
     """
     Create a PointCloud2 containing entities
     (entity_id, entity_class, x, y, z, radar_relative_radial_velocity, ground_relative_radial_velocity, orientation, size, entity_confidence, entity_class_confidence) fields.

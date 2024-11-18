@@ -5,6 +5,45 @@ on:
   pull_request:
 
 jobs:
+  build-cache:
+    name: Build bin cache for build speed-up
+    runs-on: ${{matrix.runner}}
+    strategy:
+        matrix:
+            runner: [ubuntu-20.04, linux_arm]
+            build_type: [Release]
+        fail-fast: true
+    env:
+      CC: gcc
+      STATIC_ANALYSIS: OFF
+      WITH_PYTHON: ON
+    steps:
+      - uses: actions/checkout@v3
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${WITH_PYTHON}" "${STATIC_ANALYSIS}"
+      - run: .github/workflows/build_cache.sh "${{matrix.build_type}}" "${WITH_PYTHON}" "${STATIC_ANALYSIS}"
+      - run: echo "cache_artifact_name=$(./bin_cache_config_name.sh "${{matrix.build_type}}")" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{env.cache_artifact_name}}
+          path: cache/${{env.cache_artifact_name}}.zip
+          if-no-files-found: error
+          retention-days: 1
+  
+  commit-cache:
+    name: Commit bin cache
+    needs: build-cache
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: rm -rf cache/*.zip
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: cache/
+      - uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: Bin cache for common configurations
+
   check-license-headers:
     name: Check license headers
     runs-on: ubuntu-latest
@@ -45,7 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
 
   test-nix-pip-package:
@@ -76,10 +115,11 @@ jobs:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: OFF
+      IGNORE_BIN_CACHE: TRUE
     steps:
       - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}" /usr/
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS="${ENABLE_ROS_TESTS}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS="${ENABLE_ROS_TESTS}"
       - run: .github/workflows/test.sh
 
   test-nix-pip-package-preinstalled-fastdds:
@@ -92,6 +132,7 @@ jobs:
     env:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
+      IGNORE_BIN_CACHE: TRUE
     steps:
       - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" OFF /usr/
@@ -112,7 +153,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}"
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
 
   # Memory and thread sanitiser are not tested due to known issues of both types inside Fast-DDS. May be added in the future when eProsima fixes the issues.
