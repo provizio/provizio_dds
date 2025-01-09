@@ -49,7 +49,8 @@ else(VERSION STREQUAL "")
     string(REPLACE ".0" "." PROVIZIO_DDS_VERSION "${PROVIZIO_DDS_VERSION}")
 endif(VERSION STREQUAL "")
 
-message("Version: ${PROVIZIO_DDS_VERSION}")
+message("DDS version: ${VERSION}")
+message("DDS IDLs version: ${PROVIZIO_DDS_IDLS_VERSION}")
 
 # Project
 project(provizio_dds VERSION ${PROVIZIO_DDS_VERSION})
