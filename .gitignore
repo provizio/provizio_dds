@@ -4,3 +4,4 @@ Testing/
 .clang-format
 .clang-tidy
 *.egg-info/
+CMakeUserPresets.json
