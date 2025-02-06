@@ -136,14 +136,19 @@ read_points = provizio_dds.point_cloud2.read_points_list(
 )
 assert (len(read_points) == 1)
 assert (
-    str(read_points[0])
-    == "Entity(camera_entity_id=1, entity_class=2, x=3., y=4., z=5., camera_bbox_0=6., camera_bbox_1=7., camera_bbox_2=8., camera_bbox_3=9., entity_confidence=10, entity_class_confidence=11)"
-) or (
-    str(read_points[0])
-    == "Entity(camera_entity_id=1, entity_class=2, x=3.0, y=4.0, z=5.0, camera_bbox_0=6.0, camera_bbox_1=7.0, camera_bbox_2=8.0, camera_bbox_3=9.0, entity_confidence=10, entity_class_confidence=11)"
-), "Got:" + str(
-    read_points[0]
-)
+    (
+        str(read_points[0])
+        == "Entity(camera_entity_id=1, entity_class=2, x=3., y=4., z=5., camera_bbox_0=6., camera_bbox_1=7., camera_bbox_2=8., camera_bbox_3=9., entity_confidence=10, entity_class_confidence=11)"
+    )
+    or (
+        str(read_points[0])
+        == "Entity(camera_entity_id=1, entity_class=2, x=3.0, y=4.0, z=5.0, camera_bbox_0=6.0, camera_bbox_1=7.0, camera_bbox_2=8.0, camera_bbox_3=9.0, entity_confidence=10, entity_class_confidence=11)"
+    )
+    or (
+        str(read_points[0])
+        == "Entity(camera_entity_id=np.uint32(1), entity_class=np.uint8(2), x=np.float32(3.0), y=np.float32(4.0), z=np.float32(5.0), camera_bbox_0=np.float32(6.0), camera_bbox_1=np.float32(7.0), camera_bbox_2=np.float32(8.0), camera_bbox_3=np.float32(9.0), entity_confidence=np.uint8(10), entity_class_confidence=np.uint8(11))"
+    )
+), "Got:" + str(read_points[0])
 
 
 print("Success")
