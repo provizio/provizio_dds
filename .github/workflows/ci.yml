@@ -32,7 +32,7 @@ jobs:
   commit-cache:
     name: Commit bin cache
     needs: build-cache
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v3
       - run: rm -rf cache/*.zip
@@ -46,7 +46,7 @@ jobs:
 
   check-license-headers:
     name: Check license headers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v3
       - run: .github/workflows/check_license_headers.sh
@@ -56,7 +56,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04, macos-latest]
+        runner: [ubuntu-22.04, ubuntu-20.04, macos-latest]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -73,7 +73,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-13]
+        runner: [ubuntu-22.04, ubuntu-20.04, linux_arm, macos-13]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -92,7 +92,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-13]
+        runner: [ubuntu-22.04, ubuntu-20.04, linux_arm, macos-13]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}
@@ -107,7 +107,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04]
+        runner: [ubuntu-22.04, ubuntu-20.04]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -127,7 +127,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04]
+        runner: [ubuntu-22.04, ubuntu-20.04]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}
@@ -140,7 +140,7 @@ jobs:
 
   test-ros2-compatibility:
     name: Test compatibility with ROS2
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         build_type: [Debug, Release]
