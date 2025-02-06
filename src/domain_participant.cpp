@@ -14,9 +14,14 @@
 
 #include "provizio/dds/domain_participant.h"
 
-#include <fastdds/dds/domain/DomainParticipantFactory.hpp>
+#include <cstdint>
+#include <memory>
 
-namespace provizio
+#include <fastdds/dds/domain/DomainParticipantFactory.hpp>
+#include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
+#include <fastrtps/types/TypesBase.h>
+
+namespace provizio // NOLINT: nesting namespace old-school way to support C++14
 {
     namespace dds
     {
