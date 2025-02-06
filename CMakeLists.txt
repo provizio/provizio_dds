@@ -23,7 +23,7 @@ set(FAST_DDS_VERSION "v2.14.2" CACHE STRING "Fast-DDS version, when not already 
 set(LOOK_FOR_FAST_DDS TRUE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.1" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
 set(FAST_DDS_PYTHON_VERSION "1.3.2" CACHE STRING "Fast-DDS-python version, without v prefix")
-set(PROVIZIO_CODING_STANDARDS_VERSION "v24.02.07" CACHE STRING "Provizio Coding Standards version")
+set(PROVIZIO_CODING_STANDARDS_VERSION "v2025.02.04" CACHE STRING "Provizio Coding Standards version")
 set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, without v prefix")
 set(ENABLE_TESTS OFF CACHE BOOL "Defines whether tests are built and enabled")
 set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be generated")
