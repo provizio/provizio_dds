@@ -120,6 +120,13 @@ else
     UBUNTU_20=true
   fi
 
+  # Check if running in Ubuntu 22
+  UBUNTU_22=false
+  if lsb_release -a | grep -q 22; then
+    echo "Running in Ubuntu 22 detected..."
+    UBUNTU_22=true
+  fi
+
   # Install GCC/clang
   if [[ "${CC}" == "gcc" ]]; then
     if [ "${UBUNTU_18}" = true ]; then
@@ -228,9 +235,11 @@ else
       if [ "${UBUNTU_18}" = true ]; then
         ROS2_VERSION="eloquent"
       elif [ "${UBUNTU_20}" = true ]; then
-        ROS2_VERSION="foxy"
-      else
+        ROS2_VERSION="galactic"
+      elif [ "${UBUNTU_22}" = true ]; then
         ROS2_VERSION="humble"
+      else
+        ROS2_VERSION="jazzy"
       fi
     fi
 
