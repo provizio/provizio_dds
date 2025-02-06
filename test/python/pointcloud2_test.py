@@ -125,4 +125,25 @@ assert (
     read_entities[0]
 )
 
+# read_points_list with arrays of values
+print("Reading the PointCloud2 and checking its data...")
+camera_entities = [[1, 2, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10, 11]]
+read_points = provizio_dds.point_cloud2.read_points_list(
+    provizio_dds.point_cloud2.make_camera_entities(
+        provizio_dds.point_cloud2.make_header(10, 20, "test_entities"), camera_entities
+    ),
+    tuple_name="Entity",
+)
+assert (len(read_points) == 1)
+assert (
+    str(read_points[0])
+    == "Entity(camera_entity_id=1, entity_class=2, x=3., y=4., z=5., camera_bbox_0=6., camera_bbox_1=7., camera_bbox_2=8., camera_bbox_3=9., entity_confidence=10, entity_class_confidence=11)"
+) or (
+    str(read_points[0])
+    == "Entity(camera_entity_id=1, entity_class=2, x=3.0, y=4.0, z=5.0, camera_bbox_0=6.0, camera_bbox_1=7.0, camera_bbox_2=8.0, camera_bbox_3=9.0, entity_confidence=10, entity_class_confidence=11)"
+), "Got:" + str(
+    read_points[0]
+)
+
+
 print("Success")
