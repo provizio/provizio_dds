@@ -144,17 +144,17 @@ jobs:
     strategy:
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
-        build_type: [Debug, Release]
+        build_type: [Release, Debug]
         cc: [gcc, clang]
-        with_python: [OFF, ON]
     env:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: ON
+      PYTHON_BINDINGS: OFF # ROS2-sourced Python crashes in Ubuntu22.04
     steps:
       - uses: actions/checkout@v3
-      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}"
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${PYTHON_BINDINGS}" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${PYTHON_BINDINGS}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
 
   # Memory and thread sanitiser are not tested due to known issues of both types inside Fast-DDS. May be added in the future when eProsima fixes the issues.
