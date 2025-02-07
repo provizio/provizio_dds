@@ -23,8 +23,8 @@ int main()
 {
     const std::string topic_name{"rt/chatter"};
     const std::string value{"provizio_test_ros_interop_publisher_says_hi"};
-    const std::chrono::milliseconds wait_time{200};
-    const int publish_times = 40;
+    const std::chrono::milliseconds wait_time{100};
+    const int publish_times = 50;
 
     auto publisher = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(
         provizio::dds::make_domain_participant(), topic_name);
