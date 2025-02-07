@@ -28,7 +28,7 @@ CC=${CC:-"gcc"}
 
 FAST_DDS_VERSION=${FAST_DDS_VERSION:-v2.14.2}
 FAST_CDR_VERSION=${FAST_CDR_VERSION:-v2.2.2}
-SWIG_VERSION=${SWIG_VERSION:-4.1.1}
+SWIG_VERSION=${SWIG_VERSION:-4.2.1}
 
 if [[ "${OSTYPE}" == "darwin"* ]]; then
   # macOS
@@ -125,6 +125,13 @@ else
   if lsb_release -a | grep -q 22; then
     echo "Running in Ubuntu 22 detected..."
     UBUNTU_22=true
+  fi
+
+  # Check if running in Ubuntu 24
+  UBUNTU_24=false
+  if lsb_release -a | grep -q 24; then
+    echo "Running in Ubuntu 24 detected..."
+    UBUNTU_24=true
   fi
 
   # Install GCC/clang
@@ -263,8 +270,10 @@ else
     apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev
     python3 -m pip install setuptools
 
-    # Install SWIG
-    if [ "${UBUNTU_18}" = true ]; then
+    # Install SWIG (ubuntu 18 has too old swig in apt, ubuntu 24 has a broken version of swig in apt, see https://github.com/swig/swig/issues/2794)
+    if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_24}" = true ]; then
+      echo "Installing SWIG v${SWIG_VERSION} from source..."
+      apt remove -y swig # But first, make sure to delete any version that may already be installed
       if ! swig -version; then
       (
         set -eu
@@ -280,6 +289,7 @@ else
       )
       fi
     else
+      echo "Installing SWIG from apt..."
       apt install -y --no-install-recommends swig
     fi
 
