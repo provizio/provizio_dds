@@ -196,6 +196,7 @@ def read_points_list(
     field_names: Optional[List[str]] = None,
     skip_nans: bool = False,
     uvs: Optional[Iterable] = None,
+    tuple_name: str = "Point",
 ) -> List[NamedTuple]:
     """
     Read points from a provizio_dds.PointCloud2 message.
@@ -215,10 +216,11 @@ def read_points_list(
     assert isinstance(cloud, PointCloud2), "cloud is not a provizio_dds.PointCloud2"
 
     if field_names is None:
-        fields = cloud.fields()
-        field_names = [fields[i].name() for i in range(len(fields))]
+        field_names = dtype_from_fields(
+            cloud.fields(), point_step=cloud.point_step()
+        ).names
 
-    Point = namedtuple("Point", field_names)
+    Point = namedtuple(tuple_name, field_names)
 
     return [Point._make(p) for p in read_points(cloud, field_names, skip_nans, uvs)]
 
@@ -373,107 +375,195 @@ def make_radar_point_cloud(
     return create_cloud(header, fields, points, is_dense)
 
 
-def make_radar_entities(header: Header, entities: Iterable) -> PointCloud2:
+def make_entities(
+    header: Header, has_radar_data: Bool, has_camera_data: Bool, entities: Iterable
+) -> PointCloud2:
     """
-    Create a PointCloud2 containing entities
-    (entity_id, entity_class, x, y, z, radar_relative_radial_velocity, ground_relative_radial_velocity, orientation, size, entity_confidence, entity_class_confidence) fields.
+    Create a PointCloud2 containing entities (radar, camera or fused).
 
     :param header: The point cloud header. (Type: Header)
-    :param entities: The point cloud entities. (Type: Iterable)
+    :param entities: The entities. List of iterables, i.e. one iterable
+                   for entity, with the elements of each iterable being the
+                   values of the fields for that entity.
     :return: The point cloud containing entities as PointCloud2.
     """
-    fields = [None] * 11
+    num_fields = 6
+    if has_radar_data:
+        num_fields += 5
+    if has_camera_data:
+        num_fields += 2
+
+    fields = [None] * num_fields
+    index = 0
     offset = 0
 
     # entity_id
-    fields[0] = PointField()
-    fields[0].offset(offset)
-    fields[0].count(1)
-    fields[0].datatype(UINT32)
-    fields[0].name("entity_id")
-    offset += 4
+    if has_radar_data:
+        fields[index] = PointField()
+        fields[index].offset(offset)
+        fields[index].count(1)
+        fields[index].datatype(UINT32)
+        fields[index].name("entity_id")
+        index += 1
+        offset += 4
+
+    # camera_entity_id
+    if has_camera_data:
+        fields[index] = PointField()
+        fields[index].offset(offset)
+        fields[index].count(1)
+        fields[index].datatype(UINT32)
+        fields[index].name("camera_entity_id")
+        index += 1
+        offset += 4
 
     # entity_class
-    fields[1] = PointField()
-    fields[1].offset(offset)
-    fields[1].count(1)
-    fields[1].datatype(UINT8)
-    fields[1].name("entity_class")
+    fields[index] = PointField()
+    fields[index].offset(offset)
+    fields[index].count(1)
+    fields[index].datatype(UINT8)
+    fields[index].name("entity_class")
+    index += 1
     offset += 1
 
     # x
-    fields[2] = PointField()
-    fields[2].offset(offset)
-    fields[2].count(1)
-    fields[2].datatype(FLOAT32)
-    fields[2].name("x")
+    fields[index] = PointField()
+    fields[index].offset(offset)
+    fields[index].count(1)
+    fields[index].datatype(FLOAT32)
+    fields[index].name("x")
+    index += 1
     offset += 4
 
     # y
-    fields[3] = PointField()
-    fields[3].offset(offset)
-    fields[3].count(1)
-    fields[3].datatype(FLOAT32)
-    fields[3].name("y")
+    fields[index] = PointField()
+    fields[index].offset(offset)
+    fields[index].count(1)
+    fields[index].datatype(FLOAT32)
+    fields[index].name("y")
+    index += 1
     offset += 4
 
     # z
-    fields[4] = PointField()
-    fields[4].offset(offset)
-    fields[4].count(1)
-    fields[4].datatype(FLOAT32)
-    fields[4].name("z")
+    fields[index] = PointField()
+    fields[index].offset(offset)
+    fields[index].count(1)
+    fields[index].datatype(FLOAT32)
+    fields[index].name("z")
+    index += 1
     offset += 4
 
     # radar_relative_radial_velocity
-    fields[5] = PointField()
-    fields[5].offset(offset)
-    fields[5].count(1)
-    fields[5].datatype(FLOAT32)
-    fields[5].name("radar_relative_radial_velocity")
-    offset += 4
+    if has_radar_data:
+        fields[index] = PointField()
+        fields[index].offset(offset)
+        fields[index].count(1)
+        fields[index].datatype(FLOAT32)
+        fields[index].name("radar_relative_radial_velocity")
+        index += 1
+        offset += 4
 
     # ground_relative_radial_velocity
-    fields[6] = PointField()
-    fields[6].offset(offset)
-    fields[6].count(1)
-    fields[6].datatype(FLOAT32)
-    fields[6].name("ground_relative_radial_velocity")
-    offset += 4
+    if has_radar_data:
+        fields[index] = PointField()
+        fields[index].offset(offset)
+        fields[index].count(1)
+        fields[index].datatype(FLOAT32)
+        fields[index].name("ground_relative_radial_velocity")
+        index += 1
+        offset += 4
 
     # orientation (x, y, z, w)
-    fields[7] = PointField()
-    fields[7].offset(offset)
-    fields[7].count(4)
-    fields[7].datatype(FLOAT32)
-    fields[7].name("orientation")
-    offset += 4 * 4
+    if has_radar_data:
+        fields[index] = PointField()
+        fields[index].offset(offset)
+        fields[index].count(4)
+        fields[index].datatype(FLOAT32)
+        fields[index].name("orientation")
+        index += 1
+        offset += 4 * 4
 
     # size (x, y, z)
-    fields[8] = PointField()
-    fields[8].offset(offset)
-    fields[8].count(3)
-    fields[8].datatype(FLOAT32)
-    fields[8].name("size")
-    offset += 3 * 4
+    if has_radar_data:
+        fields[index] = PointField()
+        fields[index].offset(offset)
+        fields[index].count(3)
+        fields[index].datatype(FLOAT32)
+        fields[index].name("size")
+        index += 1
+        offset += 3 * 4
+
+    # camera_bbox (left, top, right, bottom)
+    if has_camera_data:
+        fields[index] = PointField()
+        fields[index].offset(offset)
+        fields[index].count(4)
+        fields[index].datatype(FLOAT32)
+        fields[index].name("camera_bbox")
+        index += 1
+        offset += 4 * 4
 
     # entity_confidence
-    fields[9] = PointField()
-    fields[9].offset(offset)
-    fields[9].count(1)
-    fields[9].datatype(UINT8)
-    fields[9].name("entity_confidence")
+    fields[index] = PointField()
+    fields[index].offset(offset)
+    fields[index].count(1)
+    fields[index].datatype(UINT8)
+    fields[index].name("entity_confidence")
+    index += 1
     offset += 1
 
     # entity_class_confidence
-    fields[10] = PointField()
-    fields[10].offset(offset)
-    fields[10].count(1)
-    fields[10].datatype(UINT8)
-    fields[10].name("entity_class_confidence")
+    fields[index] = PointField()
+    fields[index].offset(offset)
+    fields[index].count(1)
+    fields[index].datatype(UINT8)
+    fields[index].name("entity_class_confidence")
+    index += 1
     offset += 1
 
     return create_cloud(header, fields, entities)
+
+
+def make_radar_entities(header: Header, entities: Iterable) -> PointCloud2:
+    """
+    Create a PointCloud2 containing entities
+    (entity_id, entity_class, x, y, z, radar_relative_radial_velocity, ground_relative_radial_velocity, orientation(x, y, z, w), size(x, y, z), entity_confidence, entity_class_confidence) fields.
+
+    :param header: The point cloud header. (Type: Header)
+    :param entities: The entities. List of iterables, i.e. one iterable
+                   for entity, with the elements of each iterable being the
+                   values of the fields for that entity.
+    :return: The point cloud containing entities as PointCloud2.
+    """
+    return make_entities(header, True, False, entities)
+
+
+def make_camera_entities(header: Header, entities: Iterable) -> PointCloud2:
+    """
+    Create a PointCloud2 containing entities
+    (camera_entity_id, entity_class, x, y, camera_bbox(left, top, right, bottom), entity_confidence, entity_class_confidence) fields.
+
+    :param header: The point cloud header. (Type: Header)
+    :param entities: The entities. List of iterables, i.e. one iterable
+                   for entity, with the elements of each iterable being the
+                   values of the fields for that entity.
+    :return: The point cloud containing entities as PointCloud2.
+    """
+    return make_entities(header, False, True, entities)
+
+
+def make_fused_entities(header: Header, entities: Iterable) -> PointCloud2:
+    """
+    Create a PointCloud2 containing entities
+    (entity_id, camera_entity_id, entity_class, x, y, z, radar_relative_radial_velocity, ground_relative_radial_velocity, orientation(x, y, z, w), size(x, y, z), camera_bbox(left, top, right, bottom), entity_confidence, entity_class_confidence) fields.
+
+    :param header: The point cloud header. (Type: Header)
+    :param entities: The entities. List of iterables, i.e. one iterable
+                   for entity, with the elements of each iterable being the
+                   values of the fields for that entity.
+    :return: The point cloud containing entities as PointCloud2.
+    """
+    return make_entities(header, True, True, entities)
 
 
 def make_header(timestamp_sec: int, timestamp_nanosec: int, frame_id: str) -> Header:
