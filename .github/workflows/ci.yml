@@ -158,3 +158,21 @@ jobs:
       - run: .github/workflows/test.sh
 
   # Memory and thread sanitiser are not tested due to known issues of both types inside Fast-DDS. May be added in the future when eProsima fixes the issues.
+
+  build-conan-packages:
+    name: Build conan packages
+    runs-on: devops20
+    env:
+      WITH_PYTHON: OFF
+      STATIC_ANALYSIS: OFF
+      ENABLE_ROS_TESTS: OFF
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${WITH_PYTHON}" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}"
+      - run: pip install conan 
+      - run: conan config install git@github.com:provizio/conan_configuration.git --args="-b feature/APT-7153-Create-Conan-Configuration-PoC" -sf=JetPack5
+      - run: conan create -pr:a=gcc9_debug --version=1.0.0.20250220 .
+      - run: conan remote login -p ${{ secrets.CONAN_SERVER_PASS }} pi-conan-server ${{ secrets.CONAN_SERVER_USER }}
+      - run: conan upload -r pi-conan-server -c provizio_dds*
