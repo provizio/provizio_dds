@@ -10,7 +10,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
         matrix:
-            runner: [ubuntu-20.04, linux_arm]
+            runner: [ubuntu-20.04, jetson-18.04]
             build_type: [Release]
         fail-fast: true
     env:
@@ -56,7 +56,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04, macos-latest]
+        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04, macos-latest]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -73,7 +73,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-13]
+        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04, jetson-18.04, macos-13]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -92,7 +92,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04, linux_arm, macos-13]
+        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04, jetson-18.04, macos-13]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}
@@ -107,7 +107,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04]
+        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -127,7 +127,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-20.04]
+        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}
@@ -140,20 +140,21 @@ jobs:
 
   test-ros2-compatibility:
     name: Test compatibility with ROS2
-    runs-on: ubuntu-latest
+    runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        build_type: [Debug, Release]
+        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
+        build_type: [Release, Debug]
         cc: [gcc, clang]
-        with_python: [OFF, ON]
     env:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: ON
+      PYTHON_BINDINGS: OFF # ROS2-sourced Python crashes in Ubuntu22.04
     steps:
       - uses: actions/checkout@v3
-      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}"
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${PYTHON_BINDINGS}" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${PYTHON_BINDINGS}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
 
   # Memory and thread sanitiser are not tested due to known issues of both types inside Fast-DDS. May be added in the future when eProsima fixes the issues.

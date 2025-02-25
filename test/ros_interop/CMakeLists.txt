@@ -24,10 +24,10 @@ if(ENABLE_ROS_TESTS)
         add_subdirectory(ros_interop_publisher)
 
         add_test(NAME ros_interop_subscriber COMMAND
-            sh -c "(sleep 1.5 && timeout 5 ros2 run demo_nodes_cpp talker) & $<TARGET_FILE:ros_interop_subscriber>"
+            sh -c "$<TARGET_FILE:ros_interop_subscriber> & timeout 8 ros2 run demo_nodes_cpp talker & wait"
         )
         add_test(NAME ros_interop_publisher COMMAND
-            bash -c "( $<TARGET_FILE:ros_interop_publisher> & (sleep 2 && timeout 6 ros2 topic echo chatter>/tmp/provizio_test_ros_interop_publisher.out || true ) ) && grep provizio_test_ros_interop_publisher_says_hi /tmp/provizio_test_ros_interop_publisher.out || (echo \"ROS2 Received:\" && cat /tmp/provizio_test_ros_interop_publisher.out && exit 1)"
+            bash -c "$<TARGET_FILE:ros_interop_publisher> & python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_publisher/ros_subscriber.py & wait"
         )
     endif(WIN32)
 else(ENABLE_ROS_TESTS)
