@@ -68,6 +68,21 @@ jobs:
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}"
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}"
 
+  build-no-types:
+    name: Build without idl-generated types
+    runs-on: ${{matrix.runner}}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest]
+        build_type: [Debug, Release]
+    env:
+      CC: gcc
+      STATIC_ANALYSIS: OFF
+    steps:
+      - uses: actions/checkout@v3
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "OFF" "${STATIC_ANALYSIS}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="OFF" -DBUILD_WITHOUT_TYPES="ON"
+
   test-nix:
     name: Test
     runs-on: ${{matrix.runner}}
