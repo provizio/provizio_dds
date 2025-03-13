@@ -24,6 +24,12 @@ add_test(NAME python_pub_python_sub
 )
 set_tests_properties(python_pub_python_sub PROPERTIES TIMEOUT 20)
 
+add_test(NAME python_pub_python_sub_type_reuse
+    COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher_type_reuse.py & \"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber_type_reuse.py"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_pub_python_sub PROPERTIES TIMEOUT 20)
+
 add_test(NAME python_pub_cpp_sub
     COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher.py & $<TARGET_FILE:simplest_subscriber>"
     WORKING_DIRECTORY "${TEST_PATH}"
