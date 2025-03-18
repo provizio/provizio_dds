@@ -18,6 +18,7 @@ internal Provizio software components. Built using eProsima Fast-DDS DDS
 implementation (Apache License 2.0).
 """
 import os
+import threading
 import traceback
 from typing import Any, Callable, Optional, TypeVar
 
@@ -100,14 +101,28 @@ def make_domain_participant(domain_id: int = 0):
                 domain_id, self._participant_qos
             )
 
+            self._register_type_mutex = threading.Lock()
+            self._registered_types = dict()
+
         def __del__(self):
             factory = DomainParticipantFactory.get_instance()
             self._participant.delete_contained_entities()
             factory.delete_participant(self._participant)
             del self._participant
 
-        def get(self):
+        def fastdds_participant(self):
             return self._participant
+
+        def register_type(self, pub_sub_type_instance):
+            with self._register_type_mutex:
+                type_support = self._registered_types.get(pub_sub_type_instance.getName(), None)
+                if type_support is None:
+                    type_support = TypeSupport(pub_sub_type_instance)
+                    self._participant.register_type(type_support)
+                    self._registered_types[pub_sub_type_instance.getName()] = (
+                        type_support
+                    )
+                return type_support
 
     return _DomainParticipant(domain_id)
 
@@ -118,18 +133,17 @@ class _TopicHandle:
 
         # Register Type
         self._topic_data_type = pub_sub_type()
-        self._type_support = TypeSupport(self._topic_data_type)
-        self._participant.get().register_type(self._type_support)
+        self._type_support = self._participant.register_type(self._topic_data_type)
 
         # Register Topic
         self._topic_qos = TopicQos()
-        self._participant.get().get_default_topic_qos(self._topic_qos)
-        self._topic = self._participant.get().create_topic(
+        self._participant.fastdds_participant().get_default_topic_qos(self._topic_qos)
+        self._topic = self._participant.fastdds_participant().create_topic(
             topic_name, self._topic_data_type.getName(), self._topic_qos
         )
 
     def __del__(self):
-        self._participant.get().delete_topic(self._topic)
+        self._participant.fastdds_participant().delete_topic(self._topic)
 
 
 class Publisher(_TopicHandle):
@@ -195,8 +209,8 @@ class Publisher(_TopicHandle):
 
         # Create Publisher
         self._publisher_qos = PublisherQos()
-        self._participant.get().get_default_publisher_qos(self._publisher_qos)
-        self._publisher = self._participant.get().create_publisher(self._publisher_qos)
+        self._participant.fastdds_participant().get_default_publisher_qos(self._publisher_qos)
+        self._publisher = self._participant.fastdds_participant().create_publisher(self._publisher_qos)
 
         # Create DataWriter
         self._listener = Publisher._WriterListener(
@@ -214,7 +228,7 @@ class Publisher(_TopicHandle):
         self._publisher.delete_datawriter(self._writer)
         del self._writer
 
-        self._participant.get().delete_publisher(self._publisher)
+        self._participant.fastdds_participant().delete_publisher(self._publisher)
         del self._publisher
 
         del self._listener
@@ -304,8 +318,8 @@ class Subscriber(_TopicHandle):
 
         # Create Subscriber
         self._subscriber_qos = SubscriberQos()
-        self._participant.get().get_default_subscriber_qos(self._subscriber_qos)
-        self._subscriber = self._participant.get().create_subscriber(
+        self._participant.fastdds_participant().get_default_subscriber_qos(self._subscriber_qos)
+        self._subscriber = self._participant.fastdds_participant().create_subscriber(
             self._subscriber_qos
         )
 
@@ -325,7 +339,7 @@ class Subscriber(_TopicHandle):
         self._subscriber.delete_datareader(self._reader)
         del self._reader
 
-        self._participant.get().delete_subscriber(self._subscriber)
+        self._participant.fastdds_participant().delete_subscriber(self._subscriber)
         del self._subscriber
 
         del self._listener

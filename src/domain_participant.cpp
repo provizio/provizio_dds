@@ -25,15 +25,7 @@ namespace provizio // NOLINT: nesting namespace old-school way to support C++14
 {
     namespace dds
     {
-        namespace
-        {
-            void delete_participant(dds::DomainParticipant *participant)
-            {
-                DomainParticipantFactory::get_instance()->delete_participant(participant);
-            }
-        } // namespace
-
-        std::shared_ptr<DomainParticipant> make_domain_participant(DomainId_t domain_id)
+        domain_participant::domain_participant(DomainId_t domain_id)
         {
             auto qos = PARTICIPANT_QOS_DEFAULT;
 
@@ -43,8 +35,17 @@ namespace provizio // NOLINT: nesting namespace old-school way to support C++14
             qos.wire_protocol().builtin.discovery_config.initial_announcements.count =
                 num_initial_discovery_announcements;
 
-            return {dds::DomainParticipantFactory::get_instance()->create_participant(domain_id, qos, nullptr),
-                    delete_participant};
+            participant = dds::DomainParticipantFactory::get_instance()->create_participant(domain_id, qos, nullptr);
+        }
+
+        domain_participant::~domain_participant()
+        {
+            DomainParticipantFactory::get_instance()->delete_participant(participant);
+        }
+
+        std::shared_ptr<domain_participant> make_domain_participant(DomainId_t domain_id)
+        {
+            return std::make_shared<domain_participant>(domain_id);
         }
     } // namespace dds
 } // namespace provizio

@@ -17,6 +17,7 @@ include(CTest)
 enable_testing()
 
 add_subdirectory(simplest_pub_sub)
+add_subdirectory(pub_sub_type_reuse)
 add_subdirectory(reliable_pub_sub)
 add_subdirectory(ros_interop)
 

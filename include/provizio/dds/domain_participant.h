@@ -16,8 +16,12 @@
 #define DDS_DOMAIN_PARTICIPANT
 
 #include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 #include <fastdds/dds/domain/DomainParticipant.hpp>
+#include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include "provizio/dds/common.h"
 
@@ -26,15 +30,78 @@ namespace provizio
     namespace dds
     {
         /**
+         * @brief Wrapper over eprosima::fastdds::dds::DomainParticipant taking care of TypeSupport registration.
+         *
+         * @note register_type does so just once per type, any consequent registration simply reuses the registered
+         * TypeSupport.
+         */
+        class domain_participant
+        {
+          public:
+            /**
+             * @brief Construct a new domain participant object
+             *
+             * @param domain_id DDS domain_id, 0 by default
+             */
+            domain_participant(DomainId_t domain_id = 0);
+            ~domain_participant();
+
+            /**
+             * @brief Registers the type in the domain participant, only once per domain participant, thread-safe.
+             *
+             * @tparam data_pub_sub_type PubSub type to register
+             * @return TypeSupport that has been registered in the domain participant
+             */
+            template <typename data_pub_sub_type> TypeSupport register_type();
+
+            /**
+             * @brief Returns the underlying Fast-DDS DomainParticipant
+             *
+             * @return eprosima::fastdds::dds::DomainParticipant&
+             */
+            inline eprosima::fastdds::dds::DomainParticipant &fastdds_participant()
+            {
+                return *participant;
+            }
+
+          private:
+            eprosima::fastdds::dds::DomainParticipant *participant;
+            std::mutex registered_types_mutex;
+            std::unordered_map<std::string, TypeSupport> registered_types;
+        };
+        using DomainParticipant =
+            domain_participant; // To match DDS domain participant name, as previously used directly
+
+        template <typename data_pub_sub_type> TypeSupport domain_participant::register_type()
+        {
+            std::lock_guard<std::mutex> lock{registered_types_mutex};
+
+            auto pub_sub = std::make_unique<data_pub_sub_type>();
+            const auto type_it = registered_types.find(pub_sub->getName());
+            if (type_it != registered_types.end())
+            {
+                return type_it->second;
+            }
+            else
+            {
+                TypeSupport type_support{pub_sub.release()};
+                participant->register_type(type_support);
+                registered_types.insert({type_support->getName(), type_support});
+                return type_support;
+            }
+        }
+
+        /**
          * @brief Creates a new DDS Domain Participant as a shared_ptr. The participant is automatically deleted
          * correctly on destroying its last shared_ptr.
          *
-         * @param domain_id domain_id, 0 by default
-         * @return std::shared_ptr<DomainParticipant>
+         * @param domain_id DDS domain_id, 0 by default
+         * @return std::shared_ptr<domain_participant>
          * @see https://en.cppreference.com/w/cpp/memory/shared_ptr
-         * @see https://fast-dds.docs.eprosima.com/en/latest/fastdds/api_reference/dds_pim/domain/domainparticipant.html
+         * @see
+         * https://fast-dds.docs.eprosima.com/en/latest/fastdds/api_reference/dds_pim/domain/domainparticipant.html
          */
-        std::shared_ptr<DomainParticipant> make_domain_participant(DomainId_t domain_id = 0);
+        std::shared_ptr<domain_participant> make_domain_participant(DomainId_t domain_id = 0);
     } // namespace dds
 } // namespace provizio
 
