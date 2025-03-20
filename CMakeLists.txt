@@ -41,13 +41,12 @@ execute_process(
     ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
 
 if(VERSION STREQUAL "")
-    # Tag not found, use the date instead (without trailing zeros)
-    string(TIMESTAMP CURRENT_DATE "%y.%m.%d")
-    string(REPLACE ".0" "." PROVIZIO_DDS_VERSION "${CURRENT_DATE}")
+    # Tag not found, use the 0.0.yearmonthday instead for unreleased versions
+    string(TIMESTAMP CURRENT_DATE "%y%m%d")
+    string(TIMESTAMP CURRENT_TIME "%H%M%S")
+    set(PROVIZIO_DDS_VERSION "0.${CURRENT_DATE}.${CURRENT_TIME}")
 else(VERSION STREQUAL "")
-    # Remove the "v" prefix and trailing zeros
-    string(REPLACE "v" "" PROVIZIO_DDS_VERSION "${VERSION}")
-    string(REPLACE ".0" "." PROVIZIO_DDS_VERSION "${PROVIZIO_DDS_VERSION}")
+    set(PROVIZIO_DDS_VERSION "${VERSION}")
 endif(VERSION STREQUAL "")
 
 message("Version: ${PROVIZIO_DDS_VERSION}")
