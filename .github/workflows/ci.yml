@@ -60,13 +60,14 @@ jobs:
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
+        disable_coding_standards_checks: [OFF, ON]
     env:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: ON
     steps:
       - uses: actions/checkout@v3
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}"
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS="${{matrix.disable_coding_standards_checks}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}"
 
   test-nix:
     name: Test
