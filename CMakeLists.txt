@@ -225,7 +225,7 @@ else(HAS_BIN_CACHE)
         set(FAST_DDS_INCLUDE_DIRS)
     else(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
         # Let's build Fast-DDS
-        message("Fast-DDS not found in the system and will be built. Version ${FAST_DDS_VERSION} with foonathan_memory_vendor version ${FOONATHAN_MEMORY_VENDOR_VERSION}.")
+        message("Fast-DDS will be built. Version ${FAST_DDS_VERSION} with foonathan_memory_vendor version ${FOONATHAN_MEMORY_VENDOR_VERSION}.")
 
         # OpenSSL is required for Fast-DDS
         find_package(OpenSSL REQUIRED)
@@ -258,7 +258,7 @@ else(HAS_BIN_CACHE)
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
-            CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=ON" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules" "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib"
+            CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules" "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib"
         )
         link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
