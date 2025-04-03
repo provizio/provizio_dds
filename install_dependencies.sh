@@ -161,11 +161,17 @@ else
 
   # Install CMake
   if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_20}" = true ]; then
+      if [ "${UBUNTU_18}" = true ]; then
+          CMAKE_VERSION=3.25.2-0kitware1ubuntu18.04.1
+      else
+          CMAKE_VERSION=3.25.2-0kitware1ubuntu20.04.1
+      fi
       apt install -y software-properties-common lsb-release wget
       wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null
       apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main"
-      apt update && apt install -y --no-install-recommends kitware-archive-keyring
-      apt update && apt install -y --no-install-recommends cmake
+      apt update
+      apt install -y --no-install-recommends kitware-archive-keyring
+      apt install -y --no-install-recommends --allow-downgrades cmake=${CMAKE_VERSION} cmake-data=${CMAKE_VERSION}
   else
       apt install -y --no-install-recommends cmake
   fi
@@ -204,7 +210,7 @@ else
       apt install -y --no-install-recommends wget python3-pip libasio-dev libtinyxml2-dev
       rm -rf /tmp/fastdds # In case of previous installation
       mkdir /tmp/fastdds
-      
+
       # Foonathan memory
       cd /tmp/fastdds
       git clone https://github.com/eProsima/foonathan_memory_vendor.git
