@@ -23,7 +23,7 @@ set(FAST_DDS_VERSION "v2.14.2" CACHE STRING "Fast-DDS version, when not already 
 set(LOOK_FOR_FAST_DDS TRUE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.1" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
 set(FAST_DDS_PYTHON_VERSION "1.3.2" CACHE STRING "Fast-DDS-python version, without v prefix")
-set(PROVIZIO_CODING_STANDARDS_VERSION "1.10.0" CACHE STRING "Provizio Coding Standards version")
+set(PROVIZIO_CODING_STANDARDS_VERSION "1.10.1" CACHE STRING "Provizio Coding Standards version")
 set(DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS OFF CACHE BOOL "Disable all provizio/coding_standards checks")
 set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, without v prefix")
 set(ENABLE_TESTS OFF CACHE BOOL "Defines whether tests are built and enabled")
@@ -49,7 +49,7 @@ else(VERSION STREQUAL "")
     set(PROVIZIO_DDS_VERSION "${VERSION}")
 endif(VERSION STREQUAL "")
 
-message("Version: ${PROVIZIO_DDS_VERSION}")
+message(STATUS "Version: ${PROVIZIO_DDS_VERSION}")
 
 # Project
 project(provizio_dds VERSION ${PROVIZIO_DDS_VERSION})
@@ -88,17 +88,17 @@ if(STATIC_ANALYSIS AND APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif(STATIC_ANALYSIS AND APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 
 if(STATIC_ANALYSIS AND HAS_BIN_CACHE)
-    message("Prebuilt binaries located, but won't be used as STATIC_ANALYSIS is enabled")
+    message(STATUS "Prebuilt binaries located, but won't be used as STATIC_ANALYSIS is enabled")
     set(HAS_BIN_CACHE FALSE)
 endif(STATIC_ANALYSIS AND HAS_BIN_CACHE)
 
 if(ENABLE_TESTS AND HAS_BIN_CACHE)
-    message("Prebuilt binaries located, but won't be used as tests are enabled")
+    message(STATUS "Prebuilt binaries located, but won't be used as tests are enabled")
     set(HAS_BIN_CACHE FALSE)
 endif(ENABLE_TESTS AND HAS_BIN_CACHE)
 
 if(PYTHON_BINDINGS AND NOT PYTHON_PACKAGES_INSTALL_DIR AND HAS_BIN_CACHE)
-    message("Prebuilt binaries located, but won't be used as PYTHON_PACKAGES_INSTALL_DIR is not specified")
+    message(STATUS "Prebuilt binaries located, but won't be used as PYTHON_PACKAGES_INSTALL_DIR is not specified")
     set(HAS_BIN_CACHE FALSE)
 endif(PYTHON_BINDINGS AND NOT PYTHON_PACKAGES_INSTALL_DIR AND HAS_BIN_CACHE)
 
@@ -127,7 +127,7 @@ if(CMAKE_CXX_FLAGS)
 endif(CMAKE_CXX_FLAGS)
 
 if(HAS_BIN_CACHE)
-    message("Prebuilt binaries are located and will be used...")
+    message(STATUS "Prebuilt binaries are located and will be used...")
 
     add_library(provizio_dds SHARED IMPORTED)
     set_target_properties(provizio_dds PROPERTIES
@@ -220,12 +220,12 @@ else(HAS_BIN_CACHE)
     endif(LOOK_FOR_FAST_DDS)
 
     if(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
-        message("Fast-DDS version ${fastrtps_VERSION} found at ${fastrtps_DIR} and will be used.")
+        message(STATUS "Fast-DDS version ${fastrtps_VERSION} found at ${fastrtps_DIR} and will be used.")
         set(FAST_DDS_DEPENDENCIES)
         set(FAST_DDS_INCLUDE_DIRS)
     else(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
         # Let's build Fast-DDS
-        message("Fast-DDS will be built. Version ${FAST_DDS_VERSION} with foonathan_memory_vendor version ${FOONATHAN_MEMORY_VENDOR_VERSION}.")
+        message(STATUS "Fast-DDS will be built. Version ${FAST_DDS_VERSION} with foonathan_memory_vendor version ${FOONATHAN_MEMORY_VENDOR_VERSION}.")
 
         # OpenSSL is required for Fast-DDS
         find_package(OpenSSL REQUIRED)
