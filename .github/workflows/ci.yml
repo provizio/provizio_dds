@@ -10,7 +10,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
         matrix:
-            runner: [ubuntu-20.04, jetson-18.04]
+            runner: [ubuntu-22.04, jetson-18.04]
             build_type: [Release]
         fail-fast: true
     env:
@@ -56,7 +56,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04, macos-latest]
+        runner: [ubuntu-latest, ubuntu-22.04, macos-latest]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -74,7 +74,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04, jetson-18.04, macos-13]
+        runner: [ubuntu-latest, ubuntu-22.04, jetson-18.04, macos-13]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -93,7 +93,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04, jetson-18.04, macos-13]
+        runner: [ubuntu-latest, ubuntu-22.04, jetson-18.04, macos-13]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}
@@ -108,7 +108,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
+        runner: [ubuntu-latest, ubuntu-22.04]
         build_type: [Debug, Release]
         cc: [gcc, clang]
         with_python: [OFF, ON]
@@ -128,7 +128,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
+        runner: [ubuntu-latest, ubuntu-22.04]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}
@@ -144,7 +144,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
+        runner: [ubuntu-latest, ubuntu-22.04]
         build_type: [Release, Debug]
         cc: [gcc, clang]
     env:
