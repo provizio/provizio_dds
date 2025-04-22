@@ -35,9 +35,10 @@ if os.path.isfile(f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types
     print(f"Already built in {build_dir}, only packaging...", flush=True)
 else:
     needs_building = True
+    cmake_arguments = os.environ.get("CMAKE_ARGUMENTS", "")
 
-    # Check if there is a prebuilt cache for our configuration
-    if platform == "linux":
+    # Check if there is a prebuilt cache for our configuration (unless custom cmake_arguments are required)
+    if platform == "linux" and cmake_arguments != "":
         bin_cache_config_name = (
             os.popen(source_dir + "/bin_cache_config_name.sh").read().strip()
         )
@@ -57,7 +58,7 @@ else:
         print("Building C++ libraries from source...", flush=True)
         if (
             os.system(
-                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" "{source_dir}" && cmake --build . --target install -- -j8'
+                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" {cmake_arguments} "{source_dir}" && cmake --build . --target install -- -j8'
             )
             != 0
         ):
