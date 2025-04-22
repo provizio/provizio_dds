@@ -123,6 +123,9 @@ else
     collect_all_libs "${TARGET_PATH}/python/provizio_dds"
     collect_all_libs "${TARGET_PATH}/python/provizio_dds_python_types"
 
+    # Store the build machine's kernel version in the cache
+    uname -r > "${TARGET_PATH}/kernel_version"
+
     # zip it now!
     cd "${BIN_CACHE_PATH}"
     zip -r -y "${BIN_CACHE_CONFIG_NAME}.zip" "${BIN_CACHE_CONFIG_NAME}"
