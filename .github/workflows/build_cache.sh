@@ -94,15 +94,23 @@ else
                 # Exclude system libraries
                 lib_basename="$(basename "${lib}")"
                 if [[ "${lib_basename}" != libc.so* && "${lib_basename}" != libm.so* && "${lib_basename}" != librt.so* && "${lib_basename}" != libpthread.so* && "${lib_basename}" != libdl.so* ]]; then
-                    # Copy the library if it hasn't been copied yet
+                    # Copy the library if it hasn't been copied yet under its full name to avoid conflicts with system libs
                     if [ ! -f "${output_dir}/${lib_basename}" ]; then
                         if [ -L "${lib}" ]; then
-                            cp -a "$(realpath "${lib}")" "${output_dir}/"
+                            # The library is actually a link
+                            lib_full_path="$(realpath "${lib}")"
+                            lib_full_name="$(basename "${lib_full_path}")"
+
+                            cp -a "${lib_full_path}" "${output_dir}/"
+                            patchelf --replace-needed "${lib}" "${lib_full_name}" "${binary}"
+                        else
+                            # The library is an actual file
+                            cp -a "${lib}" "${output_dir}/"
+                            lib_full_name="${lib_basename}"
                         fi
-                        cp -a "${lib}" "${output_dir}/"
 
                         # Recursively collect dependencies of the copied library
-                        collect_libs "${output_dir}/${lib_basename}" "${output_dir}"
+                        collect_libs "${output_dir}/${lib_full_name}" "${output_dir}"
                     fi
                 fi
             fi
