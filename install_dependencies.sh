@@ -308,4 +308,16 @@ else
   fi
 fi
 
+if [ "${UBUNTU_18}" = true ]; then
+    # Install patchelf v0.18 (v0.9 shipped in 18.04 breaks binaries on --replace-needed)
+    cd /tmp
+    PATCHELF_VERSION="0.18.0"
+    wget https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}.tar.gz
+    tar -xvf patchelf-${PATCHELF_VERSION}.tar.gz
+    cd patchelf-${PATCHELF_VERSION}/
+    ./configure --prefix=/usr --docdir=/usr/share/doc/patchelf-${PATCHELF_VERSION} && make && make install
+    cd /tmp
+    rm -rf patchelf-${PATCHELF_VERSION}*
+fi
+
 echo "Done installing provizio_dds build dependencies!"

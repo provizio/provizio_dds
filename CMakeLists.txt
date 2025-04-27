@@ -567,6 +567,11 @@ else(HAS_BIN_CACHE)
         endif("${CMAKE_SHARED_LIBRARY_SUFFIX}" STREQUAL ".dylib")
     endif(PYTHON_BINDINGS)
 
+    if(NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
+        # Linux: link fastdds libraries by the fully-qualified name (.so.major.minor.patch) as they're incompatible between different .patch versions
+        install(CODE "execute_process(COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/fully_qualified_fastdds_libs.sh\" \"${CMAKE_INSTALL_PREFIX}/lib\")")
+    endif(NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
+
     if(ENABLE_TESTS)
         add_subdirectory(test)
     endif(ENABLE_TESTS)

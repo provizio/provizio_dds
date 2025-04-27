@@ -83,10 +83,13 @@ else
         local binary="$1"
         local output_dir="$2"
         local lib_basename
+        local lib_realpath
 
-        # Update RPATH to make it look for its dependencies in the same directory
-        # shellcheck disable=SC2016
-        patchelf --set-rpath '$ORIGIN' "${binary}"
+        # Update RUNPATH to make it look for its dependencies in the same directory or ../lib/
+        if [[ "${binary}" != *libprovizio*.so* ]]; then # Provizio libs already have correct RUNPATHS
+            # shellcheck disable=SC2016
+            patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib' "${binary}"
+        fi
 
         # Use ldd to find shared libraries the binary depends on
         ldd "${binary}" | awk '/=>/ { print $(NF-1) }' | while read -r lib; do
@@ -94,28 +97,23 @@ else
                 # Exclude system libraries
                 lib_basename="$(basename "${lib}")"
                 if [[ "${lib_basename}" != libc.so* && "${lib_basename}" != libm.so* && "${lib_basename}" != librt.so* && "${lib_basename}" != libpthread.so* && "${lib_basename}" != libdl.so* ]]; then
-                    # Copy the library if it hasn't been copied yet under its full name to avoid conflicts with system libs
+                    # Copy the library if it hasn't been copied yet
                     if [ ! -f "${output_dir}/${lib_basename}" ]; then
                         if [ -L "${lib}" ]; then
-                            # The library is actually a link
-                            lib_full_path="$(realpath "${lib}")"
-                            lib_full_name="$(basename "${lib_full_path}")"
-
-                            cp -a "${lib_full_path}" "${output_dir}/"
-                            patchelf --replace-needed "${lib}" "${lib_full_name}" "${binary}"
-                        else
-                            # The library is an actual file
-                            cp -a "${lib}" "${output_dir}/"
-                            lib_full_name="${lib_basename}"
+                            lib_realpath="$(realpath "${lib}")"
+                            cp -a "${lib_realpath}" "${output_dir}/"
+                            lib_basename="$(basename "${lib_realpath}")"
                         fi
+                        cp -a "${lib}" "${output_dir}/"
 
                         # Recursively collect dependencies of the copied library
-                        collect_libs "${output_dir}/${lib_full_name}" "${output_dir}"
+                        collect_libs "${output_dir}/${lib_basename}" "${output_dir}"
                     fi
                 fi
             fi
         done
     }
+
     collect_all_libs() {
         local dir_to_process="$1"
         for file in "${dir_to_process}"/*; do
