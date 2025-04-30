@@ -15,6 +15,8 @@
 from setuptools import setup
 import os
 import os.path
+import re
+import shutil
 from sys import platform
 
 
@@ -23,6 +25,28 @@ class CMakeBuildError(Exception):
 
     pass
 
+
+def extract_version(version):
+    """Extracts the version number (x.y.z) from a version string."""
+    match = re.search(r"^(\d+\.\d+\.\d+)", version)
+    if match:
+        return list(map(int, match.group(1).split(".")))
+    else:
+        raise ValueError("Invalid version format")
+
+
+def compare_versions(version1, version2):
+    """Compares two versions based on the numerical part (x.y.z)."""
+    v1 = extract_version(version1)
+    v2 = extract_version(version2)
+
+    for v1_part, v2_part in zip(v1, v2):
+        if v1_part < v2_part:
+            return -1  # version1 is older
+        elif v1_part > v2_part:
+            return 1  # version1 is newer
+
+    return 0  # versions are equal
 
 # Build the CMake project and copy its artifacts to the destination directory
 source_dir = os.path.dirname(os.path.realpath(__file__))
@@ -35,9 +59,10 @@ if os.path.isfile(f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types
     print(f"Already built in {build_dir}, only packaging...", flush=True)
 else:
     needs_building = True
+    cmake_arguments = os.environ.get("CMAKE_ARGUMENTS", "")
 
-    # Check if there is a prebuilt cache for our configuration
-    if platform == "linux":
+    # Check if there is a prebuilt cache for our configuration (unless custom cmake_arguments are required)
+    if platform == "linux" and cmake_arguments == "":
         bin_cache_config_name = (
             os.popen(source_dir + "/bin_cache_config_name.sh").read().strip()
         )
@@ -45,19 +70,36 @@ else:
         if os.path.isfile(cache_zip):
             if (
                 os.system(
-                    f'unzip -q "{cache_zip}" -d "{build_dir}" && mv -f "{build_dir}/{bin_cache_config_name}/python" "{target_dir}" && cp -f "{target_dir}/version.txt" "{build_dir}/"'
+                    f'unzip -q "{cache_zip}" -d "{build_dir}"'
                 )
                 != 0
             ):
-                raise Exception("Failed to extract/move bin cache!")
-            print(f"Bin cache located and will be used: {bin_cache_config_name}")
-            needs_building = False
+                raise Exception("Failed to extract bin cache!")
+
+            with open(f"{build_dir}/{bin_cache_config_name}/kernel_version", "r") as kernel_version_file:
+                cache_kernel_version = kernel_version_file.read().strip()
+            host_kernel_version = os.popen("uname -r").read().strip()
+
+            if compare_versions(host_kernel_version, cache_kernel_version) >= 0:
+                if (
+                    os.system(
+                        f'mv -f "{build_dir}/{bin_cache_config_name}/python" "{target_dir}" && cp -f "{target_dir}/version.txt" "{build_dir}/"'
+                    )
+                    != 0
+                ):
+                    raise Exception("Failed to move bin cache!")
+                print(f"Bin cache located and will be used: {bin_cache_config_name}")
+                needs_building = False
+            else:
+                print(f"Bin cache located but built using newer Linux kernel")
+                shutil.rmtree(f"{build_dir}/{bin_cache_config_name}")
+                needs_building = True
 
     if needs_building:
         print("Building C++ libraries from source...", flush=True)
         if (
             os.system(
-                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" "{source_dir}" && cmake --build . --target install -- -j8'
+                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" {cmake_arguments} "{source_dir}" && cmake --build . --target install -- -j8'
             )
             != 0
         ):

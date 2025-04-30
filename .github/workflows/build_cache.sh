@@ -83,10 +83,13 @@ else
         local binary="$1"
         local output_dir="$2"
         local lib_basename
+        local lib_realpath
 
-        # Update RPATH to make it look for its dependencies in the same directory
-        # shellcheck disable=SC2016
-        patchelf --set-rpath '$ORIGIN' "${binary}"
+        # Update RUNPATH to make it look for its dependencies in the same directory or ../lib/
+        if [[ "${binary}" != *libprovizio*.so* ]]; then # Provizio libs already have correct RUNPATHS
+            # shellcheck disable=SC2016
+            patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib' "${binary}"
+        fi
 
         # Use ldd to find shared libraries the binary depends on
         ldd "${binary}" | awk '/=>/ { print $(NF-1) }' | while read -r lib; do
@@ -97,7 +100,9 @@ else
                     # Copy the library if it hasn't been copied yet
                     if [ ! -f "${output_dir}/${lib_basename}" ]; then
                         if [ -L "${lib}" ]; then
-                            cp -a "$(realpath "${lib}")" "${output_dir}/"
+                            lib_realpath="$(realpath "${lib}")"
+                            cp -a "${lib_realpath}" "${output_dir}/"
+                            lib_basename="$(basename "${lib_realpath}")"
                         fi
                         cp -a "${lib}" "${output_dir}/"
 
@@ -108,6 +113,7 @@ else
             fi
         done
     }
+
     collect_all_libs() {
         local dir_to_process="$1"
         for file in "${dir_to_process}"/*; do
@@ -122,6 +128,9 @@ else
     collect_all_libs "${TARGET_PATH}/python/fastdds"
     collect_all_libs "${TARGET_PATH}/python/provizio_dds"
     collect_all_libs "${TARGET_PATH}/python/provizio_dds_python_types"
+
+    # Store the build machine's kernel version in the cache
+    uname -r > "${TARGET_PATH}/kernel_version"
 
     # zip it now!
     cd "${BIN_CACHE_PATH}"
