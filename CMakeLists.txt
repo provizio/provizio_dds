@@ -31,6 +31,7 @@ set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be ge
 set(PYTHON_PACKAGES_INSTALL_DIR "" CACHE STRING "Defines an install directory for Python artifacts (or use default if empty)")
 set(IGNORE_BIN_CACHE OFF CACHE BOOL "Enable to force build from sources instead of using prebuilt cache")
 set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binaries, skip standard C++ libraries")
+set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
 
 # Detect the version of provizio_dds from git tag if present, otherwise use yy.mm.dd
 find_package(Git REQUIRED)
@@ -78,6 +79,12 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
             file(READ "${BIN_CACHE_PATH}/kernel_version" CACHE_KERNEL_VERSION)
             if("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
                 set(HAS_BIN_CACHE TRUE)
+
+                if(NOT INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS)
+                    # Softlinks need to be added, as cache doesn't include them
+                    execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/fully_qualified_fastdds_libs.sh" "${BIN_CACHE_PATH}/lib" "revert")
+                endif(NOT INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS)
+
             else("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
                 message(STATUS "Prebuilt binaries located, but won't be used as they were built in a newer Linux kernel")
             endif("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
@@ -567,10 +574,10 @@ else(HAS_BIN_CACHE)
         endif("${CMAKE_SHARED_LIBRARY_SUFFIX}" STREQUAL ".dylib")
     endif(PYTHON_BINDINGS)
 
-    if(NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
+    if(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS AND NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
         # Linux: link fastdds libraries by the fully-qualified name (.so.major.minor.patch) as they're incompatible between different .patch versions
         install(CODE "execute_process(COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/fully_qualified_fastdds_libs.sh\" \"${CMAKE_INSTALL_PREFIX}/lib\")")
-    endif(NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
+    endif(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS AND NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
 
     if(ENABLE_TESTS)
         add_subdirectory(test)

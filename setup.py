@@ -99,7 +99,7 @@ else:
         print("Building C++ libraries from source...", flush=True)
         if (
             os.system(
-                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" {cmake_arguments} "{source_dir}" && cmake --build . --target install -- -j8'
+                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" {cmake_arguments} "{source_dir}" && cmake --build . --target install -- -j8'
             )
             != 0
         ):
