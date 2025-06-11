@@ -33,6 +33,8 @@ jobs:
     name: Commit bin cache
     needs: build-cache
     runs-on: ubuntu-latest
+    outputs:
+      cache_commit_sha: ${{steps.cache_commit_sha.outputs.cache_commit_sha}}
     steps:
       - uses: actions/checkout@v3
       - run: rm -rf cache/*.zip
@@ -43,6 +45,11 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v4
         with:
           commit_message: Bin cache for common configurations
+      - name: Export the cache commit SHA
+        id: cache_commit_sha
+        run: |
+          echo "cache_commit_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+  
 
   check-license-headers:
     name: Check license headers
@@ -90,6 +97,7 @@ jobs:
 
   test-nix-pip-package:
     name: Test pip package
+    needs: commit-cache
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
@@ -100,6 +108,8 @@ jobs:
       STATIC_ANALYSIS: OFF
     steps:
       - uses: actions/checkout@v3
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}"
       - run: .github/workflows/test_pip_package.sh
 
@@ -141,6 +151,7 @@ jobs:
 
   test-ros2-compatibility:
     name: Test compatibility with ROS2
+    needs: commit-cache
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
@@ -154,8 +165,27 @@ jobs:
       PYTHON_BINDINGS: OFF # ROS2-sourced Python crashes in Ubuntu22.04
     steps:
       - uses: actions/checkout@v3
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${PYTHON_BINDINGS}" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}"
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${PYTHON_BINDINGS}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
 
-  # Memory and thread sanitiser are not tested due to known issues of both types inside Fast-DDS. May be added in the future when eProsima fixes the issues.
+  test-congested-networks:
+    name: Test working in congested networks
+    needs: commit-cache
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        packets_loss: [15%, 25%, 50%]
+        network_delay: [150ms, 300ms]
+    env:
+      NETWORK_LOSS: ${{matrix.packets_loss}}
+      NETWORK_DELAY: ${{matrix.network_delay}}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
+      - run: .github/workflows/test_congested_network.sh
+
+  # Memory and thread sanitizer are not tested due to known issues of both types inside Fast-DDS. May be added in the future when eProsima fixes the issues.

@@ -1,0 +1,30 @@
+services:
+  publisher:
+    build:
+      context: .
+      dockerfile: test/congested_network_test/congested_network_test.dockerfile
+      args:
+        SERVICE: publisher
+        NETWORK_DELAY: ${NETWORK_DELAY:-150ms}
+        NETWORK_LOSS: ${NETWORK_LOSS:-50%}
+        NETWORK_RATE: ${NETWORK_RATE:-128kbit}
+    container_name: provizio_dds_congested_publisher
+    cap_add:
+      - NET_ADMIN
+
+  subscriber:
+    build:
+      context: .
+      dockerfile: test/congested_network_test/congested_network_test.dockerfile
+      args:
+        SERVICE: subscriber
+        NETWORK_DELAY: ${NETWORK_DELAY:-150ms}
+        NETWORK_LOSS: ${NETWORK_LOSS:-50%}
+        NETWORK_RATE: ${NETWORK_RATE:-128kbit}
+    container_name: provizio_dds_congested_subscriber
+    cap_add:
+      - NET_ADMIN
+
+networks:
+  congested_network:
+    driver: bridge
