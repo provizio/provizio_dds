@@ -18,19 +18,39 @@
 # NETWORK_DELAY (f.e. 300ms)
 # NETWORK_LOSS (f.e. 50%)
 # NETWORK_RATE (f.e. 128kbit)
+# DISCOVERY_SERVER (ON/OFF)
+# NUM_ITERATIONS (f.e. 5)
 
 set -eu
 
 cd "$(cd "$(dirname "$0")" && pwd -P)"/../..
 
-for i in {1..5}; do
+NUM_ITERATIONS=${NUM_ITERATIONS:-5}
+
+if [[ "${DISCOVERY_SERVER:-}" == "ON" ]]; then
+    echo "Participants matching will use a discovery server"
+    export XML_PROFILE_PUBLISHER="/opt/provizio_dds/test/congested_network_test/fast_dds_server_config.xml"
+    export XML_PROFILE_SUBSCRIBER="/opt/provizio_dds/test/congested_network_test/fast_dds_client_config.xml"
+else
+    echo "Participants matching will use the simple discovery protocol"
+    export XML_PROFILE_PUBLISHER=""
+    export XML_PROFILE_SUBSCRIBER=""
+fi
+
+(docker container rm provizio_dds_congested_publisher || true) >/dev/null 2>&1
+(docker container rm provizio_dds_congested_subscriber || true) >/dev/null 2>&1
+(docker network rm provizio_dds_congested_network || true) >/dev/null 2>&1
+
+for (( i = 0; i <= NUM_ITERATIONS; i++ )); do
     echo "congested_network_test #${i}..."
-    docker container rm /provizio_dds_congested_publisher || true >/dev/null
-    docker container rm /provizio_dds_congested_subscriber || true >/dev/null
-    if ! COMPOSE_FILE=congested_network_compose.yml docker compose --progress plain up --build --exit-code-from subscriber; then
+    if ! COMPOSE_FILE=congested_network_compose.yml docker compose --progress plain up --force-recreate --build --exit-code-from subscriber; then
         echo "Run #${i} failed!"
         exit 1
     fi
+    echo "congested_network_test #${i}: Success!"
+    (docker container rm provizio_dds_congested_publisher || true) >/dev/null 2>&1
+    (docker container rm provizio_dds_congested_subscriber || true) >/dev/null 2>&1
+    (docker network rm provizio_dds_congested_network || true) >/dev/null 2>&1
 done
 
-echo "Successfully communicated in all 5 runs!"
+echo "Successfully communicated in all ${NUM_ITERATIONS} runs!"

@@ -59,7 +59,7 @@ class QosDefaults:
     initial_announcements_period = Duration_t(0, 50000000)  # As (sec, nanosec)
 
     """Period of broadcasting participants discovery messages after the initial announcements"""
-    lease_duration_announcement_period = Duration_t(0, 500000000)  # As (sec, nanosec)
+    lease_duration_announcement_period = Duration_t(1, 0)  # As (sec, nanosec)
 
     def __init__(self, pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType)):
         """Constructs an instance of QosDefaults for the DDS Pub/Sub type.
@@ -96,21 +96,31 @@ def make_domain_participant(domain_id: int = 0):
     """
 
     class _DomainParticipant:
+        # It's FASTDDS_DEFAULT_PROFILES_FILE in Fast-DDS 3, so needs change when upgrading
+        xml_profiles_env_variable = "FASTRTPS_DEFAULT_PROFILES_FILE"
+
         def __init__(self, domain_id):
             factory = DomainParticipantFactory.get_instance()
 
             self._participant_qos = DomainParticipantQos()
             factory.get_default_participant_qos(self._participant_qos)
-            # More reliable participants matching
-            self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.count = (
-                QosDefaults.num_initial_discovery_announcements
-            )
-            self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.period = (
-                QosDefaults.initial_announcements_period
-            )
-            self._participant_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod = (
-                QosDefaults.lease_duration_announcement_period
-            )
+
+            # Unless defined in the XML Profile, enable more reliable participants matching
+            if (
+                _DomainParticipant.xml_profiles_env_variable not in os.environ
+                or not os.path.isfile(
+                    os.environ[_DomainParticipant.xml_profiles_env_variable]
+                )
+            ):
+                self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.count = (
+                    QosDefaults.num_initial_discovery_announcements
+                )
+                self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.period = (
+                    QosDefaults.initial_announcements_period
+                )
+                self._participant_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod = (
+                    QosDefaults.lease_duration_announcement_period
+                )
 
             self._participant = factory.create_participant(
                 domain_id, self._participant_qos

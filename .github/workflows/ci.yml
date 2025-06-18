@@ -171,21 +171,40 @@ jobs:
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${PYTHON_BINDINGS}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
 
-  test-congested-networks:
-    name: Test working in congested networks
+  test-congested-networks-simple-discovery:
+    name: Test working in congested networks (Simple Discovery)
     needs: commit-cache
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        packets_loss: [15%, 25%, 50%]
-        network_delay: [150ms, 300ms]
+        packets_loss: [25%, 50%]
+        network_delay: [250ms, 500ms]
     env:
       NETWORK_LOSS: ${{matrix.packets_loss}}
       NETWORK_DELAY: ${{matrix.network_delay}}
+      DISCOVERY_SERVER: OFF
     steps:
       - uses: actions/checkout@v3
         with:
           ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
       - run: .github/workflows/test_congested_network.sh
 
-  # Memory and thread sanitizer are not tested due to known issues of both types inside Fast-DDS. May be added in the future when eProsima fixes the issues.
+  test-congested-networks-discovery-server:
+    name: Test working in congested networks (Discovery Server)
+    needs: commit-cache
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        packets_loss: [50%, 75%]
+        network_delay: [250ms, 500ms]
+    env:
+      NETWORK_LOSS: ${{matrix.packets_loss}}
+      NETWORK_DELAY: ${{matrix.network_delay}}
+      DISCOVERY_SERVER: ON
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
+      - run: .github/workflows/test_congested_network.sh
+
+# Memory and thread sanitizer are not tested due to known issues of both types inside Fast-DDS. May be added in the future when eProsima fixes the issues.

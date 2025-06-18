@@ -14,9 +14,11 @@ ARG SERVICE
 ARG NETWORK_DELAY
 ARG NETWORK_LOSS
 ARG NETWORK_RATE
+ARG XML_PROFILE=""
 ENV SERVICE=$SERVICE
 ENV NETWORK_DELAY=$NETWORK_DELAY
 ENV NETWORK_LOSS=$NETWORK_LOSS
 ENV NETWORK_RATE=$NETWORK_RATE
+ENV XML_PROFILE=$XML_PROFILE
 
-CMD ["/bin/bash", "-c", "tc qdisc add dev eth0 root netem delay ${NETWORK_DELAY} loss ${NETWORK_LOSS} rate ${NETWORK_RATE} && python3 /opt/provizio_dds/test/congested_network_test/congested_network_${SERVICE}.py"]
+CMD ["/bin/bash", "-c", "if [ -f ${XML_PROFILE} ]; then export FASTRTPS_DEFAULT_PROFILES_FILE=${XML_PROFILE}; fi; tc qdisc add dev eth0 root netem delay ${NETWORK_DELAY} loss ${NETWORK_LOSS} rate ${NETWORK_RATE} && python3 /opt/provizio_dds/test/congested_network_test/congested_network_${SERVICE}.py"]

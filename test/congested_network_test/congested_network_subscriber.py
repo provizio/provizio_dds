@@ -26,7 +26,7 @@ has_been_matched = False
 is_matched = False
 done = False
 times_received = 0
-max_time_to_match = 75  # As we'll be testing in REALLY congested networks
+max_time_to_match = 90  # As we'll be testing in REALLY congested networks
 time_test_started = time.time()
 
 

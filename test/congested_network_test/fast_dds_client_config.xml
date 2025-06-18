@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com">
+    <participant profile_name="participant_discovery_client" is_default_profile="true">
+        <rtps>
+            <builtin>
+                <discovery_config>
+                    <discoveryProtocol>CLIENT</discoveryProtocol>
+                    <discoveryServersList>
+                        <RemoteServer prefix="43.2a.19.7f.1d.ee.8c.4b.a9.f5.32.df">
+                            <metatrafficUnicastLocatorList>
+                                <locator>
+                                    <udpv4>
+                                        <address>201.10.0.1</address>
+                                        <port>11811</port>
+                                    </udpv4>
+                                </locator>
+                                <locator>
+                                    <tcpv4>
+                                        <address>201.10.0.1</address>
+                                        <port>11812</port>
+                                    </tcpv4>
+                                </locator>
+                            </metatrafficUnicastLocatorList>
+                        </RemoteServer>
+                    </discoveryServersList>
+                    <clientAnnouncementPeriod>
+                        <nanosec>100000000</nanosec>
+                    </clientAnnouncementPeriod>
+                </discovery_config>
+            </builtin>
+        </rtps>
+    </participant>
+</profiles>
