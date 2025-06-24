@@ -101,7 +101,9 @@ def make_domain_participant(domain_id: int = 0):
 
         def __init__(self, domain_id):
             factory = DomainParticipantFactory.get_instance()
-
+            # It's required so consequent get_default_participant_qos() respects XML profiles
+            factory.load_profiles()
+            
             self._participant_qos = DomainParticipantQos()
             factory.get_default_participant_qos(self._participant_qos)
 

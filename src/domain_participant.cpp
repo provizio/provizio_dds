@@ -47,7 +47,7 @@ namespace provizio // NOLINT: nesting namespace old-school way to support C++14
 
         domain_participant::domain_participant(const DomainId_t domain_id)
         {
-            auto qos = PARTICIPANT_QOS_DEFAULT;
+            DomainParticipantQos customized_qos;
 
             bool xml_profile = false;
             if (auto *const file_path = std::getenv(xml_profiles_env_variable())) // NOLINT: getenv required
@@ -55,17 +55,22 @@ namespace provizio // NOLINT: nesting namespace old-school way to support C++14
                 xml_profile = std::filesystem::exists(file_path) && !std::filesystem::is_directory(file_path);
             }
 
-            if (!xml_profile) // Otherwise, it's configured via the XML profile
+            auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
+            if (!xml_profile) // Unless configured via the XML profile
             {
-                qos.wire_protocol().builtin.discovery_config.initial_announcements.count =
+                participant_factory->load_profiles();
+                participant_factory->get_default_participant_qos(customized_qos);
+
+                customized_qos.wire_protocol().builtin.discovery_config.initial_announcements.count =
                     num_initial_discovery_announcements;
-                qos.wire_protocol().builtin.discovery_config.initial_announcements.period =
+                customized_qos.wire_protocol().builtin.discovery_config.initial_announcements.period =
                     initial_announcements_period;
-                qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod =
+                customized_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod =
                     lease_duration_announcement_period;
             }
 
-            participant = dds::DomainParticipantFactory::get_instance()->create_participant(domain_id, qos, nullptr);
+            participant = participant_factory->create_participant(
+                domain_id, xml_profile ? PARTICIPANT_QOS_DEFAULT : customized_qos, nullptr);
         }
 
         domain_participant::~domain_participant()
