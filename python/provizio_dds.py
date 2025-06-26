@@ -14,7 +14,7 @@
 
 """
 Python library for DDS communication in Provizio customer facing APIs and
-internal Provizio software components. Built using eProsima Fast-DDS DDS    
+internal Provizio software components. Built using eProsima Fast-DDS DDS
 implementation (Apache License 2.0).
 """
 import os
@@ -52,6 +52,15 @@ class QosDefaults:
     """Per type defaults for memory policies, both datawriter and datareader. PREALLOCATED_WITH_REALLOC_MEMORY_MODE in Fast-DDS 2.9+"""
     memory_policy_per_type = {None: PREALLOCATED_WITH_REALLOC_MEMORY_MODE}
 
+    """Number of initial participants discovery messages to be broadcast on period of initial_announcements_period"""
+    num_initial_discovery_announcements = 200
+
+    """Period of broadcasting initial participants discovery messages"""
+    initial_announcements_period = Duration_t(0, 50000000)  # As (sec, nanosec)
+
+    """Period of broadcasting participants discovery messages after the initial announcements"""
+    lease_duration_announcement_period = Duration_t(1, 0)  # As (sec, nanosec)
+
     def __init__(self, pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType)):
         """Constructs an instance of QosDefaults for the DDS Pub/Sub type.
 
@@ -87,15 +96,33 @@ def make_domain_participant(domain_id: int = 0):
     """
 
     class _DomainParticipant:
+        # It's FASTDDS_DEFAULT_PROFILES_FILE in Fast-DDS 3, so needs change when upgrading
+        xml_profiles_env_variable = "FASTRTPS_DEFAULT_PROFILES_FILE"
+
         def __init__(self, domain_id):
             factory = DomainParticipantFactory.get_instance()
-
+            # It's required so consequent get_default_participant_qos() respects XML profiles
+            factory.load_profiles()
+            
             self._participant_qos = DomainParticipantQos()
             factory.get_default_participant_qos(self._participant_qos)
-            # More reliable matching
-            self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.count = (
-                150
-            )
+
+            # Unless defined in the XML Profile, enable more reliable participants matching
+            if (
+                _DomainParticipant.xml_profiles_env_variable not in os.environ
+                or not os.path.isfile(
+                    os.environ[_DomainParticipant.xml_profiles_env_variable]
+                )
+            ):
+                self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.count = (
+                    QosDefaults.num_initial_discovery_announcements
+                )
+                self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.period = (
+                    QosDefaults.initial_announcements_period
+                )
+                self._participant_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod = (
+                    QosDefaults.lease_duration_announcement_period
+                )
 
             self._participant = factory.create_participant(
                 domain_id, self._participant_qos
@@ -115,7 +142,9 @@ def make_domain_participant(domain_id: int = 0):
 
         def register_type(self, pub_sub_type_instance):
             with self._register_type_mutex:
-                type_support = self._registered_types.get(pub_sub_type_instance.getName(), None)
+                type_support = self._registered_types.get(
+                    pub_sub_type_instance.getName(), None
+                )
                 if type_support is None:
                     type_support = TypeSupport(pub_sub_type_instance)
                     self._participant.register_type(type_support)
@@ -196,7 +225,7 @@ class Publisher(_TopicHandle):
         :param domain_participant: A DDS Domain Participant wrapper object, as created by provizio_dds.make_domain_participant
         :param str topic_name: A string DDS Topic name
         :param pub_sub_type: The DDS PubSub Type to be published, f.e. provizio_dds.StringPubSubType
-        :param on_has_subscriber_changed_function: Optional, a function to to be invoked on matching first / umatching last subscriber, takes two arguments: a Publisher and a bool: True when the first subscriber is matched, False when the last subscriber is unmatched; Note: called from a background Thread
+        :param on_has_subscriber_changed_function: Optional, a function to to be invoked on matching first / unmatching last subscriber, takes two arguments: a Publisher and a bool: True when the first subscriber is matched, False when the last subscriber is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data writer reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
         """
 
@@ -209,8 +238,12 @@ class Publisher(_TopicHandle):
 
         # Create Publisher
         self._publisher_qos = PublisherQos()
-        self._participant.fastdds_participant().get_default_publisher_qos(self._publisher_qos)
-        self._publisher = self._participant.fastdds_participant().create_publisher(self._publisher_qos)
+        self._participant.fastdds_participant().get_default_publisher_qos(
+            self._publisher_qos
+        )
+        self._publisher = self._participant.fastdds_participant().create_publisher(
+            self._publisher_qos
+        )
 
         # Create DataWriter
         self._listener = Publisher._WriterListener(
@@ -295,7 +328,7 @@ class Subscriber(_TopicHandle):
         topic_name: str,
         pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType),
         data_type: TypeVar("data_type"),
-        on_data_function: Callable[[object], Any],  # objectdata_type
+        on_data_function: Callable[[object], Any],
         on_has_publisher_changed_function: Optional[Callable[[bool], Any]] = None,
         reliability_kind: Optional[Any] = None,
     ):
@@ -306,7 +339,7 @@ class Subscriber(_TopicHandle):
         :param pub_sub_type: The DDS PubSub Type to be received, f.e. provizio_dds.StringPubSubType
         :param data_type: The DDS Data Type to be received, f.e. provizio_dds.String
         :param on_data_function: A function to be invoked on receiving published data, takes a single argument of DDS Data Type, f.e. provizio_dds.String; Note: called from a background Thread
-        :param on_has_publisher_changed_function: Optional, a function to be invoked on matching first / umatching last publisher, takes a single bool argument: True when the first publisher is matched, False when the last publisher is unmatched; Note: called from a background Thread
+        :param on_has_publisher_changed_function: Optional, a function to be invoked on matching first / unmatching last publisher, takes a single bool argument: True when the first publisher is matched, False when the last publisher is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data reader reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
         """
         super().__init__(domain_participant, topic_name, pub_sub_type)
@@ -318,7 +351,9 @@ class Subscriber(_TopicHandle):
 
         # Create Subscriber
         self._subscriber_qos = SubscriberQos()
-        self._participant.fastdds_participant().get_default_subscriber_qos(self._subscriber_qos)
+        self._participant.fastdds_participant().get_default_subscriber_qos(
+            self._subscriber_qos
+        )
         self._subscriber = self._participant.fastdds_participant().create_subscriber(
             self._subscriber_qos
         )

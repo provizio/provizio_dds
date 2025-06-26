@@ -1,0 +1,45 @@
+services:
+  subscriber:
+    build:
+      context: .
+      dockerfile: test/congested_network_test/congested_network_test.dockerfile
+      args:
+        SERVICE: subscriber
+        NETWORK_DELAY: 0ms
+        PACKETS_LOSS: 0%
+        NETWORK_RATE: 512kbit
+        XML_PROFILE: ${XML_PROFILE_SUBSCRIBER:-none}
+    container_name: provizio_dds_congested_subscriber
+    cap_add:
+      - NET_ADMIN
+    networks:
+      provizio_dds_congested_network:
+        ipv4_address: 201.10.0.2
+
+  publisher:
+    depends_on:
+      subscriber:
+        condition: service_started
+    build:
+      context: .
+      dockerfile: test/congested_network_test/congested_network_test.dockerfile
+      args:
+        SERVICE: publisher
+        NETWORK_DELAY: ${NETWORK_DELAY:-150ms}
+        PACKETS_LOSS: ${PACKETS_LOSS:-50%}
+        NETWORK_RATE: ${NETWORK_RATE:-128kbit}
+        XML_PROFILE: ${XML_PROFILE_PUBLISHER:-none}
+    container_name: provizio_dds_congested_publisher
+    cap_add:
+      - NET_ADMIN
+    networks:
+      provizio_dds_congested_network:
+        ipv4_address: 201.10.0.1
+
+networks:
+  provizio_dds_congested_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 201.0.0.0/8

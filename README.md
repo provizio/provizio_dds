@@ -219,3 +219,26 @@ for point in points_accumulator.get_points_ego_relative():
 ```
 
 For more details see [python/accumulation.py](python/accumulation.py) and [test/python/accumulation_test.py](test/python/accumulation_test.py).
+
+## XML Profiles
+
+As DDS allows for configuring many of its parameters, you can optionally define a custom XML profile and enable it via setting its path to environment variable `FASTRTPS_DEFAULT_PROFILES_FILE`. Make sure to set the `participant` tag's attribute `is_default_profile` to `true` to activate the profile automatically, f.e.:
+
+```XML
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com">
+    <participant profile_name="my_custom_profile" is_default_profile="true">
+        <rtps>
+        ...
+        </rtps>
+    </participant>
+</profiles>
+```
+
+For more details, please refer to [Fast-DDS documentation](https://fast-dds.docs.eprosima.com/en/2.14.x/fastdds/xml_configuration/xml_configuration.html).
+Please note that some of che changes may break compatibility between publishers and subscribers, unless applied on both sides.
+
+You may see how this functionality is used to activate Discovery-Server-based participants discovery in provizio_dds tests:
+
+- [test/congested_network_test/fast_dds_server_config.xml](test/congested_network_test/fast_dds_server_config.xml)
+- [test/congested_network_test/fast_dds_client_config.xml](test/congested_network_test/fast_dds_client_config.xml)
