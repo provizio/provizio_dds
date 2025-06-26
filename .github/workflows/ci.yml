@@ -155,7 +155,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-22.04]
+        runner: [ubuntu-22.04]
         build_type: [Release, Debug]
         cc: [gcc, clang]
     env:
@@ -180,7 +180,7 @@ jobs:
         packets_loss: [25%, 50%]
         network_delay: [250ms, 500ms]
     env:
-      NETWORK_LOSS: ${{matrix.packets_loss}}
+      PACKETS_LOSS: ${{matrix.packets_loss}}
       NETWORK_DELAY: ${{matrix.network_delay}}
       DISCOVERY_SERVER: OFF
     steps:
@@ -198,7 +198,7 @@ jobs:
         packets_loss: [50%, 75%]
         network_delay: [250ms, 500ms]
     env:
-      NETWORK_LOSS: ${{matrix.packets_loss}}
+      PACKETS_LOSS: ${{matrix.packets_loss}}
       NETWORK_DELAY: ${{matrix.network_delay}}
       DISCOVERY_SERVER: ON
     steps:

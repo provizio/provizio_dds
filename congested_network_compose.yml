@@ -6,7 +6,7 @@ services:
       args:
         SERVICE: subscriber
         NETWORK_DELAY: 0ms
-        NETWORK_LOSS: 0%
+        PACKETS_LOSS: 0%
         NETWORK_RATE: 512kbit
         XML_PROFILE: ${XML_PROFILE_SUBSCRIBER:-none}
     container_name: provizio_dds_congested_subscriber
@@ -26,7 +26,7 @@ services:
       args:
         SERVICE: publisher
         NETWORK_DELAY: ${NETWORK_DELAY:-150ms}
-        NETWORK_LOSS: ${NETWORK_LOSS:-50%}
+        PACKETS_LOSS: ${PACKETS_LOSS:-50%}
         NETWORK_RATE: ${NETWORK_RATE:-128kbit}
         XML_PROFILE: ${XML_PROFILE_PUBLISHER:-none}
     container_name: provizio_dds_congested_publisher

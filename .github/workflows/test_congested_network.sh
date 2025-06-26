@@ -16,7 +16,7 @@
 
 # Respects the following arguments from env variables:
 # NETWORK_DELAY (f.e. 300ms)
-# NETWORK_LOSS (f.e. 50%)
+# PACKETS_LOSS (f.e. 50%)
 # NETWORK_RATE (f.e. 128kbit)
 # DISCOVERY_SERVER (ON/OFF)
 # NUM_ITERATIONS (f.e. 5)
