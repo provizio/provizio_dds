@@ -12,18 +12,7 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-# Enable CTest
-include(CTest)
-enable_testing()
+find_package(Threads REQUIRED)
 
-add_subdirectory(simplest_pub_sub)
-add_subdirectory(pub_sub_type_reuse)
-add_subdirectory(reliable_pub_sub)
-add_subdirectory(request_response)
-add_subdirectory(request_response_concurrent)
-# TODO: add_subdirectory(request_response_service_client)
-add_subdirectory(ros_interop)
-
-if(PYTHON_BINDINGS)
-    add_subdirectory(python)
-endif(PYTHON_BINDINGS)
+add_executable(request_response_concurrent_client request_response_concurrent_client.cpp)
+target_link_libraries(request_response_concurrent_client PUBLIC provizio_dds Threads::Threads)

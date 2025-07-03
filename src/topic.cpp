@@ -12,23 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef DDS_COMMON
-#define DDS_COMMON
+#include "provizio/dds/topic.h"
 
-#include <fastdds/dds/domain/DomainParticipant.hpp>
-#include <fastdds/rtps/common/Guid.h>
-
-namespace provizio
+namespace provizio::dds
 {
-    namespace dds
+    topic::topic(eprosima::fastdds::dds::DomainParticipant *participant, std::mutex &registered_topics_mutex,
+                 Topic *the_topic, TopicQos qos)
+        : participant(participant), registered_topics_mutex(registered_topics_mutex), the_topic(the_topic),
+          the_qos(std::move(qos))
     {
-        /**
-         * @brief Makes Fast-DDS entities available in provizio::dds
-         */
-        using namespace eprosima::fastdds::dds;
+    }
 
-        using guid = eprosima::fastrtps::rtps::GUID_t;
-    } // namespace dds
-} // namespace provizio
-
-#endif // DDS_COMMON
+    topic::~topic()
+    {
+        std::lock_guard<std::mutex> lock{registered_topics_mutex};
+        if (participant != nullptr)
+        {
+            participant->delete_topic(the_topic);
+        }
+    }
+} // namespace provizio::dds

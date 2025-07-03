@@ -310,6 +310,8 @@ else(HAS_BIN_CACHE)
     # provizio_dds library
     set(PROVIZIO_DDS_SOURCES
         src/domain_participant.cpp
+        src/request_response.cpp
+        src/topic.cpp
     )
     add_library(provizio_dds SHARED ${PROVIZIO_DDS_SOURCES})
     target_link_libraries(provizio_dds PUBLIC provizio_dds_types fastrtps fastcdr)

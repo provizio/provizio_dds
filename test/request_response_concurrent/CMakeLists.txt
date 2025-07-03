@@ -1,4 +1,4 @@
-# Copyright 2023 Provizio Ltd.
+# Copyright 2025 Provizio Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not
 # use this file except in compliance with the License. You may obtain a copy of
@@ -12,18 +12,10 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-# Enable CTest
-include(CTest)
-enable_testing()
+add_subdirectory(request_response_concurrent_service)
+add_subdirectory(request_response_concurrent_client)
 
-add_subdirectory(simplest_pub_sub)
-add_subdirectory(pub_sub_type_reuse)
-add_subdirectory(reliable_pub_sub)
-add_subdirectory(request_response)
-add_subdirectory(request_response_concurrent)
-# TODO: add_subdirectory(request_response_service_client)
-add_subdirectory(ros_interop)
-
-if(PYTHON_BINDINGS)
-    add_subdirectory(python)
-endif(PYTHON_BINDINGS)
+# TODO: Windows version
+add_test(NAME request_response_concurrent COMMAND
+    bash -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_concurrent_service>\" \"$<TARGET_FILE:request_response_concurrent_client>\""
+)

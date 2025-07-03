@@ -24,16 +24,18 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include "provizio/dds/common.h"
+#include "provizio/dds/topic.h"
 
 namespace provizio
 {
     namespace dds
     {
         /**
-         * @brief Wrapper over eprosima::fastdds::dds::DomainParticipant taking care of TypeSupport registration.
+         * @brief Wrapper over eprosima::fastdds::dds::DomainParticipant taking care of TypeSupport and Topic
+         * registration.
          *
-         * @note register_type does so just once per type, any consequent registration simply reuses the registered
-         * TypeSupport.
+         * @note register_type and register_topic do so just once per type/topic name, any consequent registration
+         * simply reuses the registered TypeSupport/Topic.
          */
         class domain_participant
         {
@@ -55,6 +57,18 @@ namespace provizio
             template <typename data_pub_sub_type> TypeSupport register_type();
 
             /**
+             * @brief Registers the topic in the domain participant, only once per domain participant, thread-safe.
+             *
+             * @param topic_name Name of the topic.
+             * @param type_name Name of the type.
+             * @param qos QoS profile for the topic.
+             * @return std::shared_ptr<topic> A handle to the registered topic.
+             * @throws std::runtime_error if the topic has been already registered with a different QoS.
+             */
+            std::shared_ptr<topic> register_topic(const std::string &topic_name, const std::string &type_name,
+                                                  const TopicQos &qos);
+
+            /**
              * @brief Returns the underlying Fast-DDS DomainParticipant
              *
              * @return eprosima::fastdds::dds::DomainParticipant&
@@ -68,6 +82,8 @@ namespace provizio
             eprosima::fastdds::dds::DomainParticipant *participant;
             std::mutex registered_types_mutex;
             std::unordered_map<std::string, TypeSupport> registered_types;
+            std::mutex registered_topics_mutex;
+            std::unordered_map<std::string, std::weak_ptr<topic>> registered_topics;
         };
         using DomainParticipant =
             domain_participant; // To match DDS domain participant name, as previously used directly

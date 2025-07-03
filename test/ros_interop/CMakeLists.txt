@@ -22,13 +22,23 @@ if(ENABLE_ROS_TESTS)
         
         add_subdirectory(ros_interop_subscriber)
         add_subdirectory(ros_interop_publisher)
+        add_subdirectory(ros_interop_service)
+        add_subdirectory(ros_interop_request)
 
         add_test(NAME ros_interop_subscriber COMMAND
-            sh -c "$<TARGET_FILE:ros_interop_subscriber> & timeout 8 ros2 run demo_nodes_cpp talker & wait"
+            bash -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:ros_interop_subscriber>\" \"timeout 8 ros2 run demo_nodes_cpp talker || true\""
         )
         add_test(NAME ros_interop_publisher COMMAND
-            bash -c "$<TARGET_FILE:ros_interop_publisher> & python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_publisher/ros_subscriber.py & wait"
+            bash -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:ros_interop_publisher>\" \"python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_publisher/ros_subscriber.py\""
         )
+        add_test(NAME ros_interop_service COMMAND
+            bash -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:ros_interop_service>\" \"python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_service/ros_interop_client.py\""
+        )
+        add_test(NAME ros_interop_request COMMAND
+            bash -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_request/ros_interop_service.py\" \"$<TARGET_FILE:ros_interop_request>\""
+        )
+
+        # TODO: ros_interop_request
     endif(WIN32)
 else(ENABLE_ROS_TESTS)
     message(STATUS "Excluding ROS-interoperability tests as ENABLE_ROS_TESTS is OFF")
