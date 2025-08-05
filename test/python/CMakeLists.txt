@@ -42,6 +42,48 @@ add_test(NAME cpp_pub_python_sub
 )
 set_tests_properties(cpp_pub_python_sub PROPERTIES TIMEOUT 20)
 
+add_test(NAME python_request_response
+   COMMAND sh -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service.py\" \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_client.py\""
+   WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_request_response PROPERTIES TIMEOUT 20)
+
+add_test(NAME python_request_cpp_service
+    COMMAND sh -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service>\" \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_client.py\""
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_request_cpp_service PROPERTIES TIMEOUT 20)
+
+add_test(NAME python_request_cpp_response_concurrent_requests_serial_service
+    COMMAND sh -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service>\" \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_concurrent_client.py\""
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_request_cpp_response_concurrent_requests_serial_service PROPERTIES TIMEOUT 20)
+
+add_test(NAME python_request_cpp_service_concurrent
+    COMMAND sh -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_concurrent_service> 5\" \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_concurrent_client.py\""
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_request_cpp_service_concurrent PROPERTIES TIMEOUT 20)
+
+add_test(NAME python_service_cpp_client
+   COMMAND sh -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service.py\" \"$<TARGET_FILE:request_response_client>\""
+   WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_service_cpp_client PROPERTIES TIMEOUT 20)
+
+add_test(NAME python_serial_service_cpp_concurrent_requests
+   COMMAND sh -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service.py\" \"$<TARGET_FILE:request_response_concurrent_requests>\""
+   WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_serial_service_cpp_concurrent_requests PROPERTIES TIMEOUT 20)
+
+add_test(NAME python_service_cpp_requests_concurrent
+   COMMAND sh -c "${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service_concurrent.py\" \"$<TARGET_FILE:request_response_concurrent_requests>\""
+   WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_service_cpp_requests_concurrent PROPERTIES TIMEOUT 20)
+
 add_test(NAME pointcloud2_test
     COMMAND sh -c "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./pointcloud2_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"

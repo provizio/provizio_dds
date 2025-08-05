@@ -28,8 +28,8 @@ constexpr const char *log_prefix = "request_response_concurrent_client: ";
 int main()
 try
 {
-    const std::string service_name{"provizio_dds_test_request_response_concurrent"};
-    constexpr provizio::dds::DomainId_t domain_id = 15;
+    const std::string service_name{"provizio_dds_test_request_response"};
+    constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr std::chrono::seconds time_to_match{3};
     constexpr std::chrono::milliseconds timeout{1500};
 

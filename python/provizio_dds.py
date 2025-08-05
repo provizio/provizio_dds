@@ -17,10 +17,14 @@ Python library for DDS communication in Provizio customer facing APIs and
 internal Provizio software components. Built using eProsima Fast-DDS DDS
 implementation (Apache License 2.0).
 """
+import asyncio
+import inspect
 import os
 import threading
-import traceback
-from typing import Any, Callable, Optional, TypeVar
+import weakref
+from typing import Any, Callable, Optional
+import time
+from queue import Queue
 
 # until https://bugs.python.org/issue46276 is fixed we can apply this workaround
 # on windows
@@ -61,7 +65,7 @@ class QosDefaults:
     """Period of broadcasting participants discovery messages after the initial announcements"""
     lease_duration_announcement_period = Duration_t(1, 0)  # As (sec, nanosec)
 
-    def __init__(self, pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType)):
+    def __init__(self, pub_sub_type: TopicDataType):
         """Constructs an instance of QosDefaults for the DDS Pub/Sub type.
 
         :param pub_sub_type: The DDS PubSub Type, f.e. provizio_dds.StringPubSubType
@@ -103,7 +107,7 @@ def make_domain_participant(domain_id: int = 0):
             factory = DomainParticipantFactory.get_instance()
             # It's required so consequent get_default_participant_qos() respects XML profiles
             factory.load_profiles()
-            
+
             self._participant_qos = DomainParticipantQos()
             factory.get_default_participant_qos(self._participant_qos)
 
@@ -130,6 +134,8 @@ def make_domain_participant(domain_id: int = 0):
 
             self._register_type_mutex = threading.Lock()
             self._registered_types = dict()
+            self._register_topic_mutex = threading.Lock()
+            self._registered_topics = dict()
 
         def __del__(self):
             factory = DomainParticipantFactory.get_instance()
@@ -153,26 +159,52 @@ def make_domain_participant(domain_id: int = 0):
                     )
                 return type_support
 
+        def register_topic(self, topic_name, pub_sub_type):
+            with self._register_topic_mutex:
+                topic_info = self._registered_topics.get(topic_name)
+
+                if topic_info:
+                    topic_info["ref_count"] += 1
+                    return topic_info["topic"]
+                else:
+                    # Register the type first
+                    pub_sub_type_instance = pub_sub_type()
+                    type_support = self.register_type(pub_sub_type_instance)
+
+                    # Create the topic
+                    topic_qos = TopicQos()
+                    self.fastdds_participant().get_default_topic_qos(topic_qos)
+                    new_topic = self.fastdds_participant().create_topic(
+                        topic_name, pub_sub_type_instance.getName(), topic_qos
+                    )
+
+                    self._registered_topics[topic_name] = {
+                        "topic": new_topic,
+                        "ref_count": 1,
+                        "type_support": type_support,
+                    }
+                    return new_topic
+
+        def unregister_topic(self, topic_name):
+            with self._register_topic_mutex:
+                topic_info = self._registered_topics.get(topic_name)
+                if topic_info:
+                    topic_info["ref_count"] -= 1
+                    if topic_info["ref_count"] <= 0:
+                        self.fastdds_participant().delete_topic(topic_info["topic"])
+                        del self._registered_topics[topic_name]
+
     return _DomainParticipant(domain_id)
 
 
 class _TopicHandle:
     def __init__(self, domain_participant, topic_name, pub_sub_type):
         self._participant = domain_participant
-
-        # Register Type
-        self._topic_data_type = pub_sub_type()
-        self._type_support = self._participant.register_type(self._topic_data_type)
-
-        # Register Topic
-        self._topic_qos = TopicQos()
-        self._participant.fastdds_participant().get_default_topic_qos(self._topic_qos)
-        self._topic = self._participant.fastdds_participant().create_topic(
-            topic_name, self._topic_data_type.getName(), self._topic_qos
-        )
+        self._topic_name = topic_name
+        self._topic = self._participant.register_topic(topic_name, pub_sub_type)
 
     def __del__(self):
-        self._participant.fastdds_participant().delete_topic(self._topic)
+        self._participant.unregister_topic(self._topic_name)
 
 
 class Publisher(_TopicHandle):
@@ -185,14 +217,32 @@ class Publisher(_TopicHandle):
             self._on_has_subscriber_changed_function = (
                 on_has_subscriber_changed_function
             )
+            try:
+                sig = inspect.signature(self._on_has_subscriber_changed_function)
+                self._on_has_subscriber_changed_takes_guid = len(sig.parameters) == 3
+            except (ValueError, TypeError):
+                self._on_has_subscriber_changed_takes_guid = False
 
         def __del__(self):
             del self._publisher
             del self._on_has_subscriber_changed_function
 
         def on_publication_matched(self, _, info):
-            try:
-                if self._on_has_subscriber_changed_function:
+            if self._on_has_subscriber_changed_function:
+                if self._on_has_subscriber_changed_takes_guid:
+                    if info.current_count_change > 0:
+                        self._on_has_subscriber_changed_function(
+                            self._publisher(),
+                            True,
+                            info.last_subscription_handle.get_guid(),
+                        )
+                    elif info.current_count_change < 0:
+                        self._on_has_subscriber_changed_function(
+                            self._publisher(),
+                            False,
+                            info.last_subscription_handle.get_guid(),
+                        )
+                else:
                     if (
                         info.current_count > 0
                         and info.current_count_change == info.current_count
@@ -206,15 +256,12 @@ class Publisher(_TopicHandle):
                         self._on_has_subscriber_changed_function(
                             self._publisher(), False
                         )
-            except Exception as e:
-                traceback.print_exc()
-                raise e
 
     def __init__(
         self,
         domain_participant: object,
         topic_name: str,
-        pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType),
+        pub_sub_type: TopicDataType,
         on_has_subscriber_changed_function: Optional[
             Callable[[Publisher, bool], Any]
         ] = None,
@@ -253,6 +300,9 @@ class Publisher(_TopicHandle):
         self._publisher.get_default_datawriter_qos(self._writer_qos)
         self._writer_qos.reliability().kind = reliability_kind
         self._writer_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
+        self._writer_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
+        self._writer_qos.history().kind = KEEP_LAST_HISTORY_QOS
+        self._writer_qos.history().depth = 1
         self._writer = self._publisher.create_datawriter(
             self._topic, self._writer_qos, self._listener
         )
@@ -270,12 +320,15 @@ class Publisher(_TopicHandle):
 
         super().__del__()
 
-    def publish(self, data: object):
+    def publish(self, data: object, params: WriteParams = None):
         """Publishes DDS data
 
         :param data: actual data (not Pub Sub Type), f.e. provizio_dds.String
+        :param params: optional WriteParams to control the write operation
         :return: True if published successfully, and False otherwise
         """
+        if params:
+            return self._writer.write(data, params)
         return self._writer.write(data)
 
 
@@ -290,6 +343,11 @@ class Subscriber(_TopicHandle):
             self._data_type = data_type
             self._on_data_function = on_data_function
             self._on_has_publisher_changed_function = on_has_publisher_changed_function
+            try:
+                sig = inspect.signature(self._on_data_function)
+                self._on_data_takes_info = len(sig.parameters) == 2
+            except (ValueError, TypeError):
+                self._on_data_takes_info = False
 
         def __del__(self):
             del self._data_type
@@ -299,38 +357,34 @@ class Subscriber(_TopicHandle):
         def on_data_available(self, reader):
             info = SampleInfo()
             data = self._data_type()
-            reader.take_next_sample(data, info)
-            try:
-                self._on_data_function(data)
-            except Exception as e:
-                traceback.print_exc()
-                raise e
+            if reader.take_next_sample(data, info) == ReturnCode_t.RETCODE_OK:
+                if self._on_data_takes_info:
+                    self._on_data_function(data, info)
+                else:
+                    self._on_data_function(data)
 
         def on_subscription_matched(self, _, info):
-            try:
-                if self._on_has_publisher_changed_function:
-                    if (
-                        info.current_count > 0
-                        and info.current_count_change == info.current_count
-                    ):
-                        # Just matched the first publisher
-                        self._on_has_publisher_changed_function(True)
-                    elif info.current_count == 0 and info.current_count_change < 0:
-                        # Just unmatched the last publisher
-                        self._on_has_publisher_changed_function(False)
-            except Exception as e:
-                traceback.print_exc()
-                raise e
+            if self._on_has_publisher_changed_function:
+                if (
+                    info.current_count > 0
+                    and info.current_count_change == info.current_count
+                ):
+                    # Just matched the first publisher
+                    self._on_has_publisher_changed_function(True)
+                elif info.current_count == 0 and info.current_count_change < 0:
+                    # Just unmatched the last publisher
+                    self._on_has_publisher_changed_function(False)
 
     def __init__(
         self,
         domain_participant: object,
         topic_name: str,
-        pub_sub_type: TypeVar("pub_sub_type", bound=TopicDataType),
-        data_type: TypeVar("data_type"),
-        on_data_function: Callable[[object], Any],
+        pub_sub_type: TopicDataType,
+        data_type: object,
+        on_data_function: Callable,
         on_has_publisher_changed_function: Optional[Callable[[bool], Any]] = None,
         reliability_kind: Optional[Any] = None,
+        max_history_depth: int = -1,
     ):
         """Constructs a DDS Subscriber
 
@@ -338,7 +392,7 @@ class Subscriber(_TopicHandle):
         :param str topic_name: A string DDS Topic name
         :param pub_sub_type: The DDS PubSub Type to be received, f.e. provizio_dds.StringPubSubType
         :param data_type: The DDS Data Type to be received, f.e. provizio_dds.String
-        :param on_data_function: A function to be invoked on receiving published data, takes a single argument of DDS Data Type, f.e. provizio_dds.String; Note: called from a background Thread
+        :param on_data_function: A function to be invoked on receiving published data. It can take one argument (the data) or two arguments (data and a SampleInfo object). Note: called from a background Thread
         :param on_has_publisher_changed_function: Optional, a function to be invoked on matching first / unmatching last publisher, takes a single bool argument: True when the first publisher is matched, False when the last publisher is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data reader reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
         """
@@ -366,6 +420,14 @@ class Subscriber(_TopicHandle):
         self._subscriber.get_default_datareader_qos(self._reader_qos)
         self._reader_qos.reliability().kind = reliability_kind
         self._reader_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
+        self._reader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
+        if max_history_depth > 0:
+            self._reader_qos.history().kind = KEEP_LAST_HISTORY_QOS
+            self._reader_qos.history().depth = max_history_depth
+        elif max_history_depth == 0:
+            self._reader_qos.history().kind = KEEP_ALL_HISTORY_QOS
+        # else keep self._reader_qos.history() default
+
         self._reader = self._subscriber.create_datareader(
             self._topic, self._reader_qos, self._listener
         )
@@ -382,3 +444,347 @@ class Subscriber(_TopicHandle):
         del self._subscriber_qos
 
         super().__del__()
+
+    def get_guid(self):
+        return self._reader.guid()
+
+
+async def request(
+    domain_participant: object,
+    request_pub_sub_type,
+    response_pub_sub_type,
+    response_data_type,
+    request_data,
+    request_topic_name: str = None,
+    response_topic_name: str = None,
+    service_name: str = None,
+):
+    if request_topic_name is None:
+        assert (
+            service_name is not None
+        ), "Either of request_topic_name or service_name are required"
+        request_topic_name = _request_prefix + service_name + _request_suffix
+
+    if response_topic_name is None:
+        assert (
+            service_name is not None
+        ), "Either of response_topic_name or service_name are required"
+        response_topic_name = _response_prefix + service_name + _response_suffix
+
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    request_identity = SampleIdentity()
+    lock = threading.Lock()
+    publisher_matched = asyncio.Event()
+    subscriber_matched = asyncio.Event()
+
+    def set_data(data):
+        if not future.done():
+            future.set_result(data)
+
+    def on_response(data, info):
+        with lock:
+            if info.related_sample_identity == request_identity:
+                loop.call_soon_threadsafe(lambda: set_data(data))
+
+    def on_publisher_matched(_, matched):
+        if matched:
+            loop.call_soon_threadsafe(publisher_matched.set)
+
+    def on_subscriber_matched(matched):
+        if matched:
+            loop.call_soon_threadsafe(subscriber_matched.set)
+
+    response_subscriber = Subscriber(
+        domain_participant,
+        response_topic_name,
+        response_pub_sub_type,
+        response_data_type,
+        on_response,
+        on_has_publisher_changed_function=on_subscriber_matched,
+        reliability_kind=RELIABLE_RELIABILITY_QOS,
+    )
+
+    request_publisher = Publisher(
+        domain_participant,
+        request_topic_name,
+        request_pub_sub_type,
+        on_has_subscriber_changed_function=on_publisher_matched,
+        reliability_kind=RELIABLE_RELIABILITY_QOS,
+    )
+
+    await subscriber_matched.wait()
+    await publisher_matched.wait()
+
+    params = WriteParams()
+    params.related_sample_identity().writer_guid(response_subscriber.get_guid())
+
+    with lock:
+        if not request_publisher.publish(request_data, params):
+            return None
+        request_identity.writer_guid(response_subscriber.get_guid())
+        request_identity.sequence_number(params.sample_identity().sequence_number())
+
+    result = await future
+
+    del request_publisher
+    del response_subscriber
+
+    return result
+
+
+class Service:
+    class _RequestHandler:
+        def __init__(
+            self, handle_request_function, on_response_function, max_queue_size
+        ):
+            self._handle_request_function = handle_request_function
+            self._on_response_function = on_response_function
+            self._max_queue_size = max_queue_size
+            self._requests_queue = Queue()
+            self._stop = False
+            self._cv = threading.Condition()
+            self._thread = threading.Thread(target=self._process_requests)
+            self._thread.start()
+
+        def __del__(self):
+            self.stop()
+
+        def stop(self):
+            join = False
+            with self._cv:
+                if not self._stop:
+                    self._stop = True
+                    self._cv.notify()
+                    join = True
+            if join:
+                self._thread.join()
+
+        def handle_request(self, request, identity):
+            with self._cv:
+                if self._requests_queue.qsize() < self._max_queue_size:
+                    self._requests_queue.put((request, identity))
+                    self._cv.notify()
+                else:
+                    print(f"Service requests queue is full, dropping request")
+
+        def _process_requests(self):
+            while True:
+                with self._cv:
+                    self._cv.wait_for(
+                        lambda: self._stop or not self._requests_queue.empty()
+                    )
+                    if self._stop:
+                        return
+                    request, identity = self._requests_queue.get()
+
+                response = self._handle_request_function(request)
+                self._on_response_function(response, identity)
+
+    class _AsyncRequestHandler:
+        def __init__(
+            self, handle_request_function, on_response_function, max_queue_size
+        ):
+            self._handle_request_function = handle_request_function
+            self._on_response_function = on_response_function
+            self._max_queue_size = max_queue_size
+            self._loop = asyncio.new_event_loop()
+            self._thread = threading.Thread(target=self._run_loop)
+            self._thread.start()
+
+        def __del__(self):
+            self.stop()
+
+        def stop(self):
+            join = False
+            if self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                join = True
+            if join:
+                self._thread.join()
+
+        def _run_loop(self):
+            asyncio.set_event_loop(self._loop)
+            self._loop.run_forever()
+
+        def handle_request(self, request, identity):
+            if len(asyncio.all_tasks(self._loop)) < self._max_queue_size:
+                asyncio.run_coroutine_threadsafe(
+                    self._process_request(request, identity), self._loop
+                )
+            else:
+                print(
+                    f"provizio_dds: The service requests queue is full! A request will be dropped."
+                )
+
+        async def _process_request(self, request, identity):
+            response = await self._handle_request_function(request)
+            self._on_response_function(response, identity)
+
+    def __init__(
+        self,
+        domain_participant: object,
+        request_pub_sub_type: TopicDataType,
+        request_data_type: object,
+        response_pub_sub_type: TopicDataType,
+        handle_request_function: Callable,
+        request_topic_name: str = None,
+        response_topic_name: str = None,
+        service_name: str = None,
+        max_history_depth: int = -1,
+    ):
+        default_max_queue_size = 10
+
+        if request_topic_name is None:
+            assert (
+                service_name is not None
+            ), "Either of request_topic_name or service_name are required"
+            request_topic_name = _request_prefix + service_name + _request_suffix
+
+        if response_topic_name is None:
+            assert (
+                service_name is not None
+            ), "Either of response_topic_name or service_name are required"
+            response_topic_name = _response_prefix + service_name + _response_suffix
+
+        self._stop = False
+        self._ready_responses = []
+        self._matched_subscriptions = set()
+        self._service_cv = threading.Condition()
+
+        max_queue_size = (
+            max_history_depth
+            if max_history_depth > 0
+            else float("inf") if max_history_depth == 0 else default_max_queue_size
+        )
+        if inspect.iscoroutinefunction(handle_request_function):
+            self._request_handler = self._AsyncRequestHandler(
+                handle_request_function, self._on_response, max_queue_size
+            )
+        else:
+            self._request_handler = self._RequestHandler(
+                handle_request_function, self._on_response, max_queue_size
+            )
+
+        self._publisher = Publisher(
+            domain_participant,
+            response_topic_name,
+            response_pub_sub_type,
+            on_has_subscriber_changed_function=self._on_matched,
+            reliability_kind=RELIABLE_RELIABILITY_QOS,
+        )
+
+        self._subscriber = Subscriber(
+            domain_participant,
+            request_topic_name,
+            request_pub_sub_type,
+            request_data_type,
+            on_data_function=self._on_data,
+            reliability_kind=RELIABLE_RELIABILITY_QOS,
+            max_history_depth=max_history_depth,
+        )
+
+        self._dispatch_responses_thread = threading.Thread(
+            target=self._dispatch_responses
+        )
+        self._dispatch_responses_thread.start()
+
+    def __del__(self):
+        self.stop()
+
+    def stop(self):
+        join = False
+        with self._service_cv:
+            if not self._stop:
+                self._stop = True
+
+                self._request_handler.stop()
+
+                del self._publisher
+                del self._subscriber
+                del self._request_handler
+
+                self._service_cv.notify_all()
+                join = True
+        if join:
+            self._dispatch_responses_thread.join()
+
+    def _on_data(self, data, info):
+        identity = info.sample_identity
+        if info.related_sample_identity.writer_guid() != GUID_t.unknown():
+            identity.writer_guid(info.related_sample_identity.writer_guid())
+
+        # info.identity is reused internally in C++ part between on_data calls
+        # despite _on_data itself is not called concurrently, so a copy of identity
+        # is required to avoid race conditions.
+        # data, meanwhile, is not reused so it's OK to just pass it.
+        self._request_handler.handle_request(data, SampleIdentity(identity))
+
+    def _on_matched(self, _, matched, subscriber_guid):
+        with self._service_cv:
+            subscriber_guid_str = str(subscriber_guid)
+            if matched:
+                self._matched_subscriptions.add(subscriber_guid_str)
+            else:
+                self._matched_subscriptions.discard(subscriber_guid_str)
+            self._service_cv.notify_all()
+
+    def _on_response(self, data, identity):
+        with self._service_cv:
+            if self._is_subscriber_matched_mutex_prelocked(identity.writer_guid()):
+                params = WriteParams()
+                params.related_sample_identity(identity)
+                self._publisher.publish(data, params)
+            else:
+                self._ready_responses.append(
+                    {"data": data, "identity": identity, "time_ready": time.time()}
+                )
+                self._service_cv.notify_all()
+
+    def _is_subscriber_matched_mutex_prelocked(self, subscriber_guid):
+        return str(subscriber_guid) in self._matched_subscriptions
+
+    def _dispatch_matched(self):
+        dispatched = False
+        for i in range(len(self._ready_responses) - 1, -1, -1):
+            response = self._ready_responses[i]
+            if self._is_subscriber_matched_mutex_prelocked(
+                response["identity"].writer_guid()
+            ):
+                params = WriteParams()
+                params.related_sample_identity(response["identity"])
+                self._publisher.publish(response["data"], params)
+                self._ready_responses.pop(i)
+                dispatched = True
+
+        return dispatched
+
+    def _cleanup_timed_out(self):
+        cleaned = False
+        max_time_to_match = 10
+        current_time = time.time()
+        for i in range(len(self._ready_responses) - 1, -1, -1):
+            response = self._ready_responses[i]
+            if current_time - response["time_ready"] > max_time_to_match:
+                self._ready_responses.pop(i)
+                cleaned = True
+
+        return cleaned
+
+    def _dispatch_responses(self):
+        while True:
+            with self._service_cv:
+                self._service_cv.wait_for(
+                    lambda: self._stop
+                    or self._dispatch_matched()
+                    or self._cleanup_timed_out(),
+                    timeout=2,
+                )
+                if self._stop:
+                    return
+
+
+_request_prefix = "rq/"
+_response_prefix = "rr/"
+_request_suffix = "Request"
+_response_suffix = "Reply"

@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -23,15 +24,30 @@
 #include <std_msgs/msg/Int32PubSubTypes.h>
 #include <std_msgs/msg/Int64PubSubTypes.h>
 
-int main()
+int main(int argc, char *argv[])
 {
     constexpr const char *log_prefix = "request_response_concurrent_service: ";
-    const std::string service_name{"provizio_dds_test_request_response_concurrent"};
-    constexpr provizio::dds::DomainId_t domain_id = 15;
-    constexpr int requests_expected = 7;
+    const std::string service_name{"provizio_dds_test_request_response"};
+    constexpr provizio::dds::DomainId_t domain_id = 14;
+    constexpr int requests_expected_default = 7;
     constexpr std::chrono::seconds total_timeout{10};
     constexpr std::chrono::seconds end_sleep{4};
-    constexpr std::int32_t max_history_depth = requests_expected;
+
+    int requests_expected = requests_expected_default;
+    if (argc == 2)
+    {
+        // Supports specifying the expected number of requests
+        const auto argument = argv[1]; // NOLINT: Pointer coming from main() arguments
+        requests_expected = std::stoi(argument);
+        if (requests_expected <= 0)
+        {
+            std::cerr << log_prefix << "Incorrect argument: " << argument << ". Number of requests to wait expected!"
+                      << std::endl;
+            return 1;
+        }
+    }
+
+    std::int32_t max_history_depth = requests_expected;
 
     std::mutex mutex;
     std::condition_variable condition_variable;
@@ -39,12 +55,13 @@ int main()
 
     auto domain_participant = provizio::dds::make_domain_participant(domain_id);
 
-    std::cout << log_prefix << "Waiting for requests..." << std::endl;
+    std::cout << log_prefix << "Waiting for " << requests_expected << " requests... " << std::endl;
     auto service = provizio::dds::make_service<std_msgs::msg::Int32PubSubType, std_msgs::msg::Int64PubSubType>(
         domain_participant, service_name,
         [&](const std_msgs::msg::Int32 &request) {
             // returns std::future for a delayed response
-            return std::async(std::launch::async, [request, &mutex, &got_requests, &condition_variable]() {
+            return std::async(std::launch::async, [request, &mutex, &got_requests, &condition_variable,
+                                                   requests_expected]() {
                 std_msgs::msg::Int64 response;
 
                 const std::int64_t value = static_cast<std::int64_t>(request.data()) * request.data();
