@@ -273,8 +273,7 @@ else
 
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
-    apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev
-    python3 -m pip install setuptools
+    apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev python3-setuptools
 
     # Install SWIG (ubuntu 18 has too old swig in apt, ubuntu 24 has a broken version of swig in apt, see https://github.com/swig/swig/issues/2794)
     if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_24}" = true ]; then
