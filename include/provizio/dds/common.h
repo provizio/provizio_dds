@@ -18,17 +18,14 @@
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/rtps/common/Guid.h>
 
-namespace provizio
+namespace provizio::dds
 {
-    namespace dds
-    {
-        /**
-         * @brief Makes Fast-DDS entities available in provizio::dds
-         */
-        using namespace eprosima::fastdds::dds;
+    /**
+     * @brief Makes Fast-DDS entities available in provizio::dds
+     */
+    using namespace eprosima::fastdds::dds;
 
-        using guid = eprosima::fastrtps::rtps::GUID_t;
-    } // namespace dds
-} // namespace provizio
+    using guid = eprosima::fastrtps::rtps::GUID_t;
+} // namespace provizio::dds
 
 #endif // DDS_COMMON

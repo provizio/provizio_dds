@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "provizio/dds/request_response.h"
 #include "provizio/dds/request_response_details.h"
 
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <limits>
+
+#include "provizio/dds/common.h"
+#include "provizio/dds/subscriber.h"
 
 namespace provizio::dds::detail
 {
@@ -32,16 +35,19 @@ namespace provizio::dds::detail
 
     std::size_t to_max_queue_size(const std::int32_t max_history_depth)
     {
+        constexpr std::size_t default_queue_size = 10;
+
         if (max_history_depth > 0)
         {
             return static_cast<std::size_t>(max_history_depth);
         }
-        if (max_history_depth == 0) // Considered unlimited
+        if (max_history_depth == unlimited_history_depth)
         {
             return std::numeric_limits<std::size_t>::max();
         }
-        constexpr std::size_t default_queue_size = 10;
-        return default_queue_size; // "Default queue size"
+
+        // Default queue size
+        return default_queue_size;
     }
 
     bool is_subscriber_guid(const guid &guid_to_check)

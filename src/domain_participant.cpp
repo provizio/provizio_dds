@@ -18,11 +18,19 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <string>
 
+#include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
+#include <fastdds/dds/topic/Topic.hpp>
+#include <fastdds/dds/topic/TypeSupport.hpp>
+#include <fastdds/dds/topic/qos/TopicQos.hpp>
 #include <fastrtps/types/TypesBase.h>
 #include <fastrtps/xmlparser/XMLParserCommon.h>
+
+#include "provizio/dds/topic.h"
 
 namespace provizio::dds
 {
@@ -76,7 +84,7 @@ namespace provizio::dds
         {
             // Make sure neither of registered topic handles that are still alive won't try to unregister themselves
             // on destruction
-            std::lock_guard<std::mutex> lock{registered_topics_mutex};
+            const std::lock_guard<std::mutex> lock{registered_topics_mutex};
             for (auto &topic_pair : registered_topics)
             {
                 auto handle = topic_pair.second.lock();
@@ -93,7 +101,7 @@ namespace provizio::dds
     std::shared_ptr<topic> domain_participant::register_topic(const std::string &topic_name,
                                                               const std::string &type_name, const TopicQos &qos)
     {
-        std::lock_guard<std::mutex> lock{registered_topics_mutex};
+        const std::lock_guard<std::mutex> lock{registered_topics_mutex};
         const auto topic_iterator = registered_topics.find(topic_name);
         if (topic_iterator != registered_topics.end())
         {

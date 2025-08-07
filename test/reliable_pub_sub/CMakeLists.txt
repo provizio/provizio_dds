@@ -17,5 +17,5 @@ add_subdirectory(reliable_subscriber)
 
 # TODO: Windows version
 add_test(NAME reliable_pub_sub COMMAND
-    sh -c "$<TARGET_FILE:reliable_publisher> & $<TARGET_FILE:reliable_subscriber>"
+    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { $<TARGET_FILE:reliable_publisher> & $<TARGET_FILE:reliable_subscriber>; }"
 )

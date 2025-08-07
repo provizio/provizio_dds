@@ -34,14 +34,14 @@ int main()
     const auto subscriber = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
         provizio::dds::make_domain_participant(), topic_name,
         [&](const std_msgs::msg::String &message) {
-            std::lock_guard<std::mutex> lock{mutex};
+            const std::lock_guard<std::mutex> lock{mutex};
             string = message.data();
             condition_variable.notify_one();
         },
         [&](bool matched) {
             if (matched)
             {
-                std::lock_guard<std::mutex> lock{mutex};
+                const std::lock_guard<std::mutex> lock{mutex};
                 ever_matched = true;
                 condition_variable.notify_one();
             }

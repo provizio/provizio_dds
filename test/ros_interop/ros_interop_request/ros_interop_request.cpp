@@ -20,9 +20,11 @@
 
 #include "provizio/dds/request_response.h"
 
+constexpr const char *log_prefix = "ros_interop_request: ";
+
 int main()
+try
 {
-    constexpr const char *log_prefix = "ros_interop_request: ";
     const std::string service_name{"provizio_dds_test_ros_interop_request"};
     constexpr std::chrono::seconds timeout{4};
 
@@ -64,4 +66,10 @@ int main()
 
     std::cout << log_prefix << "Successfully got all the responses" << std::endl;
     return 0;
+}
+catch (const std::exception &exception)
+{
+    std::cout << log_prefix << "Exception during the test: " << exception.what() << std::endl;
+
+    return 1;
 }

@@ -71,7 +71,7 @@ int main(int argc, char *argv[])
 
                 response.data(value);
 
-                std::lock_guard<std::mutex> lock{mutex};
+                const std::lock_guard<std::mutex> lock{mutex};
                 ++got_requests;
                 if (got_requests >= requests_expected)
                 {

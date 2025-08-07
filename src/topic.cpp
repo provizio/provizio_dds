@@ -14,6 +14,13 @@
 
 #include "provizio/dds/topic.h"
 
+#include <mutex>
+#include <utility>
+
+#include <fastdds/dds/domain/DomainParticipant.hpp>
+#include <fastdds/dds/topic/Topic.hpp>
+#include <fastdds/dds/topic/qos/TopicQos.hpp>
+
 namespace provizio::dds
 {
     topic::topic(eprosima::fastdds::dds::DomainParticipant *participant, std::mutex &registered_topics_mutex,
@@ -25,7 +32,7 @@ namespace provizio::dds
 
     topic::~topic()
     {
-        std::lock_guard<std::mutex> lock{registered_topics_mutex};
+        const std::lock_guard<std::mutex> lock{registered_topics_mutex};
         if (participant != nullptr)
         {
             participant->delete_topic(the_topic);

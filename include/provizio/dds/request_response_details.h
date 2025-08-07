@@ -24,10 +24,12 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <future>
 #include <limits>
 #include <mutex>
 #include <queue>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -37,449 +39,431 @@
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/subscriber.h"
 
-namespace provizio
+namespace provizio::dds::detail
 {
-    namespace dds
+    extern const std::string request_prefix;
+    extern const std::string response_prefix;
+    extern const std::string request_suffix;
+    extern const std::string response_suffix;
+    extern const std::string requests_queue_full_error_message;
+
+    std::size_t to_max_queue_size(const std::int32_t max_history_depth);
+    bool is_subscriber_guid(const guid &guid_to_check);
+
+    template <typename function_type, typename = void> struct returns_future : std::false_type
     {
-        namespace detail
+    };
+
+    template <typename function_type>
+    struct returns_future<function_type,
+                          std::enable_if_t<std::is_convertible_v<
+                              decltype(std::declval<typename function_traits<function_type>::return_type>().wait_for(
+                                  std::chrono::seconds{0})),
+                              std::future_status>>> : std::true_type
+    {
+    };
+
+    template <typename response_pub_sub_type>
+    using on_response_function_type =
+        std::function<void(typename response_pub_sub_type::type, const eprosima::fastrtps::rtps::SampleIdentity &)>;
+
+    template <typename response_type> class response_data;
+    template <typename response_type> struct request_context;
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type> class service_client_basic;
+
+    struct guid_hash
+    {
+        std::size_t operator()(const guid &the_guid) const;
+    };
+
+    /**
+     * @brief A helper class to handle requests in a service. It supports both synchronous and asynchronous
+     * (returning a future) request handlers via appropriate specializations.
+     *
+     * @tparam request_pub_sub_type The type of the request message.
+     * @tparam response_pub_sub_type The type of the response message.
+     * @tparam handle_request_function_type The type of the request handler function.
+     */
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type,
+              typename = void>
+    class request_handler
+    {
+      public:
+        request_handler(handle_request_function_type handle_request_function,
+                        on_response_function_type<response_pub_sub_type> on_response_function,
+                        const std::size_t max_queue_size);
+        ~request_handler();
+
+        void handle_request(typename request_pub_sub_type::type request,
+                            const eprosima::fastrtps::rtps::SampleIdentity &identity);
+
+      private:
+        void process_requests();
+
+        using queued_request = std::pair<typename request_pub_sub_type::type, eprosima::fastrtps::rtps::SampleIdentity>;
+
+        const std::size_t max_queue_size;
+        const handle_request_function_type handle_request_function;
+        const on_response_function_type<response_pub_sub_type> on_response_function;
+
+        bool stop{false};
+        std::mutex requests_queue_mutex;
+        std::condition_variable cv;
+        std::queue<queued_request> requests_queue;
+        std::thread thread;
+    };
+
+    /**
+     * @brief A helper class to handle requests in a service. It supports both synchronous and asynchronous
+     * request handlers. This is a specialization for asynchronous request handlers that return a future.
+     *
+     * @tparam request_pub_sub_type The type of the request message.
+     * @tparam response_pub_sub_type The type of the response message.
+     * @tparam handle_request_function_type The type of the request handler function.
+     */
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
+    class request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                          std::enable_if_t<returns_future<handle_request_function_type>::value>>
+    {
+      public:
+        request_handler(handle_request_function_type handle_request_function,
+                        on_response_function_type<response_pub_sub_type> on_response_function,
+                        const std::size_t max_queue_size);
+        ~request_handler();
+
+        void handle_request(const typename request_pub_sub_type::type &request,
+                            const eprosima::fastrtps::rtps::SampleIdentity &identity);
+
+      private:
+        using future_type = typename function_traits<handle_request_function_type>::return_type;
+        void handle_futures();
+
+        static constexpr std::chrono::milliseconds handler_period{20};
+        static constexpr std::chrono::milliseconds dont_wait{0};
+        const std::size_t max_queue_size;
+        const handle_request_function_type handle_request_function;
+        const on_response_function_type<response_pub_sub_type> on_response_function;
+        std::mutex mutex;
+        bool stop{false};
+        std::condition_variable cv;
+        std::vector<std::pair<future_type, eprosima::fastrtps::rtps::SampleIdentity>> futures;
+        std::thread handler_thread;
+    };
+
+    template <typename response_type> class response_data
+    {
+      public:
+        const bool is_set() const;
+        void set(const response_type &response);
+        const response_type &get() const;
+        std::mutex &mutex() const;
+        std::condition_variable &cv() const;
+
+      private:
+        mutable std::mutex response_mutex;
+        mutable std::condition_variable value_cv;
+        response_type value;
+        bool has_value{false};
+    };
+
+    template <typename response_type> struct request_context
+    {
+        using sample_identity = eprosima::fastrtps::rtps::SampleIdentity;
+        std::mutex mutex;
+        sample_identity identity;
+        std::weak_ptr<response_data<response_type>> response;
+    };
+
+    /**
+     * @brief A basic service client that can send requests and receive responses. For internal use by
+     * future_response.
+     *
+     * @tparam request_pub_sub_type The type of the request message.
+     * @tparam response_pub_sub_type The type of the response message.
+     */
+    template <typename request_pub_sub_type, typename response_pub_sub_type> class service_client_basic
+    {
+      public:
+        template <typename handle_response_function_type>
+        service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
+                             const std::string &response_topic_name,
+                             handle_response_function_type handle_response_function);
+        template <typename handle_response_function_type>
+        service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
+                             handle_response_function_type handle_response_function);
+
+        bool request(typename request_pub_sub_type::type &request_data,
+                     const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context);
+
+      private:
+        using deferred_request = std::pair<typename request_pub_sub_type::type,
+                                           std::shared_ptr<request_context<typename response_pub_sub_type::type>>>;
+
+        bool do_request(typename request_pub_sub_type::type &request_data,
+                        request_context<typename response_pub_sub_type::type> &context);
+        void request_deferred_mutex_prelocked();
+
+        std::mutex mutex;
+        std::vector<deferred_request> deferred_requests;
+        bool publisher_matched{false};
+        bool subscriber_matched{false};
+        std::shared_ptr<data_publisher<request_pub_sub_type>> publisher;
+        std::shared_ptr<subscriber_handle<response_pub_sub_type>> subscriber;
+    };
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type,
+              typename sfinae_placeholder>
+    request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                    sfinae_placeholder>::request_handler(handle_request_function_type handle_request_function,
+                                                         on_response_function_type<response_pub_sub_type>
+                                                             on_response_function,
+                                                         const std::size_t max_queue_size)
+        : max_queue_size(max_queue_size), handle_request_function(std::move(handle_request_function)),
+          on_response_function(std::move(on_response_function)), thread(&request_handler::process_requests, this)
+    {
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type,
+              typename sfinae_placeholder>
+    request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                    sfinae_placeholder>::~request_handler()
+    {
         {
-            extern const std::string request_prefix;
-            extern const std::string response_prefix;
-            extern const std::string request_suffix;
-            extern const std::string response_suffix;
-            extern const std::string requests_queue_full_error_message;
+            const std::lock_guard<std::mutex> lock{requests_queue_mutex};
+            stop = true;
+        }
+        cv.notify_all();
+        thread.join();
+    }
 
-            std::size_t to_max_queue_size(const std::int32_t max_history_depth);
-            bool is_subscriber_guid(const guid &guid_to_check);
-
-            template <typename function_type, typename = void> struct returns_future : std::false_type
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type,
+              typename sfinae_placeholder>
+    void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                         sfinae_placeholder>::handle_request(typename request_pub_sub_type::type request,
+                                                             const eprosima::fastrtps::rtps::SampleIdentity &identity)
+    {
+        {
+            const std::lock_guard<std::mutex> lock{requests_queue_mutex};
+            if (requests_queue.size() < max_queue_size)
             {
-            };
-
-            template <typename function_type>
-            struct returns_future<function_type,
-                                  std::enable_if_t<std::is_convertible_v<
-                                      decltype(std::declval<typename function_traits<function_type>::return_type>()
-                                                   .wait_for(std::chrono::seconds{0})),
-                                      std::future_status>>> : std::true_type
+                requests_queue.emplace(std::move(request), identity);
+            }
+            else
             {
-            };
+                std::cerr << requests_queue_full_error_message << std::endl;
+            }
+        }
+        cv.notify_all();
+    }
 
-            template <typename response_pub_sub_type>
-            using on_response_function_type = std::function<void(typename response_pub_sub_type::type,
-                                                                 const eprosima::fastrtps::rtps::SampleIdentity &)>;
-
-            template <typename response_type> class response_data;
-            template <typename response_type> struct request_context;
-
-            template <typename request_pub_sub_type, typename response_pub_sub_type> class service_client_basic;
-
-            struct guid_hash
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type,
+              typename SFINAE_PLACEHOLDER>
+    void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                         SFINAE_PLACEHOLDER>::process_requests()
+    {
+        std::unique_lock<std::mutex> lock{requests_queue_mutex};
+        while (!stop)
+        {
+            cv.wait(lock, [&]() { return stop || !requests_queue.empty(); });
+            if (!stop && !requests_queue.empty())
             {
-                std::size_t operator()(const guid &the_guid) const;
-            };
+                const queued_request request{std::move(requests_queue.front())};
+                requests_queue.pop();
+                lock.unlock();
+                on_response_function(handle_request_function(request.first), request.second);
+                lock.lock();
+            }
+        }
+    }
 
-            /**
-             * @brief A helper class to handle requests in a service. It supports both synchronous and asynchronous
-             * (returning a future) request handlers via appropriate specializations.
-             *
-             * @tparam request_pub_sub_type The type of the request message.
-             * @tparam response_pub_sub_type The type of the response message.
-             * @tparam handle_request_function_type The type of the request handler function.
-             */
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type, typename = void>
-            class request_handler
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
+    request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                    std::enable_if_t<returns_future<handle_request_function_type>::value>>::
+        request_handler(handle_request_function_type handle_request_function,
+                        on_response_function_type<response_pub_sub_type> on_response_function,
+                        const std::size_t max_queue_size)
+        : max_queue_size(max_queue_size), handle_request_function(std::move(handle_request_function)),
+          on_response_function(std::move(on_response_function)), handler_thread(&request_handler::handle_futures, this)
+    {
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
+    request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                    std::enable_if_t<returns_future<handle_request_function_type>::value>>::~request_handler()
+    {
+        {
+            const std::lock_guard<std::mutex> lock{mutex};
+            stop = true;
+        }
+        cv.notify_one();
+        handler_thread.join();
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
+    void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                         std::enable_if_t<returns_future<handle_request_function_type>::value>>::
+        handle_request(const typename request_pub_sub_type::type &request,
+                       const eprosima::fastrtps::rtps::SampleIdentity &identity)
+    {
+        const std::lock_guard<std::mutex> lock{mutex};
+        if (futures.size() < max_queue_size)
+        {
+            futures.emplace_back(handle_request_function(request), identity);
+        }
+        else
+        {
+            std::cerr << requests_queue_full_error_message << std::endl;
+        }
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
+    void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                         std::enable_if_t<returns_future<handle_request_function_type>::value>>::handle_futures()
+    {
+        std::unique_lock<std::mutex> lock{mutex};
+        while (!stop)
+        {
+            if (cv.wait_for(lock, handler_period, [this] { return stop; }))
             {
-              public:
-                request_handler(handle_request_function_type handle_request_function,
-                                on_response_function_type<response_pub_sub_type> on_response_function,
-                                const std::size_t max_queue_size);
-                ~request_handler();
-
-                void handle_request(typename request_pub_sub_type::type request,
-                                    const eprosima::fastrtps::rtps::SampleIdentity &identity);
-
-              private:
-                void process_requests();
-
-                using queued_request =
-                    std::pair<typename request_pub_sub_type::type, eprosima::fastrtps::rtps::SampleIdentity>;
-
-                const std::size_t max_queue_size;
-                const handle_request_function_type handle_request_function;
-                const on_response_function_type<response_pub_sub_type> on_response_function;
-
-                bool stop{false};
-                std::mutex requests_queue_mutex;
-                std::condition_variable cv;
-                std::queue<queued_request> requests_queue;
-                std::thread thread;
-            };
-
-            /**
-             * @brief A helper class to handle requests in a service. It supports both synchronous and asynchronous
-             * request handlers. This is a specialization for asynchronous request handlers that return a future.
-             *
-             * @tparam request_pub_sub_type The type of the request message.
-             * @tparam response_pub_sub_type The type of the response message.
-             * @tparam handle_request_function_type The type of the request handler function.
-             */
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type>
-            class request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
-                                  std::enable_if_t<returns_future<handle_request_function_type>::value>>
-            {
-              public:
-                request_handler(handle_request_function_type handle_request_function,
-                                on_response_function_type<response_pub_sub_type> on_response_function,
-                                const std::size_t max_queue_size);
-                ~request_handler();
-
-                void handle_request(const typename request_pub_sub_type::type &request,
-                                    const eprosima::fastrtps::rtps::SampleIdentity &identity);
-
-              private:
-                using future_type = typename function_traits<handle_request_function_type>::return_type;
-                void handle_futures();
-
-                static constexpr std::chrono::milliseconds handler_period{20};
-                static constexpr std::chrono::milliseconds dont_wait{0};
-                const std::size_t max_queue_size;
-                const handle_request_function_type handle_request_function;
-                const on_response_function_type<response_pub_sub_type> on_response_function;
-                std::mutex mutex;
-                bool stop{false};
-                std::condition_variable cv;
-                std::vector<std::pair<future_type, eprosima::fastrtps::rtps::SampleIdentity>> futures;
-                std::thread handler_thread;
-            };
-
-            template <typename response_type> class response_data
-            {
-              public:
-                const bool is_set() const;
-                void set(const response_type &response);
-                const response_type &get() const;
-                std::mutex &mutex() const;
-                std::condition_variable &cv() const;
-
-              private:
-                mutable std::mutex response_mutex;
-                mutable std::condition_variable value_cv;
-                response_type value;
-                bool has_value{false};
-            };
-
-            template <typename response_type> struct request_context
-            {
-                using sample_identity = eprosima::fastrtps::rtps::SampleIdentity;
-                std::mutex mutex;
-                sample_identity identity;
-                std::weak_ptr<response_data<response_type>> response;
-            };
-
-            /**
-             * @brief A basic service client that can send requests and receive responses. For internal use by
-             * future_response.
-             *
-             * @tparam request_pub_sub_type The type of the request message.
-             * @tparam response_pub_sub_type The type of the response message.
-             */
-            template <typename request_pub_sub_type, typename response_pub_sub_type> class service_client_basic
-            {
-              public:
-                template <typename handle_response_function_type>
-                service_client_basic(std::shared_ptr<domain_participant> participant,
-                                     const std::string &request_topic_name, const std::string &response_topic_name,
-                                     handle_response_function_type handle_response_function);
-                template <typename handle_response_function_type>
-                service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
-                                     handle_response_function_type handle_response_function);
-
-                bool request(typename request_pub_sub_type::type &request_data,
-                             const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context);
-
-              private:
-                using deferred_request =
-                    std::pair<typename request_pub_sub_type::type,
-                              std::shared_ptr<request_context<typename response_pub_sub_type::type>>>;
-
-                bool do_request(typename request_pub_sub_type::type &request_data,
-                                request_context<typename response_pub_sub_type::type> &context);
-                void request_deferred_mutex_prelocked();
-
-                std::mutex mutex;
-                std::vector<deferred_request> deferred_requests;
-                bool publisher_matched{false};
-                bool subscriber_matched{false};
-                std::shared_ptr<data_publisher<request_pub_sub_type>> publisher;
-                std::shared_ptr<subscriber_handle<response_pub_sub_type>> subscriber;
-            };
-
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type, typename sfinae_placeholder>
-            request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
-                            sfinae_placeholder>::request_handler(handle_request_function_type handle_request_function,
-                                                                 on_response_function_type<response_pub_sub_type>
-                                                                     on_response_function,
-                                                                 const std::size_t max_queue_size)
-                : max_queue_size(max_queue_size), handle_request_function(std::move(handle_request_function)),
-                  on_response_function(std::move(on_response_function)),
-                  thread(&request_handler::process_requests, this)
-            {
+                assert(stop);
+                return;
             }
 
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type, typename sfinae_placeholder>
-            request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
-                            sfinae_placeholder>::~request_handler()
+            for (std::size_t i = futures.size(); i > 0; --i)
             {
+                auto future_iterator = futures.begin() + (i - 1);
+                if (future_iterator->first.wait_for(dont_wait) == std::future_status::ready)
                 {
-                    std::lock_guard<std::mutex> lock{requests_queue_mutex};
-                    stop = true;
-                }
-                cv.notify_all();
-                thread.join();
-            }
-
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type, typename sfinae_placeholder>
-            void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
-                                 sfinae_placeholder>::handle_request(typename request_pub_sub_type::type request,
-                                                                     const eprosima::fastrtps::rtps::SampleIdentity
-                                                                         &identity)
-            {
-                {
-                    std::lock_guard<std::mutex> lock{requests_queue_mutex};
-                    if (requests_queue.size() < max_queue_size)
-                    {
-                        requests_queue.emplace(std::move(request), identity);
-                    }
-                    else
-                    {
-                        std::cerr << requests_queue_full_error_message << std::endl;
-                    }
-                }
-                cv.notify_all();
-            }
-
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type, typename SFINAE_PLACEHOLDER>
-            void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
-                                 SFINAE_PLACEHOLDER>::process_requests()
-            {
-                std::unique_lock<std::mutex> lock{requests_queue_mutex};
-                while (!stop)
-                {
-                    cv.wait(lock, [&]() { return stop || !requests_queue.empty(); });
-                    if (!stop && !requests_queue.empty())
-                    {
-                        const queued_request request{std::move(requests_queue.front())};
-                        requests_queue.pop();
-                        lock.unlock();
-                        on_response_function(handle_request_function(request.first), request.second);
-                        lock.lock();
-                    }
+                    on_response_function(future_iterator->first.get(), future_iterator->second);
+                    futures.erase(future_iterator);
                 }
             }
+        }
+    }
 
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type>
-            request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
-                            std::enable_if_t<returns_future<handle_request_function_type>::value>>::
-                request_handler(handle_request_function_type handle_request_function,
-                                on_response_function_type<response_pub_sub_type> on_response_function,
-                                const std::size_t max_queue_size)
-                : max_queue_size(max_queue_size), handle_request_function(std::move(handle_request_function)),
-                  on_response_function(std::move(on_response_function)),
-                  handler_thread(&request_handler::handle_futures, this)
-            {
-            }
+    template <typename response_type> const bool response_data<response_type>::is_set() const
+    {
+        return has_value;
+    }
 
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type>
-            request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
-                            std::enable_if_t<returns_future<handle_request_function_type>::value>>::~request_handler()
-            {
-                {
-                    std::lock_guard<std::mutex> lock{mutex};
-                    stop = true;
-                }
-                cv.notify_one();
-                handler_thread.join();
-            }
+    template <typename response_type> void response_data<response_type>::set(const response_type &response)
+    {
+        if (has_value)
+        {
+            throw std::future_error{std::future_errc::promise_already_satisfied};
+        }
+        value = response;
+        has_value = true;
+        value_cv.notify_all();
+    }
 
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type>
-            void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
-                                 std::enable_if_t<returns_future<handle_request_function_type>::value>>::
-                handle_request(const typename request_pub_sub_type::type &request,
-                               const eprosima::fastrtps::rtps::SampleIdentity &identity)
-            {
-                std::lock_guard<std::mutex> lock{mutex};
-                if (futures.size() < max_queue_size)
-                {
-                    futures.emplace_back(handle_request_function(request), identity);
-                }
-                else
-                {
-                    std::cerr << requests_queue_full_error_message << std::endl;
-                }
-            }
+    template <typename response_type> const response_type &response_data<response_type>::get() const
+    {
+        const std::lock_guard<std::mutex> lock{response_mutex};
+        if (!has_value)
+        {
+            throw std::future_error{std::future_errc::no_state};
+        }
+        return value;
+    }
 
-            template <typename request_pub_sub_type, typename response_pub_sub_type,
-                      typename handle_request_function_type>
-            void request_handler<
-                request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
-                std::enable_if_t<returns_future<handle_request_function_type>::value>>::handle_futures()
-            {
-                std::unique_lock<std::mutex> lock{mutex};
-                while (!stop)
-                {
-                    if (cv.wait_for(lock, handler_period, [this] { return stop; }))
-                    {
-                        assert(stop);
-                        return;
-                    }
+    template <typename response_type> std::mutex &response_data<response_type>::mutex() const
+    {
+        return response_mutex;
+    }
 
-                    for (std::size_t i = futures.size(); i > 0; --i)
-                    {
-                        auto future_iterator = futures.begin() + (i - 1);
-                        if (future_iterator->first.wait_for(dont_wait) == std::future_status::ready)
-                        {
-                            on_response_function(future_iterator->first.get(), future_iterator->second);
-                            futures.erase(future_iterator);
-                        }
-                    }
-                }
-            }
+    template <typename response_type> std::condition_variable &response_data<response_type>::cv() const
+    {
+        return value_cv;
+    }
 
-            template <typename response_type> const bool response_data<response_type>::is_set() const
-            {
-                return has_value;
-            }
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    template <typename handle_response_function_type>
+    service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
+        std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
+        const std::string &response_topic_name, handle_response_function_type handle_response_function)
+        : publisher(make_publisher<request_pub_sub_type>(
+              participant, request_topic_name,
+              [this](provizio::dds::data_publisher<request_pub_sub_type> &, const bool matched) {
+                  const std::lock_guard<std::mutex> lock{mutex};
+                  publisher_matched = matched;
+                  if (publisher_matched && subscriber_matched)
+                  {
+                      request_deferred_mutex_prelocked();
+                  }
+              },
+              RELIABLE_RELIABILITY_QOS)),
+          subscriber(make_subscriber<response_pub_sub_type>(
+              participant, response_topic_name, std::move(handle_response_function),
+              [this](const bool matched) {
+                  const std::lock_guard<std::mutex> lock{mutex};
+                  subscriber_matched = matched;
+                  if (publisher_matched && subscriber_matched)
+                  {
+                      request_deferred_mutex_prelocked();
+                  }
+              },
+              RELIABLE_RELIABILITY_QOS))
+    {
+    }
 
-            template <typename response_type> void response_data<response_type>::set(const response_type &response)
-            {
-                if (has_value)
-                {
-                    throw std::future_error{std::future_errc::promise_already_satisfied};
-                }
-                value = response;
-                has_value = true;
-                value_cv.notify_all();
-            }
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    template <typename handle_response_function_type>
+    service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
+        std::shared_ptr<domain_participant> participant, const std::string &service_name,
+        handle_response_function_type handle_response_function)
+        : service_client_basic(std::move(participant), request_prefix + service_name + request_suffix,
+                               response_prefix + service_name + response_suffix, std::move(handle_response_function))
+    {
+    }
 
-            template <typename response_type> const response_type &response_data<response_type>::get() const
-            {
-                std::lock_guard<std::mutex> lock{response_mutex};
-                if (!has_value)
-                {
-                    throw std::future_error{std::future_errc::no_state};
-                }
-                return value;
-            }
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    bool service_client_basic<request_pub_sub_type, response_pub_sub_type>::request(
+        typename request_pub_sub_type::type &request_data,
+        const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context)
+    {
+        const std::lock_guard<std::mutex> lock{mutex};
+        if (publisher_matched && subscriber_matched)
+        {
+            return do_request(request_data, *context);
+        }
+        else
+        {
+            deferred_requests.emplace_back(request_data, context);
+            return true;
+        }
+    }
 
-            template <typename response_type> std::mutex &response_data<response_type>::mutex() const
-            {
-                return response_mutex;
-            }
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    bool service_client_basic<request_pub_sub_type, response_pub_sub_type>::do_request(
+        typename request_pub_sub_type::type &request_data,
+        request_context<typename response_pub_sub_type::type> &context)
+    {
+        const auto subscriber_guid = subscriber->get_guid();
+        WriteParams params;
+        params.related_sample_identity().writer_guid() = subscriber_guid;
+        const std::lock_guard<std::mutex> lock{context.mutex};
+        const bool success = publisher->publish(request_data, params);
+        if (success)
+        {
+            context.identity.writer_guid() = subscriber_guid;
+            context.identity.sequence_number() = params.sample_identity().sequence_number();
+        }
+        return success;
+    }
 
-            template <typename response_type> std::condition_variable &response_data<response_type>::cv() const
-            {
-                return value_cv;
-            }
-
-            template <typename request_pub_sub_type, typename response_pub_sub_type>
-            template <typename handle_response_function_type>
-            service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
-                std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
-                const std::string &response_topic_name, handle_response_function_type handle_response_function)
-                : publisher(make_publisher<request_pub_sub_type>(
-                      participant, request_topic_name,
-                      [this](provizio::dds::data_publisher<request_pub_sub_type> &, const bool matched) {
-                          std::lock_guard<std::mutex> lock{mutex};
-                          publisher_matched = matched;
-                          if (publisher_matched && subscriber_matched)
-                          {
-                              request_deferred_mutex_prelocked();
-                          }
-                      },
-                      RELIABLE_RELIABILITY_QOS)),
-                  subscriber(make_subscriber<response_pub_sub_type>(
-                      participant, response_topic_name, std::move(handle_response_function),
-                      [this](const bool matched) {
-                          std::lock_guard<std::mutex> lock{mutex};
-                          subscriber_matched = matched;
-                          if (publisher_matched && subscriber_matched)
-                          {
-                              request_deferred_mutex_prelocked();
-                          }
-                      },
-                      RELIABLE_RELIABILITY_QOS))
-            {
-            }
-
-            template <typename request_pub_sub_type, typename response_pub_sub_type>
-            template <typename handle_response_function_type>
-            service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
-                std::shared_ptr<domain_participant> participant, const std::string &service_name,
-                handle_response_function_type handle_response_function)
-                : service_client_basic(std::move(participant), request_prefix + service_name + request_suffix,
-                                       response_prefix + service_name + response_suffix,
-                                       std::move(handle_response_function))
-            {
-            }
-
-            template <typename request_pub_sub_type, typename response_pub_sub_type>
-            bool service_client_basic<request_pub_sub_type, response_pub_sub_type>::request(
-                typename request_pub_sub_type::type &request_data,
-                const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context)
-            {
-                std::lock_guard<std::mutex> lock{mutex};
-                if (publisher_matched && subscriber_matched)
-                {
-                    return do_request(request_data, *context);
-                }
-                else
-                {
-                    deferred_requests.emplace_back(request_data, context);
-                    return true;
-                }
-            }
-
-            template <typename request_pub_sub_type, typename response_pub_sub_type>
-            bool service_client_basic<request_pub_sub_type, response_pub_sub_type>::do_request(
-                typename request_pub_sub_type::type &request_data,
-                request_context<typename response_pub_sub_type::type> &context)
-            {
-                const auto subscriber_guid = subscriber->get_guid();
-                WriteParams params;
-                params.related_sample_identity().writer_guid() = subscriber_guid;
-                std::lock_guard<std::mutex> lock{context.mutex};
-                const bool success = publisher->publish(request_data, params);
-                if (success)
-                {
-                    context.identity.writer_guid() = subscriber_guid;
-                    context.identity.sequence_number() = params.sample_identity().sequence_number();
-                }
-                return success;
-            }
-
-            template <typename request_pub_sub_type, typename response_pub_sub_type>
-            void service_client_basic<request_pub_sub_type, response_pub_sub_type>::request_deferred_mutex_prelocked()
-            {
-                assert(publisher_matched);
-                assert(subscriber_matched);
-                for (auto &it : deferred_requests)
-                {
-                    do_request(it.first, *it.second);
-                }
-                deferred_requests.clear();
-            }
-        } // namespace detail
-    }     // namespace dds
-} // namespace provizio
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    void service_client_basic<request_pub_sub_type, response_pub_sub_type>::request_deferred_mutex_prelocked()
+    {
+        assert(publisher_matched);
+        assert(subscriber_matched);
+        for (auto &it : deferred_requests)
+        {
+            do_request(it.first, *it.second);
+        }
+        deferred_requests.clear();
+    }
+} // namespace provizio::dds::detail
 
 #endif // DDS_REQUEST_RESPONSE_DETAILS

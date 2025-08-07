@@ -30,10 +30,11 @@ int main()
     constexpr int requests_expected = 2;
     constexpr std::chrono::seconds total_timeout{5};
     constexpr std::chrono::seconds end_sleep{2};
-    constexpr std::int32_t max_history_depth = requests_expected;
+    constexpr std::int32_t max_history_depth =
+        provizio::dds::use_default_qos_durability; // Keep all default for ROS2 compatibility
 
     std::mutex mutex;
-    std::condition_variable cv;
+    std::condition_variable condition_variable;
     int got_requests = 0;
 
     auto domain_participant = provizio::dds::make_domain_participant();
@@ -47,11 +48,11 @@ int main()
             response.message(service_name);
             response.success(request.data());
 
-            std::lock_guard<std::mutex> lock{mutex};
+            const std::lock_guard<std::mutex> lock{mutex};
             ++got_requests;
             if (got_requests >= requests_expected)
             {
-                cv.notify_all();
+                condition_variable.notify_all();
             }
 
             std::cout << log_prefix << "Response sent (" << request.data() << " => " << response.success() << ")"
@@ -61,7 +62,7 @@ int main()
         max_history_depth);
 
     std::unique_lock<std::mutex> lock{mutex};
-    if (!cv.wait_for(lock, total_timeout, [&]() { return got_requests >= requests_expected; }))
+    if (!condition_variable.wait_for(lock, total_timeout, [&]() { return got_requests >= requests_expected; }))
     {
         std::cerr << log_prefix << "Timeout! Got " << got_requests << " requests so far" << std::endl;
         return 1;

@@ -20,13 +20,21 @@ cd "$(cd "$(dirname "$0")" && pwd -P)"
 
 source ./python_venv.sh
 
-# Source ROS, if present
-for ROS_DIR in /opt/ros/* ; do
-    if [[ -f "${ROS_DIR}/setup.bash" ]]; then
-        source "${ROS_DIR}/setup.bash"
-        break
-    fi
-done
+# Source ROS, if present and not yet sourced
+if [[ -z "${ROS_DISTRO:-}" ]]; then
+    for ROS_DIR in /opt/ros/* ; do
+        if [[ -f "${ROS_DIR}/setup.bash" ]]; then
+            # shellcheck disable=SC1091
+            source "${ROS_DIR}/setup.bash"
+            break
+        fi
+    done
+fi
+if [[ -n "${ROS_DISTRO:-}" ]]; then
+    echo "ROS 2 ${ROS_DISTRO} sourced"
+else
+    echo "No ROS 2 sourced"
+fi
 
 cd ../../build
 ctest --output-on-failure

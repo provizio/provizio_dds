@@ -92,6 +92,10 @@ class QosDefaults:
             self.memory_policy = QosDefaults.memory_policy_per_type[None]
 
 
+USE_DEFAULT_QOS_DURABILITY = -1
+UNLIMITED_HISTORY_DEPTH = 0
+
+
 def make_domain_participant(domain_id: int = 0):
     """Creates a new DDS Domain Participant that automatically cleans up internal objects on deletion
 
@@ -384,7 +388,7 @@ class Subscriber(_TopicHandle):
         on_data_function: Callable,
         on_has_publisher_changed_function: Optional[Callable[[bool], Any]] = None,
         reliability_kind: Optional[Any] = None,
-        max_history_depth: int = -1,
+        max_history_depth: int = USE_DEFAULT_QOS_DURABILITY,
     ):
         """Constructs a DDS Subscriber
 
@@ -424,7 +428,7 @@ class Subscriber(_TopicHandle):
             self._reader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
             self._reader_qos.history().kind = KEEP_LAST_HISTORY_QOS
             self._reader_qos.history().depth = max_history_depth
-        elif max_history_depth == 0:
+        elif max_history_depth == UNLIMITED_HISTORY_DEPTH:
             self._reader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
             self._reader_qos.history().kind = KEEP_ALL_HISTORY_QOS
         # else keep self._reader_qos.history() default
@@ -632,7 +636,7 @@ class Service:
         request_topic_name: str = None,
         response_topic_name: str = None,
         service_name: str = None,
-        max_history_depth: int = -1,
+        max_history_depth: int = USE_DEFAULT_QOS_DURABILITY,
     ):
         default_max_queue_size = 10
 
@@ -656,7 +660,11 @@ class Service:
         max_queue_size = (
             max_history_depth
             if max_history_depth > 0
-            else float("inf") if max_history_depth == 0 else default_max_queue_size
+            else (
+                float("inf")
+                if max_history_depth == UNLIMITED_HISTORY_DEPTH
+                else default_max_queue_size
+            )
         )
         if inspect.iscoroutinefunction(handle_request_function):
             self._request_handler = self._AsyncRequestHandler(
