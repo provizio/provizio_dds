@@ -420,11 +420,12 @@ class Subscriber(_TopicHandle):
         self._subscriber.get_default_datareader_qos(self._reader_qos)
         self._reader_qos.reliability().kind = reliability_kind
         self._reader_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
-        self._reader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
         if max_history_depth > 0:
+            self._reader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
             self._reader_qos.history().kind = KEEP_LAST_HISTORY_QOS
             self._reader_qos.history().depth = max_history_depth
         elif max_history_depth == 0:
+            self._reader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
             self._reader_qos.history().kind = KEEP_ALL_HISTORY_QOS
         # else keep self._reader_qos.history() default
 

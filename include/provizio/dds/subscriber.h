@@ -163,15 +163,16 @@ namespace provizio
             DataReaderQos datareader_qos;
             subscriber->get_default_datareader_qos(datareader_qos);
             datareader_qos.reliability().kind = reliability_kind;
-            datareader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
             datareader_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
             if (max_history_depth > 0)
             {
+                datareader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
                 datareader_qos.history().kind = HistoryQosPolicyKind::KEEP_LAST_HISTORY_QOS;
                 datareader_qos.history().depth = max_history_depth;
             }
             else if (max_history_depth == 0)
             {
+                datareader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
                 datareader_qos.history().kind = HistoryQosPolicyKind::KEEP_ALL_HISTORY_QOS;
             }
             // else keep datareader_qos.history() default
