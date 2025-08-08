@@ -147,6 +147,11 @@ publisher.publish(message)
 
 For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/python/python_publisher.py](test/python/python_publisher.py).
 
+Notes:
+
+- Publishers support configurable reliability QoS (BEST_EFFORT or RELIABLE). See `provizio::dds::make_publisher` (C++) or `provizio_dds.Publisher` (Python) for parameters.
+- You can optionally receive subscriber match/unmatch notifications (C++ via an on_matched functor overload; Python via `on_has_subscriber_changed_function`).
+
 ## Receiving Data
 
 **C++ Example:**
@@ -190,6 +195,133 @@ input("Press Enter to continue...") # Wait for any user input
 ```
 
 For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/python/python_subscriber.py](test/python/python_subscriber.py).
+
+Notes:
+
+- The data callback can take either one argument (the data) or two (data and `SampleInfo`). Both are supported in C++ and Python bindings.
+- Subscribers support configurable reliability QoS and optional history depth: keep default durability (VOLATILE) or set a positive `max_history_depth` to enable TRANSIENT_LOCAL durability (KEEP_LAST with the given depth) or `0` for unlimited (KEEP_ALL). See headers/Python docs for details.
+
+## Request/Response
+
+The library provides a lightweight request/response API built on top of DDS topics. A service subscribes to a request topic and publishes replies to a response topic with correlation tracking; clients send requests and await replies.
+
+### C++: Creating a service
+
+```C++
+#include "provizio/dds/request_response.h"
+#include <std_msgs/msg/StringPubSubTypes.h>
+#include <iostream>
+
+int main() {
+    auto participant = provizio::dds::make_domain_participant();
+
+    // Create an "echo" service using a single service name for both topics
+    auto service = provizio::dds::make_service<std_msgs::msg::StringPubSubType,
+                                               std_msgs::msg::StringPubSubType>(
+        participant,
+        "echo_service",
+        [](const std_msgs::msg::String &request) {
+            std_msgs::msg::String response;
+            response.data(request.data());
+            return response; // synchronous handler, return std::future for async requests handling
+        }
+    );
+
+    std::cin.get(); // Wait for any user input
+
+    return 0;
+}
+```
+
+### C++: Sending a request
+
+```C++
+#include "provizio/dds/request_response.h"
+#include <std_msgs/msg/StringPubSubTypes.h>
+#include <chrono>
+#include <iostream>
+
+int main()
+{
+    auto participant = provizio::dds::make_domain_participant();
+    std_msgs::msg::String request;
+    request.data("hello");
+    auto future = provizio::dds::request<std_msgs::msg::StringPubSubType,
+                                    std_msgs::msg::StringPubSubType>(
+        participant, "echo_service", request);
+
+    if (future.wait_for(std::chrono::seconds{2}) == std::future_status::ready) {
+        const auto &reply = future.get();
+        // Print the received message
+        std::cout << reply.data() << std::endl;
+    }
+
+    return 0;
+}
+```
+
+### Python: Creating a service
+
+```Python
+import provizio_dds
+
+participant = provizio_dds.make_domain_participant()
+
+def handle_request(request: provizio_dds.String) -> provizio_dds.String:
+    response = provizio_dds.String()
+    response.data(request.data())
+    return response
+
+service = provizio_dds.Service(
+    participant,
+    provizio_dds.StringPubSubType,  # request PubSub type
+    provizio_dds.String,            # request data type
+    provizio_dds.StringPubSubType,  # response PubSub type
+    handle_request,                 # can be sync or async
+    service_name="echo_service",
+)
+```
+
+Note:
+
+- Ensure you call `service.stop()` on exit to stop internal threads; otherwise the application will keep running. See `test/python/python_request_response_service.py` for a complete example.
+
+### Python: Sending a request
+
+```Python
+import asyncio
+import provizio_dds
+
+async def main():
+    participant = provizio_dds.make_domain_participant()
+    request = provizio_dds.String()
+    request.data("hello")
+    response = await provizio_dds.request(
+        participant,
+        provizio_dds.StringPubSubType,
+        provizio_dds.StringPubSubType,
+        provizio_dds.String,
+        request,
+        service_name="echo_service",
+    )
+    print(response.data())
+
+asyncio.run(main())
+```
+
+Notes:
+
+- Both synchronous and asynchronous service handlers are supported. Asynchronous handlers return `std::future` (C++) or are `async def` coroutines (Python).
+- Reliability is set to RELIABLE for request/response endpoints by default.
+- To buffer requests for late responders, set a positive `max_history_depth` on the service/subscriber side; `0` enables KEEP_ALL.
+
+### ROS 2 compatibility
+
+- Publish/subscribe is compatible with ROS 2 starting from Humble.
+- Request/response is compatible with ROS 2 starting from Jazzy.
+- For both publish/subscribe and request/response to interoperate with ROS 2, either:
+  - keep the default `max_history_depth` on subscribers (which keeps VOLATILE durability), or
+  - configure ROS 2 QoS to use TRANSIENT_LOCAL durability on the ROS 2 publishers (recommended for better delivery reliability).
 
 ## Points Accumulation and Multi-Radar Fusion
 
