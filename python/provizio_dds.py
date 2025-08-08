@@ -359,9 +359,13 @@ class Subscriber(_TopicHandle):
             del self._on_has_publisher_changed_function
 
         def on_data_available(self, reader):
-            info = SampleInfo()
-            data = self._data_type()
-            if reader.take_next_sample(data, info) == ReturnCode_t.RETCODE_OK:
+            while True:
+                info = SampleInfo()
+                data = self._data_type()
+                if reader.take_next_sample(data, info) != ReturnCode_t.RETCODE_OK:
+                    break
+                if not info.valid_data:
+                    continue
                 if self._on_data_takes_info:
                     self._on_data_function(data, info)
                 else:
@@ -656,6 +660,7 @@ class Service:
         self._ready_responses = []
         self._matched_subscriptions = set()
         self._service_cv = threading.Condition()
+        self._request_data_type = request_data_type
 
         max_queue_size = (
             max_history_depth
@@ -723,11 +728,12 @@ class Service:
         if info.related_sample_identity.writer_guid() != GUID_t.unknown():
             identity.writer_guid(info.related_sample_identity.writer_guid())
 
-        # info.identity is reused internally in C++ part between on_data calls
-        # despite _on_data itself is not called concurrently, so a copy of identity
-        # is required to avoid race conditions.
-        # data, meanwhile, is not reused so it's OK to just pass it.
-        self._request_handler.handle_request(data, SampleIdentity(identity))
+        # info and data are reused internally between on_data calls despite
+        # _on_data itself is not called concurrently, so copies are required to
+        # avoid race conditions
+        self._request_handler.handle_request(
+            self._request_data_type(data), SampleIdentity(identity)
+        )
 
     def _on_matched(self, _, matched, subscriber_guid):
         with self._service_cv:

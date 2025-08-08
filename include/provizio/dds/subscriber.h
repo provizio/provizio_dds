@@ -213,17 +213,20 @@ namespace provizio::dds
         {
             data_type data;
             SampleInfo info;
-            if (reader->take_next_sample(&data, &info) == ReturnCode_t::RETCODE_OK && info.valid_data)
+            while (reader->take_next_sample(&data, &info) == ReturnCode_t::RETCODE_OK)
             {
-                constexpr size_t arity = function_traits<on_data_function_type>::arity;
-                static_assert(arity == 1 || arity == 2, "Incorrect number of arguments in on_data_function");
-                if constexpr (arity == 1)
+                if (info.valid_data)
                 {
-                    on_data_function(data);
-                }
-                else
-                {
-                    on_data_function(data, info);
+                    constexpr size_t arity = function_traits<on_data_function_type>::arity;
+                    static_assert(arity == 1 || arity == 2, "Incorrect number of arguments in on_data_function");
+                    if constexpr (arity == 1)
+                    {
+                        on_data_function(data);
+                    }
+                    else
+                    {
+                        on_data_function(data, info);
+                    }
                 }
             }
         }
