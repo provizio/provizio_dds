@@ -23,6 +23,7 @@
 namespace provizio::dds
 {
     /**
+     * @file qos_defaults.h
      * @brief Defines default QOS policies for a DDS data type. They can be overriden in template specializations
      * for specific types.
      *

@@ -21,10 +21,20 @@
 namespace provizio::dds
 {
     /**
-     * @brief Makes Fast-DDS entities available in provizio::dds
+     * @file common.h
+     * @brief Common aliases and imports for Fast-DDS types used across the API.
+     *
+     * Brings eProsima Fast-DDS symbols into the `provizio::dds` namespace and
+     * defines frequently used aliases such as `guid`.
+     */
+    /**
+     * @brief Make Fast-DDS entities available in `provizio::dds`.
      */
     using namespace eprosima::fastdds::dds;
 
+    /**
+     * @brief Alias for Fast RTPS GUID type.
+     */
     using guid = eprosima::fastrtps::rtps::GUID_t;
 } // namespace provizio::dds
 

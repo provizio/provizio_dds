@@ -38,6 +38,11 @@ namespace provizio::dds
     } // namespace detail
 
     /**
+     * @file publisher.h
+     * @brief RAII publisher wrappers and helpers for sending DDS data.
+     */
+
+    /**
      * @brief Abstract interface that provides publishing functionality for a DDS data type. Normally created using
      * provizio::dds::make_publisher.
      *
@@ -74,8 +79,7 @@ namespace provizio::dds
         virtual bool publish(data_type &data, WriteParams &params) = 0;
 
         /**
-         * @brief Get the guid of the underlying DataWriter.
-         * @return The GUID of the writer.
+         * @brief Returns GUID of the underlying DataWriter.
          */
         virtual guid get_guid() const = 0;
     };

@@ -26,6 +26,7 @@
 namespace provizio::dds
 {
     /**
+     * @file topic.h
      * @brief RAII wrapper for a Topic, automatically unregistering it from the DomainParticipant on destruction.
      * @see provizio::dds::domain_participant::register_topic
      */

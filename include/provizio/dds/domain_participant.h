@@ -31,6 +31,7 @@
 namespace provizio::dds
 {
     /**
+     * @file domain_participant.h
      * @brief Wrapper over eprosima::fastdds::dds::DomainParticipant taking care of TypeSupport and Topic
      * registration.
      *

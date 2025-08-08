@@ -468,6 +468,24 @@ async def request(
     response_topic_name: str = None,
     service_name: str = None,
 ):
+    """Send a request and await the response.
+
+    One of (request_topic_name, response_topic_name) or service_name must be provided.
+    Uses RELIABLE reliability for both endpoints and correlates the response via
+    related_sample_identity.
+
+    Args:
+        domain_participant: Domain participant wrapper created by `make_domain_participant`.
+        request_pub_sub_type: PubSub type for the request.
+        response_pub_sub_type: PubSub type for the response.
+        response_data_type: Concrete data type of the response.
+        request_data: Concrete data instance to publish as the request.
+        request_topic_name: Optional explicit request topic name.
+        response_topic_name: Optional explicit response topic name.
+        service_name: Optional base name to derive request/response topics.
+    Returns:
+        The response data instance, or None if publishing the request failed.
+    """
     if request_topic_name is None:
         assert (
             service_name is not None
@@ -543,6 +561,13 @@ async def request(
 
 
 class Service:
+    """Request/response service.
+
+    Consumes requests from a request topic and publishes responses to the
+    corresponding response topic. Supports both synchronous and async request
+    handlers, back-pressure via max_history_depth, and delayed dispatch of
+    responses until the originating client is matched.
+    """
     class _RequestHandler:
         def __init__(
             self, handle_request_function, on_response_function, max_queue_size
@@ -642,6 +667,19 @@ class Service:
         service_name: str = None,
         max_history_depth: int = USE_DEFAULT_QOS_DURABILITY,
     ):
+        """Construct a request/response service.
+
+        Args:
+            domain_participant: Domain participant wrapper created by `make_domain_participant`.
+            request_pub_sub_type: PubSub type for requests.
+            request_data_type: Concrete request data type.
+            response_pub_sub_type: PubSub type for responses.
+            handle_request_function: Callable or coroutine to process a request and return response data.
+            request_topic_name: Optional explicit request topic name, or use `service_name`.
+            response_topic_name: Optional explicit response topic name, or use `service_name`.
+            service_name: If provided, request topic is rq/<service_name>Request and response is rr/<service_name>Reply.
+            max_history_depth: Reader history depth for transient local durability; 0 for unlimited, -1 for default.
+        """
         default_max_queue_size = 10
 
         if request_topic_name is None:
@@ -707,6 +745,7 @@ class Service:
         self.stop()
 
     def stop(self):
+        """Stops the service and joins internal threads."""
         join = False
         with self._service_cv:
             if not self._stop:

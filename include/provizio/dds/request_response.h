@@ -35,12 +35,27 @@
 
 namespace provizio::dds
 {
+    /**
+     * @file request_response.h
+     * @brief Public request/response API built on top of Fast-DDS.
+     *
+     * The API enables defining services handling requests and returning responses,
+     * and issuing requests from clients with correlation tracking and delivery to
+     * matched responders only. Both synchronous and asynchronous request handlers
+     * (returning std::future) are supported.
+     */
     /// @brief Maximum time to keep a response for a client that is not matched yet.
     constexpr std::chrono::seconds max_time_to_keep_ready_responses{10};
 
+    /**
+     * @brief Service handling incoming requests and publishing responses.
+     */
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
     class service;
 
+    /**
+     * @brief Future-like object returned by request() to await a response.
+     */
     template <typename request_pub_sub_type, typename response_pub_sub_type> class future_response;
 
     /**

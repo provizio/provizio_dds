@@ -41,13 +41,30 @@
 
 namespace provizio::dds::detail
 {
+    /**
+     * @file request_response_details.h
+     * @brief Internal helpers for request/response implementation.
+     *
+     * Contains utilities and internal classes used by the public request/response
+     * API in `request_response.h`, including request queueing, response dispatching
+     * and client-side correlation handling.
+     */
     extern const std::string request_prefix;
     extern const std::string response_prefix;
     extern const std::string request_suffix;
     extern const std::string response_suffix;
     extern const std::string requests_queue_full_error_message;
 
+    /**
+     * @brief Converts history depth QoS into a bounded request queue size.
+     * @param max_history_depth Use negative value to keep default, 0 for unlimited, positive for KEEP_LAST depth.
+     * @return Maximum number of requests to buffer.
+     */
     std::size_t to_max_queue_size(const std::int32_t max_history_depth);
+
+    /**
+     * @brief Checks whether a GUID refers to a DataReader endpoint (subscriber GUID).
+     */
     bool is_subscriber_guid(const guid &guid_to_check);
 
     template <typename function_type, typename = void> struct returns_future : std::false_type
@@ -67,11 +84,24 @@ namespace provizio::dds::detail
     using on_response_function_type =
         std::function<void(typename response_pub_sub_type::type, const eprosima::fastrtps::rtps::SampleIdentity &)>;
 
+    /**
+     * @brief Thread-safe storage for a single response value.
+     */
     template <typename response_type> class response_data;
+
+    /**
+     * @brief Request context storing correlation identity and shared response.
+     */
     template <typename response_type> struct request_context;
 
+    /**
+     * @brief Lightweight client capable of sending requests and receiving responses.
+     */
     template <typename request_pub_sub_type, typename response_pub_sub_type> class service_client_basic;
 
+    /**
+     * @brief Hash functor for `guid` to be used in unordered containers.
+     */
     struct guid_hash
     {
         std::size_t operator()(const guid &the_guid) const;
@@ -90,11 +120,20 @@ namespace provizio::dds::detail
     class request_handler
     {
       public:
+        /**
+         * @brief Constructs a request handler for synchronous request processors.
+         * @param handle_request_function Function that produces a response from a request.
+         * @param on_response_function Callback to publish/dispatch a response with correlation identity.
+         * @param max_queue_size Maximum number of queued requests before dropping.
+         */
         request_handler(handle_request_function_type handle_request_function,
                         on_response_function_type<response_pub_sub_type> on_response_function,
                         const std::size_t max_queue_size);
         ~request_handler();
 
+        /**
+         * @brief Enqueue a new request for processing.
+         */
         void handle_request(typename request_pub_sub_type::type request,
                             const eprosima::fastrtps::rtps::SampleIdentity &identity);
 
@@ -127,11 +166,17 @@ namespace provizio::dds::detail
                           std::enable_if_t<returns_future<handle_request_function_type>::value>>
     {
       public:
+        /**
+         * @brief Constructs a request handler for asynchronous request processors returning std::future.
+         */
         request_handler(handle_request_function_type handle_request_function,
                         on_response_function_type<response_pub_sub_type> on_response_function,
                         const std::size_t max_queue_size);
         ~request_handler();
 
+        /**
+         * @brief Submits a request whose response is produced asynchronously.
+         */
         void handle_request(const typename request_pub_sub_type::type &request,
                             const eprosima::fastrtps::rtps::SampleIdentity &identity);
 
@@ -154,10 +199,15 @@ namespace provizio::dds::detail
     template <typename response_type> class response_data
     {
       public:
+        /** @return True if a value has been set. */
         const bool is_set() const;
+        /** @brief Sets the response, notifying any waiters. Throws if already set. */
         void set(const response_type &response);
+        /** @brief Gets the response. Throws std::future_error if unset. */
         const response_type &get() const;
+        /** @brief Access to internal mutex for waiting. */
         std::mutex &mutex() const;
+        /** @brief Access to internal condition variable for waiting. */
         std::condition_variable &cv() const;
 
       private:
@@ -193,6 +243,11 @@ namespace provizio::dds::detail
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
                              handle_response_function_type handle_response_function);
 
+        /**
+         * @brief Sends a request. If endpoints are not matched yet, defers the request, which then will be sent
+         * when the endpoints are matched.
+         * @return True if the request has been sent or deferred successfully.
+         */
         bool request(typename request_pub_sub_type::type &request_data,
                      const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context);
 

@@ -29,6 +29,10 @@
 
 namespace provizio::dds
 {
+    /**
+     * @file subscriber.h
+     * @brief RAII subscriber wrappers and helpers for receiving DDS data.
+     */
     constexpr std::int32_t use_default_qos_durability = -1;
     constexpr std::int32_t unlimited_history_depth = 0;
 
@@ -70,8 +74,7 @@ namespace provizio::dds
         ~subscriber_handle();
 
         /**
-         * @brief Get the guid of the underlying DataReader.
-         * @return The GUID of the reader.
+         * @brief Returns GUID of the underlying DataReader.
          */
         guid get_guid() const;
 
