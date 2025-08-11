@@ -57,6 +57,10 @@ namespace provizio::dds
          */
         static constexpr auto memory_policy = eprosima::fastrtps::rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
     };
+
+    // Common QoS constants used across publishers/subscribers
+    constexpr std::int32_t use_default_qos_durability = -1;
+    constexpr std::int32_t no_history = 0;
 } // namespace provizio::dds
 
 #endif // DDS_QOS_DEFAULTS

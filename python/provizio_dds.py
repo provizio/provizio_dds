@@ -93,7 +93,7 @@ class QosDefaults:
 
 
 USE_DEFAULT_QOS_DURABILITY = -1
-UNLIMITED_HISTORY_DEPTH = 0
+NO_HISTORY = 0
 
 
 def make_domain_participant(domain_id: int = 0):
@@ -270,6 +270,7 @@ class Publisher(_TopicHandle):
             Callable[[Publisher, bool], Any]
         ] = None,
         reliability_kind: Optional[Any] = None,
+        history_depth: int = USE_DEFAULT_QOS_DURABILITY,
     ):
         """Constructs a DDS Publisher
 
@@ -304,9 +305,14 @@ class Publisher(_TopicHandle):
         self._publisher.get_default_datawriter_qos(self._writer_qos)
         self._writer_qos.reliability().kind = reliability_kind
         self._writer_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
-        self._writer_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
-        self._writer_qos.history().kind = KEEP_LAST_HISTORY_QOS
-        self._writer_qos.history().depth = 1
+        if history_depth == USE_DEFAULT_QOS_DURABILITY:
+            pass
+        elif history_depth == NO_HISTORY:
+            self._writer_qos.durability().kind = VOLATILE_DURABILITY_QOS
+        elif history_depth > 0:
+            self._writer_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
+            self._writer_qos.history().kind = KEEP_LAST_HISTORY_QOS
+            self._writer_qos.history().depth = history_depth
         self._writer = self._publisher.create_datawriter(
             self._topic, self._writer_qos, self._listener
         )
@@ -428,14 +434,14 @@ class Subscriber(_TopicHandle):
         self._subscriber.get_default_datareader_qos(self._reader_qos)
         self._reader_qos.reliability().kind = reliability_kind
         self._reader_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
-        if max_history_depth > 0:
+        if max_history_depth == USE_DEFAULT_QOS_DURABILITY:
+            pass
+        elif max_history_depth == NO_HISTORY:
+            self._reader_qos.durability().kind = VOLATILE_DURABILITY_QOS
+        elif max_history_depth > 0:
             self._reader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
             self._reader_qos.history().kind = KEEP_LAST_HISTORY_QOS
             self._reader_qos.history().depth = max_history_depth
-        elif max_history_depth == UNLIMITED_HISTORY_DEPTH:
-            self._reader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS
-            self._reader_qos.history().kind = KEEP_ALL_HISTORY_QOS
-        # else keep self._reader_qos.history() default
 
         self._reader = self._subscriber.create_datareader(
             self._topic, self._reader_qos, self._listener
@@ -532,12 +538,14 @@ async def request(
         reliability_kind=RELIABLE_RELIABILITY_QOS,
     )
 
+    client_publisher_history_depth = 1
     request_publisher = Publisher(
         domain_participant,
         request_topic_name,
         request_pub_sub_type,
         on_has_subscriber_changed_function=on_publisher_matched,
         reliability_kind=RELIABLE_RELIABILITY_QOS,
+        history_depth=client_publisher_history_depth,
     )
 
     await subscriber_matched.wait()
@@ -568,6 +576,7 @@ class Service:
     handlers, back-pressure via max_history_depth, and delayed dispatch of
     responses until the originating client is matched.
     """
+
     class _RequestHandler:
         def __init__(
             self, handle_request_function, on_response_function, max_queue_size
@@ -678,9 +687,10 @@ class Service:
             request_topic_name: Optional explicit request topic name, or use `service_name`.
             response_topic_name: Optional explicit response topic name, or use `service_name`.
             service_name: If provided, request topic is rq/<service_name>Request and response is rr/<service_name>Reply.
-            max_history_depth: Reader history depth for transient local durability; 0 for unlimited, -1 for default.
+            max_history_depth: Reader history depth for transient local durability; 0 for no history (volatile durability), USE_DEFAULT_QOS_DURABILITY for default.
         """
         default_max_queue_size = 10
+        minimal_max_queue_size = 1
 
         if request_topic_name is None:
             assert (
@@ -704,8 +714,8 @@ class Service:
             max_history_depth
             if max_history_depth > 0
             else (
-                float("inf")
-                if max_history_depth == UNLIMITED_HISTORY_DEPTH
+                minimal_max_queue_size
+                if max_history_depth == NO_HISTORY
                 else default_max_queue_size
             )
         )
@@ -724,6 +734,7 @@ class Service:
             response_pub_sub_type,
             on_has_subscriber_changed_function=self._on_matched,
             reliability_kind=RELIABLE_RELIABILITY_QOS,
+            history_depth=max_queue_size,
         )
 
         self._subscriber = Subscriber(

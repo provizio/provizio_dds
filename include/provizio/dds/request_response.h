@@ -46,6 +46,8 @@ namespace provizio::dds
      */
     /// @brief Maximum time to keep a response for a client that is not matched yet.
     constexpr std::chrono::seconds max_time_to_keep_ready_responses{10};
+    /// @brief Publisher history depth for client requests
+    constexpr std::int32_t client_publisher_history_depth{1};
 
     /**
      * @brief Service handling incoming requests and publishing responses.
@@ -68,13 +70,15 @@ namespace provizio::dds
      * @param request_topic_name The name of the request topic.
      * @param response_topic_name The name of the response topic.
      * @param handle_request_function The function to handle requests.
+     * @param max_history_depth The maximum number of requests to queue.
      * @return std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> A
      * shared pointer to the created service.
      */
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
     std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> make_service(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
-        const std::string &response_topic_name, handle_request_function_type handle_request_function);
+        const std::string &response_topic_name, handle_request_function_type handle_request_function,
+        std::int32_t max_history_depth = use_default_qos_durability);
 
     /**
      * @brief Creates a new service from a single name for both topics.
@@ -93,7 +97,7 @@ namespace provizio::dds
     std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> make_service(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
         handle_request_function_type handle_request_function,
-        const std::int32_t max_history_depth = use_default_qos_durability);
+        std::int32_t max_history_depth = use_default_qos_durability);
 
     /**
      * @brief Sends a request to a service.
@@ -256,7 +260,10 @@ namespace provizio::dds
               [this](data_publisher<response_pub_sub_type> &, const bool matched, const guid &subscriber_guid) {
                   on_matched(matched, subscriber_guid);
               },
-              RELIABLE_RELIABILITY_QOS)),
+              RELIABLE_RELIABILITY_QOS,
+              // As transient local publishers are compatible with volatile subscribers, it is way more reliable for
+              // services to always use transient local durability
+              static_cast<std::int32_t>(detail::to_max_queue_size(max_history_depth)))),
           request_handler(
               std::move(handle_request_function),
               [this](typename response_pub_sub_type::type data,
@@ -403,10 +410,12 @@ namespace provizio::dds
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
     std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> make_service(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
-        const std::string &response_topic_name, handle_request_function_type handle_request_function)
+        const std::string &response_topic_name, handle_request_function_type handle_request_function,
+        const std::int32_t max_history_depth)
     {
         return std::make_shared<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>>(
-            std::move(participant), request_topic_name, response_topic_name, std::move(handle_request_function));
+            std::move(participant), request_topic_name, response_topic_name, std::move(handle_request_function),
+            max_history_depth);
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
@@ -452,7 +461,8 @@ namespace provizio::dds
                         }
                     }
                 }
-            });
+            },
+            client_publisher_history_depth);
 
         if (client->request(request_data, context))
         {

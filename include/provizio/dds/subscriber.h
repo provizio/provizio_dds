@@ -33,8 +33,6 @@ namespace provizio::dds
      * @file subscriber.h
      * @brief RAII subscriber wrappers and helpers for receiving DDS data.
      */
-    constexpr std::int32_t use_default_qos_durability = -1;
-    constexpr std::int32_t unlimited_history_depth = 0;
 
     /**
      * @brief Encapsulates DDS Subscriber and DataReader functionality in a single entity with automatic life cycle
@@ -167,18 +165,21 @@ namespace provizio::dds
         subscriber->get_default_datareader_qos(datareader_qos);
         datareader_qos.reliability().kind = reliability_kind;
         datareader_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
-        if (max_history_depth > 0)
+        if (max_history_depth == use_default_qos_durability)
+        {
+            // Keep defaults
+        }
+        else if (max_history_depth == no_history)
+        {
+            // Explicitly no history: VOLATILE
+            datareader_qos.durability().kind = VOLATILE_DURABILITY_QOS;
+        }
+        else if (max_history_depth > 0)
         {
             datareader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
             datareader_qos.history().kind = HistoryQosPolicyKind::KEEP_LAST_HISTORY_QOS;
             datareader_qos.history().depth = max_history_depth;
         }
-        else if (max_history_depth == 0)
-        {
-            datareader_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
-            datareader_qos.history().kind = HistoryQosPolicyKind::KEEP_ALL_HISTORY_QOS;
-        }
-        // else keep datareader_qos.history() default
 
         data_reader = subscriber->create_datareader(the_topic->get(), datareader_qos, this->data_listener.get());
     }

@@ -124,7 +124,8 @@ namespace provizio::dds
          */
         publisher_handle(
             std::shared_ptr<domain_participant> participant, const std::string &topic_name,
-            ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind);
+            ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind,
+            std::int32_t history_depth = use_default_qos_durability);
 
         /**
          * @brief Constructs a new publisher_handle object with an on_has_subscriber_changed function to be invoked
@@ -146,7 +147,8 @@ namespace provizio::dds
         publisher_handle(
             std::shared_ptr<domain_participant> participant, const std::string &topic_name,
             on_matched_function_type on_matched_function,
-            ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind);
+            ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind,
+            std::int32_t history_depth = use_default_qos_durability);
         ~publisher_handle();
 
         /**
@@ -167,7 +169,7 @@ namespace provizio::dds
       private:
         publisher_handle(std::shared_ptr<domain_participant> participant, const std::string &topic_name,
                          on_matched_function_type on_matched_function, std::unique_ptr<DataWriterListener> &&listener,
-                         ReliabilityQosPolicyKind reliability_kind);
+                         ReliabilityQosPolicyKind reliability_kind, std::int32_t history_depth);
 
         std::shared_ptr<domain_participant> participant;
         dds::TypeSupport type_support;
@@ -178,6 +180,7 @@ namespace provizio::dds
         DataWriter *data_writer = nullptr;
 
         friend class detail::data_writer_listener<data_pub_sub_type, on_matched_function_type>;
+        std::int32_t history_depth{use_default_qos_durability};
     };
 
     /**
@@ -199,10 +202,11 @@ namespace provizio::dds
     template <typename data_pub_sub_type>
     std::shared_ptr<publisher_handle<data_pub_sub_type>> make_publisher(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
-        ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind)
+        ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind,
+        std::int32_t history_depth = use_default_qos_durability)
     {
         return std::make_shared<publisher_handle<data_pub_sub_type>>(std::move(participant), topic_name,
-                                                                     reliability_kind);
+                                                                     reliability_kind, history_depth);
     }
 
     /**
@@ -230,10 +234,11 @@ namespace provizio::dds
     std::shared_ptr<publisher_handle<data_pub_sub_type, on_matched_function_type>> make_publisher(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
         on_matched_function_type on_matched_function,
-        ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind)
+        ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind,
+        std::int32_t history_depth = use_default_qos_durability)
     {
         return std::make_shared<publisher_handle<data_pub_sub_type, on_matched_function_type>>(
-            std::move(participant), topic_name, std::move(on_matched_function), reliability_kind);
+            std::move(participant), topic_name, std::move(on_matched_function), reliability_kind, history_depth);
     }
 
     namespace detail
@@ -279,20 +284,21 @@ namespace provizio::dds
     template <typename data_pub_sub_type, typename on_matched_function_type>
     publisher_handle<data_pub_sub_type, on_matched_function_type>::publisher_handle(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
-        const ReliabilityQosPolicyKind reliability_kind)
+        const ReliabilityQosPolicyKind reliability_kind, const std::int32_t history_depth)
         : publisher_handle(std::move(participant), topic_name, nullptr, std::unique_ptr<DataWriterListener>{},
-                           reliability_kind)
+                           reliability_kind, history_depth)
     {
     }
 
     template <typename data_pub_sub_type, typename on_matched_function_type>
     publisher_handle<data_pub_sub_type, on_matched_function_type>::publisher_handle(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
-        on_matched_function_type on_matched_function, const ReliabilityQosPolicyKind reliability_kind)
+        on_matched_function_type on_matched_function, const ReliabilityQosPolicyKind reliability_kind,
+        const std::int32_t history_depth)
         : publisher_handle(
               std::move(participant), topic_name, std::move(on_matched_function),
               std::make_unique<detail::data_writer_listener<data_pub_sub_type, on_matched_function_type>>(*this),
-              reliability_kind)
+              reliability_kind, history_depth)
     {
     }
 
@@ -300,10 +306,11 @@ namespace provizio::dds
     publisher_handle<data_pub_sub_type, on_matched_function_type>::publisher_handle(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
         on_matched_function_type on_matched_function, std::unique_ptr<DataWriterListener> &&listener,
-        const ReliabilityQosPolicyKind reliability_kind)
+        const ReliabilityQosPolicyKind reliability_kind, const std::int32_t history_depth)
         : participant(std::move(participant)),
           type_support(this->participant->template register_type<data_pub_sub_type>()),
-          on_matched_function(std::move(on_matched_function)), listener(std::move(listener))
+          on_matched_function(std::move(on_matched_function)), listener(std::move(listener)),
+          history_depth(history_depth)
     {
         const auto &topic_qos = TOPIC_QOS_DEFAULT;
         const auto &publisher_qos = PUBLISHER_QOS_DEFAULT;
@@ -313,9 +320,20 @@ namespace provizio::dds
 
         DataWriterQos datawriter_qos;
         publisher->get_default_datawriter_qos(datawriter_qos);
-        datawriter_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
-        datawriter_qos.history().kind = KEEP_LAST_HISTORY_QOS;
-        datawriter_qos.history().depth = 1;
+        if (this->history_depth == use_default_qos_durability)
+        {
+            // Keep defaults
+        }
+        else if (this->history_depth == no_history)
+        {
+            datawriter_qos.durability().kind = VOLATILE_DURABILITY_QOS;
+        }
+        else if (this->history_depth > 0)
+        {
+            datawriter_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
+            datawriter_qos.history().kind = KEEP_LAST_HISTORY_QOS;
+            datawriter_qos.history().depth = this->history_depth;
+        }
         datawriter_qos.reliability().kind = reliability_kind;
         datawriter_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
 

@@ -17,10 +17,9 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 
 #include "provizio/dds/common.h"
-#include "provizio/dds/subscriber.h"
+#include "provizio/dds/qos_defaults.h"
 
 namespace provizio::dds::detail
 {
@@ -36,14 +35,15 @@ namespace provizio::dds::detail
     std::size_t to_max_queue_size(const std::int32_t max_history_depth)
     {
         constexpr std::size_t default_queue_size = 10;
+        constexpr std::size_t min_queue_size_limit = 1;
 
         if (max_history_depth > 0)
         {
             return static_cast<std::size_t>(max_history_depth);
         }
-        if (max_history_depth == unlimited_history_depth)
+        if (max_history_depth == no_history)
         {
-            return std::numeric_limits<std::size_t>::max();
+            return min_queue_size_limit;
         }
 
         // Default queue size

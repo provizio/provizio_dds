@@ -57,7 +57,7 @@ namespace provizio::dds::detail
 
     /**
      * @brief Converts history depth QoS into a bounded request queue size.
-     * @param max_history_depth Use negative value to keep default, 0 for unlimited, positive for KEEP_LAST depth.
+     * @param max_history_depth Use negative value to keep default, 0 for minimal, positive for specific max queue size.
      * @return Maximum number of requests to buffer.
      */
     std::size_t to_max_queue_size(const std::int32_t max_history_depth);
@@ -238,10 +238,12 @@ namespace provizio::dds::detail
         template <typename handle_response_function_type>
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
                              const std::string &response_topic_name,
-                             handle_response_function_type handle_response_function);
+                             handle_response_function_type handle_response_function,
+                             std::int32_t publisher_history_depth);
         template <typename handle_response_function_type>
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
-                             handle_response_function_type handle_response_function);
+                             handle_response_function_type handle_response_function,
+                             std::int32_t publisher_history_depth);
 
         /**
          * @brief Sends a request. If endpoints are not matched yet, defers the request, which then will be sent
@@ -437,7 +439,8 @@ namespace provizio::dds::detail
     template <typename handle_response_function_type>
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
-        const std::string &response_topic_name, handle_response_function_type handle_response_function)
+        const std::string &response_topic_name, handle_response_function_type handle_response_function,
+        const std::int32_t publisher_history_depth)
         : publisher(make_publisher<request_pub_sub_type>(
               participant, request_topic_name,
               [this](provizio::dds::data_publisher<request_pub_sub_type> &, const bool matched) {
@@ -448,7 +451,7 @@ namespace provizio::dds::detail
                       request_deferred_mutex_prelocked();
                   }
               },
-              RELIABLE_RELIABILITY_QOS)),
+              RELIABLE_RELIABILITY_QOS, publisher_history_depth)),
           subscriber(make_subscriber<response_pub_sub_type>(
               participant, response_topic_name, std::move(handle_response_function),
               [this](const bool matched) {
@@ -467,9 +470,10 @@ namespace provizio::dds::detail
     template <typename handle_response_function_type>
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
-        handle_response_function_type handle_response_function)
+        handle_response_function_type handle_response_function, const std::int32_t publisher_history_depth)
         : service_client_basic(std::move(participant), request_prefix + service_name + request_suffix,
-                               response_prefix + service_name + response_suffix, std::move(handle_response_function))
+                               response_prefix + service_name + response_suffix, std::move(handle_response_function),
+                               publisher_history_depth)
     {
     }
 
