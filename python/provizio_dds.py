@@ -168,6 +168,13 @@ def make_domain_participant(domain_id: int = 0):
                 topic_info = self._registered_topics.get(topic_name)
 
                 if topic_info:
+                    # Ensure the type matches the already registered topic's type
+                    existing_type_name = topic_info["type_support"].get_type_name()
+                    requested_type_name = pub_sub_type().getName()
+                    if existing_type_name != requested_type_name:
+                        raise RuntimeError(
+                            f"Topic {topic_name} has been already registered, but with a different type (existing: '{existing_type_name}', requested: '{requested_type_name}')!"
+                        )
                     topic_info["ref_count"] += 1
                     return topic_info["topic"]
                 else:

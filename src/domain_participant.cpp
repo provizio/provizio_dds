@@ -109,6 +109,16 @@ namespace provizio::dds
             auto handle = topic_iterator->second.lock();
             if (handle)
             {
+                // Ensure the type matches the already registered topic's type
+                const std::string existing_type{handle->get()->get_type_name()};
+                if (existing_type != type_name)
+                {
+                    throw std::runtime_error{"Topic " + topic_name +
+                                             " has been already registered, but with a different type (existing: '" +
+                                             existing_type + "', requested: '" + type_name + "')!"};
+                }
+
+                // Ensure QoS is the same
                 if (!(handle->qos() == qos)) // Yep, TopicQos defines operator== but not operator!=
                 {
                     throw std::runtime_error{"Topic " + topic_name +

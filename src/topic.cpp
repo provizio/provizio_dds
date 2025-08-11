@@ -14,6 +14,7 @@
 
 #include "provizio/dds/topic.h"
 
+#include <memory>
 #include <mutex>
 #include <utility>
 

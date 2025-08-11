@@ -15,6 +15,7 @@
 #ifndef DDS_TOPIC
 #define DDS_TOPIC
 
+#include <memory>
 #include <mutex>
 
 #include <fastdds/dds/domain/DomainParticipant.hpp>
