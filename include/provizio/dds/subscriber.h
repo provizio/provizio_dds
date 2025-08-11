@@ -17,7 +17,9 @@
 
 #include <memory>
 #include <string>
+#include <thread>
 
+#include <fastdds/dds/core/status/SubscriptionMatchedStatus.hpp>
 #include <fastdds/dds/subscriber/DataReader.hpp>
 #include <fastdds/dds/subscriber/Subscriber.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
@@ -75,6 +77,16 @@ namespace provizio::dds
          * @brief Returns GUID of the underlying DataReader.
          */
         guid get_guid() const;
+
+        /**
+         * @brief Blocks until this subscriber has at least one stable match for a short settle window.
+         * @param timeout Total timeout duration.
+         * @param settle_time The minimum time the match must remain stable (no further status changes) to be
+         * considered "ready".
+         * @return true if matched and stable within timeout, false otherwise.
+         */
+        bool wait_till_matched(const std::chrono::milliseconds &timeout = std::chrono::milliseconds{3000},
+                               const std::chrono::milliseconds &settle_time = std::chrono::milliseconds{50}) const;
 
       private:
         std::shared_ptr<domain_participant> participant;
@@ -202,6 +214,42 @@ namespace provizio::dds
     template <typename data_pub_sub_type> guid subscriber_handle<data_pub_sub_type>::get_guid() const
     {
         return data_reader->guid();
+    }
+
+    template <typename data_pub_sub_type>
+    bool subscriber_handle<data_pub_sub_type>::wait_till_matched(const std::chrono::milliseconds &timeout,
+                                                                 const std::chrono::milliseconds &settle_time) const
+    {
+        using clock = std::chrono::steady_clock;
+        const auto deadline = clock::now() + timeout;
+        constexpr std::chrono::milliseconds iteration_sleep{10};
+
+        eprosima::fastdds::dds::SubscriptionMatchedStatus status;
+        clock::time_point stable_since{};
+        bool has_stable_since = false;
+        while (clock::now() < deadline)
+        {
+            data_reader->get_subscription_matched_status(status);
+            if (status.current_count > 0)
+            {
+                if (!has_stable_since)
+                {
+                    stable_since = clock::now();
+                    has_stable_since = true;
+                }
+                else if (clock::now() - stable_since >= settle_time)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                has_stable_since = false;
+            }
+            std::this_thread::sleep_for(iteration_sleep);
+        }
+
+        return false;
     }
 
     template <typename data_type, typename on_data_function_type>

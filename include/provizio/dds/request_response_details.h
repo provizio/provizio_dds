@@ -238,15 +238,25 @@ namespace provizio::dds::detail
     template <typename request_pub_sub_type, typename response_pub_sub_type> class service_client_basic
     {
       public:
+        /**
+         * @brief Basic service client that sends requests and receives responses.
+         *
+         * Creates a volatile (default) request DataWriter and a reliable response DataReader, and internally
+         * waits for graph discovery to become stable (using wait_till_matched on both endpoints) before sending the
+         * first request. Requests issued before readiness are queued and flushed automatically once matched.
+         */
         template <typename handle_response_function_type>
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
                              const std::string &response_topic_name,
-                             handle_response_function_type handle_response_function,
-                             std::int32_t publisher_history_depth);
+                             handle_response_function_type handle_response_function);
         template <typename handle_response_function_type>
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
-                             handle_response_function_type handle_response_function,
-                             std::int32_t publisher_history_depth);
+                             handle_response_function_type handle_response_function);
+
+        /**
+         * @brief Destructor stops the background readiness wait and joins its future to ensure clean shutdown.
+         */
+        ~service_client_basic();
 
         /**
          * @brief Sends a request. If endpoints are not matched yet, defers the request, which then will be sent
@@ -263,11 +273,12 @@ namespace provizio::dds::detail
         bool do_request(typename request_pub_sub_type::type &request_data,
                         request_context<typename response_pub_sub_type::type> &context);
         void request_deferred_mutex_prelocked();
+        bool stopped() const;
 
-        std::mutex mutex;
+        mutable std::mutex mutex;
+        bool stop{false};
         std::vector<deferred_request> deferred_requests;
-        bool publisher_matched{false};
-        bool subscriber_matched{false};
+        std::future<bool> wait_till_matched_future;
         std::shared_ptr<data_publisher<request_pub_sub_type>> publisher;
         std::shared_ptr<subscriber_handle<response_pub_sub_type>> subscriber;
     };
@@ -465,42 +476,49 @@ namespace provizio::dds::detail
     template <typename handle_response_function_type>
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
-        const std::string &response_topic_name, handle_response_function_type handle_response_function,
-        const std::int32_t publisher_history_depth)
-        : publisher(make_publisher<request_pub_sub_type>(
-              participant, request_topic_name,
-              [this](provizio::dds::data_publisher<request_pub_sub_type> &, const bool matched) {
-                  const std::lock_guard<std::mutex> lock{mutex};
-                  publisher_matched = matched;
-                  if (publisher_matched && subscriber_matched)
-                  {
-                      request_deferred_mutex_prelocked();
-                  }
-              },
-              RELIABLE_RELIABILITY_QOS, publisher_history_depth)),
+        const std::string &response_topic_name, handle_response_function_type handle_response_function)
+        : publisher(make_publisher<request_pub_sub_type>(participant, request_topic_name, RELIABLE_RELIABILITY_QOS)),
           subscriber(make_subscriber<response_pub_sub_type>(
-              participant, response_topic_name, std::move(handle_response_function),
-              [this](const bool matched) {
-                  const std::lock_guard<std::mutex> lock{mutex};
-                  subscriber_matched = matched;
-                  if (publisher_matched && subscriber_matched)
-                  {
-                      request_deferred_mutex_prelocked();
-                  }
-              },
-              RELIABLE_RELIABILITY_QOS))
+              participant, response_topic_name, std::move(handle_response_function), RELIABLE_RELIABILITY_QOS))
     {
+        wait_till_matched_future = std::async(std::launch::async, [this]() {
+            const std::chrono::milliseconds iteration_timeout{100};
+            while (!stopped() && !publisher->wait_till_matched(iteration_timeout))
+            {
+            }
+            while (!stopped() && !subscriber->wait_till_matched(iteration_timeout))
+            {
+            }
+
+            const std::lock_guard<std::mutex> lock{mutex};
+            if (!stop)
+            {
+                request_deferred_mutex_prelocked();
+                return true;
+            }
+
+            return false;
+        });
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
     template <typename handle_response_function_type>
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
-        handle_response_function_type handle_response_function, const std::int32_t publisher_history_depth)
+        handle_response_function_type handle_response_function)
         : service_client_basic(std::move(participant), request_prefix + service_name + request_suffix,
-                               response_prefix + service_name + response_suffix, std::move(handle_response_function),
-                               publisher_history_depth)
+                               response_prefix + service_name + response_suffix, std::move(handle_response_function))
     {
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    service_client_basic<request_pub_sub_type, response_pub_sub_type>::~service_client_basic()
+    {
+        {
+            const std::lock_guard<std::mutex> lock{mutex};
+            stop = true;
+        }
+        wait_till_matched_future.wait();
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
@@ -509,7 +527,9 @@ namespace provizio::dds::detail
         const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context)
     {
         const std::lock_guard<std::mutex> lock{mutex};
-        if (publisher_matched && subscriber_matched)
+        if (wait_till_matched_future.valid() &&
+            wait_till_matched_future.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready &&
+            wait_till_matched_future.get())
         {
             return do_request(request_data, *context);
         }
@@ -541,14 +561,20 @@ namespace provizio::dds::detail
     template <typename request_pub_sub_type, typename response_pub_sub_type>
     void service_client_basic<request_pub_sub_type, response_pub_sub_type>::request_deferred_mutex_prelocked()
     {
-        assert(publisher_matched);
-        assert(subscriber_matched);
         for (auto &it : deferred_requests)
         {
             do_request(it.first, *it.second);
         }
         deferred_requests.clear();
     }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    bool service_client_basic<request_pub_sub_type, response_pub_sub_type>::stopped() const
+    {
+        const std::lock_guard<std::mutex> lock{mutex};
+        return stop;
+    }
+
 } // namespace provizio::dds::detail
 
 #endif // DDS_REQUEST_RESPONSE_DETAILS

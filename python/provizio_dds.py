@@ -348,6 +348,24 @@ class Publisher(_TopicHandle):
             return self._writer.write(data, params)
         return self._writer.write(data)
 
+    def wait_till_matched(self, timeout_sec: float = 3.0, settle_time_sec: float = 0.05) -> bool:
+        """Poll PublicationMatchedStatus until matched and stable for settle_time_sec."""
+        pm_status = PublicationMatchedStatus()
+        deadline = time.monotonic() + timeout_sec
+        stable_since = None
+        sleep_s = 0.01
+        while time.monotonic() < deadline:
+            self._writer.get_publication_matched_status(pm_status)
+            if pm_status.current_count > 0:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= settle_time_sec:
+                    return True
+            else:
+                stable_since = None
+            time.sleep(sleep_s)
+        return False
+
 
 class Subscriber(_TopicHandle):
     """Provides subscription functionality for a DDS data type and topic name specified when constructing"""
@@ -470,6 +488,24 @@ class Subscriber(_TopicHandle):
     def get_guid(self):
         return self._reader.guid()
 
+    def wait_till_matched(self, timeout_sec: float = 3.0, settle_time_sec: float = 0.05) -> bool:
+        """Poll SubscriptionMatchedStatus until matched and stable for settle_time_sec."""
+        sm_status = SubscriptionMatchedStatus()
+        deadline = time.monotonic() + timeout_sec
+        stable_since = None
+        sleep_s = 0.01
+        while time.monotonic() < deadline:
+            self._reader.get_subscription_matched_status(sm_status)
+            if sm_status.current_count > 0:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= settle_time_sec:
+                    return True
+            else:
+                stable_since = None
+            time.sleep(sleep_s)
+        return False
+
 
 async def request(
     domain_participant: object,
@@ -484,8 +520,10 @@ async def request(
     """Send a request and await the response.
 
     One of (request_topic_name, response_topic_name) or service_name must be provided.
-    Uses RELIABLE reliability for both endpoints and correlates the response via
-    related_sample_identity.
+    The client uses a volatile (default durability) request Publisher and a reliable response Subscriber.
+    The service uses a transient-local response Publisher (depth 10) by default for robust delivery.
+    Before publishing the first request, discovery readiness is awaited using a graph-based stable match check
+    to avoid races right after endpoint matching.
 
     Args:
         domain_participant: Domain participant wrapper created by `make_domain_participant`.
@@ -515,8 +553,6 @@ async def request(
     future = loop.create_future()
     request_identity = SampleIdentity()
     lock = threading.Lock()
-    publisher_matched = asyncio.Event()
-    subscriber_matched = asyncio.Event()
 
     def set_data(data):
         if not future.done():
@@ -527,36 +563,30 @@ async def request(
             if info.related_sample_identity == request_identity:
                 loop.call_soon_threadsafe(lambda: set_data(data))
 
-    def on_publisher_matched(_, matched):
-        if matched:
-            loop.call_soon_threadsafe(publisher_matched.set)
-
-    def on_subscriber_matched(matched):
-        if matched:
-            loop.call_soon_threadsafe(subscriber_matched.set)
-
     response_subscriber = Subscriber(
         domain_participant,
         response_topic_name,
         response_pub_sub_type,
         response_data_type,
         on_response,
-        on_has_publisher_changed_function=on_subscriber_matched,
         reliability_kind=RELIABLE_RELIABILITY_QOS,
     )
 
-    client_publisher_history_depth = 1
     request_publisher = Publisher(
         domain_participant,
         request_topic_name,
         request_pub_sub_type,
-        on_has_subscriber_changed_function=on_publisher_matched,
         reliability_kind=RELIABLE_RELIABILITY_QOS,
-        history_depth=client_publisher_history_depth,
     )
 
-    await subscriber_matched.wait()
-    await publisher_matched.wait()
+    # Wait for both endpoints to be matched before publishing the request
+    pub_ready = False
+    sub_ready = False
+    while not (pub_ready and sub_ready):
+        if not pub_ready:
+            pub_ready = await loop.run_in_executor(None, lambda: request_publisher.wait_till_matched())
+        if not sub_ready:
+            sub_ready = await loop.run_in_executor(None, lambda: response_subscriber.wait_till_matched())
 
     params = WriteParams()
     params.related_sample_identity().writer_guid(response_subscriber.get_guid())
@@ -578,10 +608,10 @@ async def request(
 class Service:
     """Request/response service.
 
-    Consumes requests from a request topic and publishes responses to the
-    corresponding response topic. Supports both synchronous and async request
-    handlers, back-pressure via max_history_depth, and delayed dispatch of
-    responses until the originating client is matched.
+    Consumes requests from a request topic and publishes responses to the corresponding response topic.
+    Supports both synchronous and async request handlers, back-pressure via max_history_depth, and delayed dispatch
+    of responses until the originating client is matched. To drop a request silently from a handler, raise
+    Service.IgnoreRequest.
     """
 
     class IgnoreRequest(Exception):

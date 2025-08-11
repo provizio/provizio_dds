@@ -17,7 +17,7 @@ add_subdirectory(request_response_client)
 
 # TODO: Windows version
 add_test(NAME request_response COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service>\" \"$<TARGET_FILE:request_response_client>\"; }"
+    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service> serial_requests\" \"$<TARGET_FILE:request_response_client>\"; }"
 )
 
 # TODO: Windows version

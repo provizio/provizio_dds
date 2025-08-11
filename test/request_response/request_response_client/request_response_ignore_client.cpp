@@ -62,7 +62,7 @@ try
                 return 1;
             }
             std::cout << log_prefix << "Received response for request " << value << std::endl;
-            
+
             const auto &reply = future.get();
             const auto expected = static_cast<std::int64_t>(value) * value;
             if (reply.data() != expected)

@@ -46,8 +46,6 @@ namespace provizio::dds
      */
     /// @brief Maximum time to keep a response for a client that is not matched yet.
     constexpr std::chrono::seconds max_time_to_keep_ready_responses{10};
-    /// @brief Publisher history depth for client requests
-    constexpr std::int32_t client_publisher_history_depth{1};
 
     /**
      * @brief Service handling incoming requests and publishing responses.
@@ -461,8 +459,7 @@ namespace provizio::dds
                         }
                     }
                 }
-            },
-            client_publisher_history_depth);
+            });
 
         if (client->request(request_data, context))
         {

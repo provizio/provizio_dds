@@ -64,7 +64,7 @@ int main()
                 {
                     throw provizio::dds::ignore_request{};
                 }
-                
+
                 std_msgs::msg::Int64 response;
                 const std::int64_t value = static_cast<std::int64_t>(request.data()) * request.data();
                 response.data(value);

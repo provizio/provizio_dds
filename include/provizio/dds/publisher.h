@@ -17,7 +17,9 @@
 
 #include <memory>
 #include <string>
+#include <thread>
 
+#include <fastdds/dds/core/status/PublicationMatchedStatus.hpp>
 #include <fastdds/dds/publisher/DataWriter.hpp>
 #include <fastdds/dds/publisher/DataWriterListener.hpp>
 #include <fastdds/dds/publisher/Publisher.hpp>
@@ -50,6 +52,10 @@ namespace provizio::dds
      *
      * @see provizio::dds::make_publisher
      * @see https://fast-dds.docs.eprosima.com/en/latest/fastdds/dds_layer/publisher/publisher.html
+     *
+     * In addition to publish APIs, the interface provides a helper to wait until the writer is matched and stable
+     * for a short "settle" period (useful before the first write to avoid races right after discovery):
+     * wait_till_matched().
      */
     template <typename data_pub_sub_type> class data_publisher
     {
@@ -82,6 +88,18 @@ namespace provizio::dds
          * @brief Returns GUID of the underlying DataWriter.
          */
         virtual guid get_guid() const = 0;
+
+        /**
+         * @brief Blocks until this publisher has at least one stable match for a short settle window.
+         * @note This is a blocking call; invoke in a background thread if you must not block the caller thread.
+         * @param timeout Total timeout duration.
+         * @param settle_time The minimum time the match must remain stable (no further status changes) to be
+         * considered "ready".
+         * @return true if matched and stable within timeout, false otherwise.
+         */
+        virtual bool wait_till_matched(const std::chrono::milliseconds &timeout = std::chrono::milliseconds{3000},
+                                       const std::chrono::milliseconds &settle_time = std::chrono::milliseconds{
+                                           50}) const = 0;
     };
 
     /**
@@ -165,6 +183,15 @@ namespace provizio::dds
          * @copydoc provizio::dds::data_publisher::get_guid()
          */
         guid get_guid() const override;
+
+        /**
+         * @brief Blocks until this publisher has at least one stable match for a short settle window.
+         * @param timeout Total timeout duration.
+         * @param settle_time The minimum time the match must remain stable.
+         * @return true if matched and stable within timeout, false otherwise.
+         */
+        bool wait_till_matched(const std::chrono::milliseconds &timeout,
+                               const std::chrono::milliseconds &settle_time) const override;
 
       private:
         publisher_handle(std::shared_ptr<domain_participant> participant, const std::string &topic_name,
@@ -372,6 +399,42 @@ namespace provizio::dds
     guid publisher_handle<data_pub_sub_type, on_matched_function_type>::get_guid() const
     {
         return data_writer->guid();
+    }
+
+    template <typename data_pub_sub_type, typename on_matched_function_type>
+    bool publisher_handle<data_pub_sub_type, on_matched_function_type>::wait_till_matched(
+        const std::chrono::milliseconds &timeout, const std::chrono::milliseconds &settle_time) const
+    {
+        using clock = std::chrono::steady_clock;
+        const auto deadline = clock::now() + timeout;
+        constexpr std::chrono::milliseconds iteration_sleep{10};
+
+        eprosima::fastdds::dds::PublicationMatchedStatus status;
+        clock::time_point stable_since{};
+        bool has_stable_since = false;
+        while (clock::now() < deadline)
+        {
+            data_writer->get_publication_matched_status(status);
+            if (status.current_count > 0)
+            {
+                if (!has_stable_since)
+                {
+                    stable_since = clock::now();
+                    has_stable_since = true;
+                }
+                else if (clock::now() - stable_since >= settle_time)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                has_stable_since = false;
+            }
+            std::this_thread::sleep_for(iteration_sleep);
+        }
+
+        return false;
     }
 } // namespace provizio::dds
 

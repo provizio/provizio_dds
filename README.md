@@ -320,7 +320,9 @@ service.stop()
 **Notes:**
 
 - Both synchronous and asynchronous service handlers are supported. Asynchronous handlers return `std::future` (C++) or are `async def` coroutines (Python).
-- Reliability is set to RELIABLE for request/response endpoints by default.
+- Reliability is set to RELIABLE for response readers/writers by default. The client’s request Publisher uses default (volatile) durability, while the service’s response Publisher uses TRANSIENT_LOCAL durability with a small history (depth 10) for robust delivery (compatible with ROS 2).
+- Before publishing the first request, a short graph-based “readiness” wait is performed to ensure endpoints are matched and stable, avoiding races immediately after discovery.
+- To drop a request silently from a service handler, throw `provizio::dds::ignore_request` (C++) or raise `provizio_dds.Service.IgnoreRequest` (Python). Such requests are discarded without warnings.
 
 ### ROS 2 compatibility
 

@@ -28,10 +28,11 @@ namespace provizio::dds
     class ignore_request : public std::exception
     {
       public:
-        const char *what() const noexcept override { return "ignore_request"; }
+        const char *what() const noexcept override
+        {
+            return "ignore_request";
+        }
     };
 } // namespace provizio::dds
 
 #endif // DDS_IGNORE_REQUEST
-
-
