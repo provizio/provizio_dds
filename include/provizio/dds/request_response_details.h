@@ -248,10 +248,12 @@ namespace provizio::dds::detail
         template <typename handle_response_function_type>
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
                              const std::string &response_topic_name,
-                             handle_response_function_type handle_response_function);
+                             handle_response_function_type handle_response_function,
+                             std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{0});
         template <typename handle_response_function_type>
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
-                             handle_response_function_type handle_response_function);
+                             handle_response_function_type handle_response_function,
+                             std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{0});
 
         /**
          * @brief Destructor stops the background readiness wait and joins its future to ensure clean shutdown.
@@ -476,12 +478,13 @@ namespace provizio::dds::detail
     template <typename handle_response_function_type>
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
-        const std::string &response_topic_name, handle_response_function_type handle_response_function)
+        const std::string &response_topic_name, handle_response_function_type handle_response_function,
+        const std::chrono::milliseconds post_match_delay)
         : publisher(make_publisher<request_pub_sub_type>(participant, request_topic_name, RELIABLE_RELIABILITY_QOS)),
           subscriber(make_subscriber<response_pub_sub_type>(
               participant, response_topic_name, std::move(handle_response_function), RELIABLE_RELIABILITY_QOS))
     {
-        wait_till_matched_future = std::async(std::launch::async, [this]() {
+        wait_till_matched_future = std::async(std::launch::async, [this, post_match_delay]() {
             const std::chrono::milliseconds iteration_timeout{100};
             while (!stopped() && !publisher->wait_till_matched(iteration_timeout))
             {
@@ -490,9 +493,19 @@ namespace provizio::dds::detail
             {
             }
 
-            const std::lock_guard<std::mutex> lock{mutex};
+            std::unique_lock<std::mutex> lock{mutex};
             if (!stop)
             {
+                if (post_match_delay > std::chrono::milliseconds{0})
+                {
+                    lock.unlock();
+                    std::this_thread::sleep_for(post_match_delay);
+                    lock.lock();
+                    if (stop)
+                    {
+                        return false;
+                    }
+                }
                 request_deferred_mutex_prelocked();
                 return true;
             }
@@ -505,9 +518,10 @@ namespace provizio::dds::detail
     template <typename handle_response_function_type>
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
-        handle_response_function_type handle_response_function)
+        handle_response_function_type handle_response_function, std::chrono::milliseconds post_match_delay)
         : service_client_basic(std::move(participant), request_prefix + service_name + request_suffix,
-                               response_prefix + service_name + response_suffix, std::move(handle_response_function))
+                               response_prefix + service_name + response_suffix, std::move(handle_response_function),
+                               post_match_delay)
     {
     }
 

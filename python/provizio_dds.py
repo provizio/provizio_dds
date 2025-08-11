@@ -516,6 +516,7 @@ async def request(
     request_topic_name: str = None,
     response_topic_name: str = None,
     service_name: str = None,
+    post_match_delay_sec: float = 0.0,
 ):
     """Send a request and await the response.
 
@@ -534,6 +535,7 @@ async def request(
         request_topic_name: Optional explicit request topic name.
         response_topic_name: Optional explicit response topic name.
         service_name: Optional base name to derive request/response topics.
+        post_match_delay_sec: Optional delay in seconds to allow additional endpoints to match (e.g., multiple services).
     Returns:
         The response data instance, or None if publishing the request failed.
     """
@@ -587,6 +589,10 @@ async def request(
             pub_ready = await loop.run_in_executor(None, lambda: request_publisher.wait_till_matched())
         if not sub_ready:
             sub_ready = await loop.run_in_executor(None, lambda: response_subscriber.wait_till_matched())
+
+    # Optional delay to allow additional endpoints to match (e.g., multiple services)
+    if post_match_delay_sec and post_match_delay_sec > 0.0:
+        await asyncio.sleep(post_match_delay_sec)
 
     params = WriteParams()
     params.related_sample_identity().writer_guid(response_subscriber.get_guid())
