@@ -23,6 +23,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <functional>
 #include <future>
 #include <limits>
@@ -36,6 +37,7 @@
 #include <fastdds/rtps/common/SampleIdentity.h>
 
 #include "provizio/dds/function_traits.h"
+#include "provizio/dds/ignore_request.h"
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/subscriber.h"
 
@@ -329,7 +331,14 @@ namespace provizio::dds::detail
                 const queued_request request{std::move(requests_queue.front())};
                 requests_queue.pop();
                 lock.unlock();
-                on_response_function(handle_request_function(request.first), request.second);
+                try
+                {
+                    on_response_function(handle_request_function(request.first), request.second);
+                }
+                catch (const ignore_request &)
+                {
+                    // Silently drop the request
+                }
                 lock.lock();
             }
         }
@@ -367,7 +376,15 @@ namespace provizio::dds::detail
         const std::lock_guard<std::mutex> lock{mutex};
         if (futures.size() < max_queue_size)
         {
-            futures.emplace_back(handle_request_function(request), identity);
+            try
+            {
+                // Handler may throw ignore_request before returning a future
+                futures.emplace_back(handle_request_function(request), identity);
+            }
+            catch (const ignore_request &)
+            {
+                // Silently drop
+            }
         }
         else
         {
@@ -393,7 +410,14 @@ namespace provizio::dds::detail
                 auto future_iterator = futures.begin() + (i - 1);
                 if (future_iterator->first.wait_for(dont_wait) == std::future_status::ready)
                 {
-                    on_response_function(future_iterator->first.get(), future_iterator->second);
+                    try
+                    {
+                        on_response_function(future_iterator->first.get(), future_iterator->second);
+                    }
+                    catch (const ignore_request &)
+                    {
+                        // Silently drop the request
+                    }
                     futures.erase(future_iterator);
                 }
             }

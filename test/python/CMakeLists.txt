@@ -48,6 +48,12 @@ add_test(NAME python_request_response
 )
 set_tests_properties(python_request_response PROPERTIES TIMEOUT 30)
 
+add_test(NAME python_request_response_async
+   COMMAND bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service_concurrent.py\" \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_client.py\"; }"
+   WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_request_response_async PROPERTIES TIMEOUT 30)
+
 add_test(NAME python_request_cpp_service
     COMMAND bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service>\" \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_client.py\"; }"
     WORKING_DIRECTORY "${TEST_PATH}"

@@ -19,3 +19,6 @@ target_link_libraries(request_response_client PUBLIC provizio_dds Threads::Threa
 
 add_executable(request_response_concurrent_requests request_response_concurrent_requests.cpp)
 target_link_libraries(request_response_concurrent_requests PUBLIC provizio_dds Threads::Threads)
+
+add_executable(request_response_ignore_client request_response_ignore_client.cpp)
+target_link_libraries(request_response_ignore_client PUBLIC provizio_dds Threads::Threads)

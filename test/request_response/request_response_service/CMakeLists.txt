@@ -16,3 +16,9 @@ find_package(Threads REQUIRED)
 
 add_executable(request_response_service request_response_service.cpp)
 target_link_libraries(request_response_service PUBLIC provizio_dds Threads::Threads)
+
+add_executable(request_response_ignore_service request_response_ignore_service.cpp)
+target_link_libraries(request_response_ignore_service PUBLIC provizio_dds Threads::Threads)
+
+add_executable(request_response_ignore_service_async request_response_ignore_service_async.cpp)
+target_link_libraries(request_response_ignore_service_async PUBLIC provizio_dds Threads::Threads)

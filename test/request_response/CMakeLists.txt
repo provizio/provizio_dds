@@ -24,3 +24,13 @@ add_test(NAME request_response COMMAND
 add_test(NAME request_response_concurrent_requests_serial_service COMMAND
     bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service>\" \"$<TARGET_FILE:request_response_concurrent_requests>\"; }"
 )
+
+# TODO: Windows version
+add_test(NAME request_response_ignore COMMAND
+    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_ignore_service>\" \"$<TARGET_FILE:request_response_ignore_client>\"; }"
+)
+
+# TODO: Windows version
+add_test(NAME request_response_ignore_async COMMAND
+    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_ignore_service_async>\" \"$<TARGET_FILE:request_response_ignore_client>\"; }"
+)

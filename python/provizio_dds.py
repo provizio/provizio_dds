@@ -584,6 +584,10 @@ class Service:
     responses until the originating client is matched.
     """
 
+    class IgnoreRequest(Exception):
+        """Raise from a request handler to drop the request silently."""
+        pass
+
     class _RequestHandler:
         def __init__(
             self, handle_request_function, on_response_function, max_queue_size
@@ -628,8 +632,12 @@ class Service:
                         return
                     request, identity = self._requests_queue.get()
 
-                response = self._handle_request_function(request)
-                self._on_response_function(response, identity)
+                try:
+                    response = self._handle_request_function(request)
+                    self._on_response_function(response, identity)
+                except Service.IgnoreRequest:
+                    # Silently drop
+                    pass
 
     class _AsyncRequestHandler:
         def __init__(
@@ -668,8 +676,12 @@ class Service:
                 )
 
         async def _process_request(self, request, identity):
-            response = await self._handle_request_function(request)
-            self._on_response_function(response, identity)
+            try:
+                response = await self._handle_request_function(request)
+                self._on_response_function(response, identity)
+            except Service.IgnoreRequest:
+                # Silently drop
+                pass
 
     def __init__(
         self,
