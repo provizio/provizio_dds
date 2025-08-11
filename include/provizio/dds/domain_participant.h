@@ -83,7 +83,7 @@ namespace provizio::dds
         eprosima::fastdds::dds::DomainParticipant *participant;
         std::mutex registered_types_mutex;
         std::unordered_map<std::string, TypeSupport> registered_types;
-        std::mutex registered_topics_mutex;
+        std::shared_ptr<std::mutex> registered_topics_mutex;
         std::unordered_map<std::string, std::weak_ptr<topic>> registered_topics;
     };
     using DomainParticipant = domain_participant; // To match DDS domain participant name, as previously used directly

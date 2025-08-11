@@ -52,6 +52,7 @@ namespace provizio::dds
     } // namespace
 
     domain_participant::domain_participant(const DomainId_t domain_id)
+        : registered_topics_mutex(std::make_shared<std::mutex>())
     {
         DomainParticipantQos customized_qos;
 
@@ -84,13 +85,13 @@ namespace provizio::dds
         {
             // Make sure neither of registered topic handles that are still alive won't try to unregister themselves
             // on destruction
-            const std::lock_guard<std::mutex> lock{registered_topics_mutex};
+            const std::lock_guard<std::mutex> lock{*registered_topics_mutex};
             for (auto &topic_pair : registered_topics)
             {
                 auto handle = topic_pair.second.lock();
                 if (handle)
                 {
-                    handle->release();
+                    handle->release_mutex_prelocked();
                 }
             }
         }
@@ -101,7 +102,7 @@ namespace provizio::dds
     std::shared_ptr<topic> domain_participant::register_topic(const std::string &topic_name,
                                                               const std::string &type_name, const TopicQos &qos)
     {
-        const std::lock_guard<std::mutex> lock{registered_topics_mutex};
+        const std::lock_guard<std::mutex> lock{*registered_topics_mutex};
         const auto topic_iterator = registered_topics.find(topic_name);
         if (topic_iterator != registered_topics.end())
         {

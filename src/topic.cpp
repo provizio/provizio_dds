@@ -23,16 +23,16 @@
 
 namespace provizio::dds
 {
-    topic::topic(eprosima::fastdds::dds::DomainParticipant *participant, std::mutex &registered_topics_mutex,
-                 Topic *the_topic, TopicQos qos)
-        : participant(participant), registered_topics_mutex(registered_topics_mutex), the_topic(the_topic),
+    topic::topic(eprosima::fastdds::dds::DomainParticipant *participant,
+                 std::shared_ptr<std::mutex> registered_topics_mutex, Topic *the_topic, TopicQos qos)
+        : participant(participant), registered_topics_mutex(std::move(registered_topics_mutex)), the_topic(the_topic),
           the_qos(std::move(qos))
     {
     }
 
     topic::~topic()
     {
-        const std::lock_guard<std::mutex> lock{registered_topics_mutex};
+        const std::lock_guard<std::mutex> lock{*registered_topics_mutex};
         if (participant != nullptr)
         {
             participant->delete_topic(the_topic);

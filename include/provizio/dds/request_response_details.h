@@ -199,10 +199,11 @@ namespace provizio::dds::detail
     template <typename response_type> class response_data
     {
       public:
-        /** @return True if a value has been set. */
-        const bool is_set() const;
-        /** @brief Sets the response, notifying any waiters. Throws if already set. */
-        void set(const response_type &response);
+        /** @return True if a value has been set. The mutex() has to be locked by the caller!*/
+        const bool is_set_mutex_prelocked() const;
+        /** @brief Sets the response, notifying any waiters. The mutex() has to be locked by the caller! Throws if
+         * already set. */
+        void set_mutex_prelocked(const response_type &response);
         /** @brief Gets the response. Throws std::future_error if unset. */
         const response_type &get() const;
         /** @brief Access to internal mutex for waiting. */
@@ -399,12 +400,13 @@ namespace provizio::dds::detail
         }
     }
 
-    template <typename response_type> const bool response_data<response_type>::is_set() const
+    template <typename response_type> const bool response_data<response_type>::is_set_mutex_prelocked() const
     {
         return has_value;
     }
 
-    template <typename response_type> void response_data<response_type>::set(const response_type &response)
+    template <typename response_type>
+    void response_data<response_type>::set_mutex_prelocked(const response_type &response)
     {
         if (has_value)
         {

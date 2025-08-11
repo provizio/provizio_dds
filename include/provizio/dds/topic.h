@@ -38,13 +38,13 @@ namespace provizio::dds
          * @note To register a topic, use provizio::dds::domain_participant::register_topic.
          *
          * @param participant Owning DomainParticipant.
-         * @param registered_topics_mutex Mutex from the owning DomainParticipant to synchronise access to its
+         * @param registered_topics_mutex Mutex from the owning DomainParticipant to synchronize access to its
          * topics container.
          * @param the_topic Topic to own.
          * @param qos QoS of the owned topic.
          */
-        topic(eprosima::fastdds::dds::DomainParticipant *participant, std::mutex &registered_topics_mutex,
-              Topic *the_topic, TopicQos qos);
+        topic(eprosima::fastdds::dds::DomainParticipant *participant,
+              std::shared_ptr<std::mutex> registered_topics_mutex, Topic *the_topic, TopicQos qos);
         /**
          * @brief Destroy the topic object, unregistering the topic from the DomainParticipant.
          */
@@ -72,14 +72,14 @@ namespace provizio::dds
          * @brief Releases the ownership of the topic, so it won't be unregistered on destruction.
          * For internal use only.
          */
-        inline void release()
+        inline void release_mutex_prelocked()
         {
             participant = nullptr;
         }
 
       private:
         eprosima::fastdds::dds::DomainParticipant *participant;
-        std::mutex &registered_topics_mutex;
+        std::shared_ptr<std::mutex> registered_topics_mutex;
         Topic *const the_topic;
         const TopicQos the_qos;
     };

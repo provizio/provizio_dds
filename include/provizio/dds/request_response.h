@@ -455,9 +455,9 @@ namespace provizio::dds
                     if (response)
                     {
                         const std::lock_guard<std::mutex> lock{response->mutex()};
-                        if (!response->is_set())
+                        if (!response->is_set_mutex_prelocked())
                         {
-                            response->set(data);
+                            response->set_mutex_prelocked(data);
                         }
                     }
                 }
@@ -503,7 +503,7 @@ namespace provizio::dds
         }
 
         std::unique_lock<std::mutex> lock{data->mutex()};
-        if (data->cv().wait_until(lock, timeout_time, [&]() { return data->is_set(); }))
+        if (data->cv().wait_until(lock, timeout_time, [&]() { return data->is_set_mutex_prelocked(); }))
         {
             return std::future_status::ready;
         }
