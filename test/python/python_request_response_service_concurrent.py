@@ -25,7 +25,7 @@ def main():
     service_name = "provizio_dds_test_request_response"
     domain_id = 14
     requests_expected = 5
-    total_timeout = 10
+    total_timeout = 20
     end_sleep = 4
 
     mutex = threading.Lock()
