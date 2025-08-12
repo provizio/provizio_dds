@@ -52,6 +52,7 @@ publisher = provizio_dds.Publisher(
     topic,
     provizio_dds.StringPubSubType,
     on_matched,
+    history_depth=5, # To deliver up to 5 messages to late matchers thus improving reliability
 )
 
 message = provizio_dds.String()
