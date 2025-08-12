@@ -279,6 +279,7 @@ namespace provizio::dds::detail
 
         mutable std::mutex mutex;
         bool stop{false};
+        bool matched{false};
         std::vector<deferred_request> deferred_requests;
         std::future<bool> wait_till_matched_future;
         std::shared_ptr<data_publisher<request_pub_sub_type>> publisher;
@@ -506,6 +507,7 @@ namespace provizio::dds::detail
                         return false;
                     }
                 }
+                matched = true;
                 request_deferred_mutex_prelocked();
                 return true;
             }
@@ -541,9 +543,13 @@ namespace provizio::dds::detail
         const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context)
     {
         const std::lock_guard<std::mutex> lock{mutex};
-        if (wait_till_matched_future.valid() &&
-            wait_till_matched_future.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready &&
-            wait_till_matched_future.get())
+        if (stop)
+        {
+            // Already stopped
+            return false;
+        }
+
+        if (matched)
         {
             return do_request(request_data, *context);
         }
