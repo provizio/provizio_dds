@@ -75,8 +75,10 @@ def main(args=None):
             f"{TestRosInteropService.NAME}: Successfully sent all responses"
         )
     else:
-        service_node.get_logger().error(f"{TestRosInteropService.NAME}: Timeout!")
-        error_code = 0
+        service_node.get_logger().error(
+            f"{TestRosInteropService.NAME}: Timeout! Only {service_node.response_count} responses sent."
+        )
+        error_code = 1
 
     service_node.destroy_node()
     rclpy.shutdown()
