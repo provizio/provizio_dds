@@ -376,7 +376,7 @@ namespace provizio::dds
     void service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>::dispatch_responses()
     {
         std::unique_lock<std::mutex> lock{mutex};
-        const auto dispatch = [&]() -> bool {
+        const auto dispatch_matched = [&]() -> bool {
             for (auto it = ready_responses.begin(); it != ready_responses.end(); ++it)
             {
                 if (is_subscriber_matched_mutex_prelocked(it->identity.writer_guid()))
@@ -403,9 +403,13 @@ namespace provizio::dds
             return false;
         };
 
+        // Period to clean up timed out unmatched responses
+        constexpr std::chrono::seconds cleanup_period{1};
         while (!stop)
         {
-            cv.wait(lock, [&]() { return stop || dispatch() || remove_timed_out(std::chrono::system_clock::now()); });
+            cv.wait_for(lock, cleanup_period, [&]() {
+                return stop || dispatch_matched() || remove_timed_out(std::chrono::system_clock::now());
+            });
         }
     }
 
