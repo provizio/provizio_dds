@@ -228,9 +228,9 @@ int main()
         participant, "echo_service", request);
 
     if (future.wait_for(std::chrono::seconds{2}) == std::future_status::ready) {
-        const auto &reply = future.get();
+        const auto &response = future.get();
         // Print the received message
-        std::cout << reply.data() << std::endl;
+        std::cout << response.data() << std::endl;
     }
 
     return 0;

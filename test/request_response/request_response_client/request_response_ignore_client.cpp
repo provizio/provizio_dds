@@ -63,11 +63,11 @@ try
             }
             std::cout << log_prefix << "Received response for request " << value << std::endl;
 
-            const auto &reply = future.get();
+            const auto &response = future.get();
             const auto expected = static_cast<std::int64_t>(value) * value;
-            if (reply.data() != expected)
+            if (response.data() != expected)
             {
-                std::cerr << log_prefix << "Unexpected response for " << value << ": got " << reply.data()
+                std::cerr << log_prefix << "Unexpected response for " << value << ": got " << response.data()
                           << ", expected " << expected << std::endl;
                 return 1;
             }
