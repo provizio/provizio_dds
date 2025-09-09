@@ -17,5 +17,5 @@ add_subdirectory(simplest_subscriber_type_reuse)
 
 # TODO: Windows version
 add_test(NAME pub_sub_type_reuse COMMAND
-    sh -c "$<TARGET_FILE:simplest_publisher_type_reuse> & $<TARGET_FILE:simplest_subscriber_type_reuse>"
+    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { $<TARGET_FILE:simplest_publisher_type_reuse> & $<TARGET_FILE:simplest_subscriber_type_reuse>; }"
 )

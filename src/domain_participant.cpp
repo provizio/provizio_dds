@@ -18,69 +18,124 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <string>
 
+#include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
+#include <fastdds/dds/topic/Topic.hpp>
+#include <fastdds/dds/topic/TypeSupport.hpp>
+#include <fastdds/dds/topic/qos/TopicQos.hpp>
 #include <fastrtps/types/TypesBase.h>
 #include <fastrtps/xmlparser/XMLParserCommon.h>
 
-namespace provizio // NOLINT: nesting namespace old-school way to support C++14
+#include "provizio/dds/topic.h"
+
+namespace provizio::dds
 {
-    namespace dds
+    namespace
     {
-        namespace
+        // More reliable participants matching (only 5 multicast announcements are sent 0.1 seconds apart by default
+        // and then only once in 3 seconds, which is often not enough when nearing 100% bandwidth load)
+        const eprosima::fastrtps::Duration_t initial_announcements_period{0.05};       // NOLINT: Doesn't throw
+        const eprosima::fastrtps::Duration_t lease_duration_announcement_period{1, 0}; // NOLINT: Doesn't throw
+        constexpr std::uint32_t num_initial_discovery_announcements = 200;
+
+        // In Fast-DDS 3 it's now DEFAULT_FASTDDS_ENV_VARIABLE and its value has changed from
+        // FASTRTPS_DEFAULT_PROFILES_FILE to FASTDDS_DEFAULT_PROFILES_FILE. When upgrading, make sure to update it
+        // in provizio_dds.py too.
+        inline const char *xml_profiles_env_variable()
         {
-            // More reliable participants matching (only 5 multicast announcements are sent 0.1 seconds apart by default
-            // and then only once in 3 seconds, which is often not enough when nearing 100% bandwidth load)
-            const eprosima::fastrtps::Duration_t initial_announcements_period{0.05};       // NOLINT: Doesn't throw
-            const eprosima::fastrtps::Duration_t lease_duration_announcement_period{1, 0}; // NOLINT: Doesn't throw
-            constexpr std::uint32_t num_initial_discovery_announcements = 200;
+            return eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE;
+        }
+    } // namespace
 
-            // In Fast-DDS 3 it's now DEFAULT_FASTDDS_ENV_VARIABLE and its value has changed from
-            // FASTRTPS_DEFAULT_PROFILES_FILE to FASTDDS_DEFAULT_PROFILES_FILE. When upgrading, make sure to update it
-            // in provizio_dds.py too.
-            inline const char *xml_profiles_env_variable()
-            {
-                return eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE;
-            }
-        } // namespace
+    domain_participant::domain_participant(const DomainId_t domain_id)
+        : registered_topics_mutex(std::make_shared<std::mutex>())
+    {
+        DomainParticipantQos customized_qos;
 
-        domain_participant::domain_participant(const DomainId_t domain_id)
+        bool xml_profile = false;
+        if (auto *const file_path = std::getenv(xml_profiles_env_variable())) // NOLINT: getenv required
         {
-            DomainParticipantQos customized_qos;
-
-            bool xml_profile = false;
-            if (auto *const file_path = std::getenv(xml_profiles_env_variable())) // NOLINT: getenv required
-            {
-                xml_profile = std::filesystem::exists(file_path) && !std::filesystem::is_directory(file_path);
-            }
-
-            auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
-            if (!xml_profile) // Unless configured via the XML profile
-            {
-                participant_factory->load_profiles();
-                participant_factory->get_default_participant_qos(customized_qos);
-
-                customized_qos.wire_protocol().builtin.discovery_config.initial_announcements.count =
-                    num_initial_discovery_announcements;
-                customized_qos.wire_protocol().builtin.discovery_config.initial_announcements.period =
-                    initial_announcements_period;
-                customized_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod =
-                    lease_duration_announcement_period;
-            }
-
-            participant = participant_factory->create_participant(
-                domain_id, xml_profile ? PARTICIPANT_QOS_DEFAULT : customized_qos, nullptr);
+            xml_profile = std::filesystem::exists(file_path) && !std::filesystem::is_directory(file_path);
         }
 
-        domain_participant::~domain_participant()
+        auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
+        if (!xml_profile) // Unless configured via the XML profile
         {
-            DomainParticipantFactory::get_instance()->delete_participant(participant);
+            participant_factory->load_profiles();
+            participant_factory->get_default_participant_qos(customized_qos);
+
+            customized_qos.wire_protocol().builtin.discovery_config.initial_announcements.count =
+                num_initial_discovery_announcements;
+            customized_qos.wire_protocol().builtin.discovery_config.initial_announcements.period =
+                initial_announcements_period;
+            customized_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod =
+                lease_duration_announcement_period;
         }
 
-        std::shared_ptr<domain_participant> make_domain_participant(const DomainId_t domain_id)
+        participant = participant_factory->create_participant(
+            domain_id, xml_profile ? PARTICIPANT_QOS_DEFAULT : customized_qos, nullptr);
+    }
+
+    domain_participant::~domain_participant()
+    {
         {
-            return std::make_shared<domain_participant>(domain_id);
+            // Make sure neither of registered topic handles that are still alive won't try to unregister themselves
+            // on destruction
+            const std::lock_guard<std::mutex> lock{*registered_topics_mutex};
+            for (auto &topic_pair : registered_topics)
+            {
+                auto handle = topic_pair.second.lock();
+                if (handle)
+                {
+                    handle->release_mutex_prelocked();
+                }
+            }
         }
-    } // namespace dds
-} // namespace provizio
+
+        DomainParticipantFactory::get_instance()->delete_participant(participant);
+    }
+
+    std::shared_ptr<topic> domain_participant::register_topic(const std::string &topic_name,
+                                                              const std::string &type_name, const TopicQos &qos)
+    {
+        const std::lock_guard<std::mutex> lock{*registered_topics_mutex};
+        const auto topic_iterator = registered_topics.find(topic_name);
+        if (topic_iterator != registered_topics.end())
+        {
+            auto handle = topic_iterator->second.lock();
+            if (handle)
+            {
+                // Ensure the type matches the already registered topic's type
+                const std::string existing_type{handle->get()->get_type_name()};
+                if (existing_type != type_name)
+                {
+                    throw std::runtime_error{"Topic " + topic_name +
+                                             " has been already registered, but with a different type (existing: '" +
+                                             existing_type + "', requested: '" + type_name + "')!"};
+                }
+
+                // Ensure QoS is the same
+                if (!(handle->qos() == qos)) // Yep, TopicQos defines operator== but not operator!=
+                {
+                    throw std::runtime_error{"Topic " + topic_name +
+                                             " has been already registered, but with a different QoS!"};
+                }
+                return handle;
+            }
+        }
+
+        auto handle = std::make_shared<topic>(participant, registered_topics_mutex,
+                                              participant->create_topic(topic_name, type_name, qos), qos);
+        registered_topics[topic_name] = handle;
+        return handle;
+    }
+
+    std::shared_ptr<domain_participant> make_domain_participant(const DomainId_t domain_id)
+    {
+        return std::make_shared<domain_participant>(domain_id);
+    }
+} // namespace provizio::dds

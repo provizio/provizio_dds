@@ -39,13 +39,13 @@ int main()
             (void)publisher;
             if (matched)
             {
-                std::lock_guard<std::mutex> lock{mutex};
+                const std::lock_guard<std::mutex> lock{mutex};
                 was_matched = true;
                 condition_variable.notify_one();
             }
             else
             {
-                std::lock_guard<std::mutex> lock{mutex};
+                const std::lock_guard<std::mutex> lock{mutex};
                 unmatched = true;
                 condition_variable.notify_one();
             }

@@ -45,23 +45,24 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
 
   # Install GCC/clang
   if [[ "${CC}" == "gcc" ]]; then
-    brew install gcc
+    brew install gcc || echo "Skipping, as it's likely already installed"
   else
-    brew install llvm
+    brew install llvm || echo "Skipping, as it's likely already installed"
   fi
 
-  # Install CMake
-  brew install cmake ninja
+  # Install CMake and Ninja
+  brew install cmake || echo "Skipping, as it's likely already installed"
+  brew install ninja || echo "Skipping, as it's likely already installed"
 
   # Install openssl
-  brew install openssl
+  brew install openssl || echo "Skipping, as it's likely already installed"
 
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
-    brew install python3
+    brew install python3 || echo "Skipping, as it's likely already installed"
 
     # Install SWIG and its dependencies, if not yet installed
-    brew install swig
+    brew install swig || echo "Skipping, as it's likely already installed"
 
     # Make a virtual environment to avoid "error: externally-managed-environment"
     python3 -m venv /tmp/provizio_dds.venv
@@ -73,11 +74,11 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
   if [[ "${STATIC_ANALYSIS}" != "OFF" ]]; then
     if [[ "${CC}" == "gcc" ]]; then
       # Despite building with GCC, llvm tools are required
-      brew install llvm
+      brew install llvm || echo "Skipping, as it's likely already installed"
     fi
 
     # Install cppcheck
-    brew install cppcheck
+    brew install cppcheck || echo "Skipping, as it's likely already installed"
 
     # Install clang-format and clang-tidy
     ln -s "$(brew --prefix llvm)/bin/clang-format" "/usr/local/bin/clang-format"
@@ -273,8 +274,7 @@ else
 
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
-    apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev
-    python3 -m pip install setuptools
+    apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev python3-setuptools
 
     # Install SWIG (ubuntu 18 has too old swig in apt, ubuntu 24 has a broken version of swig in apt, see https://github.com/swig/swig/issues/2794)
     if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_24}" = true ]; then

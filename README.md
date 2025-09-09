@@ -147,6 +147,12 @@ publisher.publish(message)
 
 For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/python/python_publisher.py](test/python/python_publisher.py).
 
+**Notes:**
+
+- Publishers support configurable reliability QoS (BEST_EFFORT or RELIABLE). See `provizio::dds::make_publisher` (C++) or `provizio_dds.Publisher` (Python) for parameters.
+- Publishers support configurable durability QoS and optional history depth: keep default durability by passing `-1` (no changes), pass `0` to force VOLATILE durability (no history), or pass a positive value to enable TRANSIENT_LOCAL durability (KEEP_LAST with the given depth). See headers/Python docs for details.
+- You can optionally receive subscriber match/unmatch notifications. See `provizio::dds::make_publisher` (C++) or `provizio_dds.Publisher` (Python) for parameters.
+
 ## Receiving Data
 
 **C++ Example:**
@@ -190,6 +196,142 @@ input("Press Enter to continue...") # Wait for any user input
 ```
 
 For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/python/python_subscriber.py](test/python/python_subscriber.py).
+
+**Notes:**
+
+- The data callback can take either one argument (the data) or two (data and `SampleInfo`). Both are supported in C++ and Python bindings.
+- Subscribers support configurable reliability QoS (BEST_EFFORT or RELIABLE). See `provizio::dds::make_subscriber` (C++) or `provizio_dds.Subscriber` (Python) for parameters.
+- Subscribers support configurable durability QoS and optional history depth: keep default durability by passing `-1` (no changes), pass `0` to force VOLATILE durability (no history), or pass a positive value to enable TRANSIENT_LOCAL durability (KEEP_LAST with the given depth). See headers/Python docs for details.
+- You can optionally receive publisher match/unmatch notifications. See `provizio::dds::make_subscriber` (C++) or `provizio_dds.Subscriber` (Python) for parameters.
+
+## Request/Response
+
+The library provides a lightweight request/response API built on top of DDS topics. A service subscribes to a request topic and publishes replies to a response topic with correlation tracking; clients send requests and await replies.
+
+### Sending a Request
+
+**C++ Example:**
+
+```C++
+#include "provizio/dds/request_response.h"
+#include <std_msgs/msg/StringPubSubTypes.h>
+#include <chrono>
+#include <iostream>
+
+int main()
+{
+    auto participant = provizio::dds::make_domain_participant();
+    std_msgs::msg::String request;
+    request.data("hello");
+    auto future = provizio::dds::request<std_msgs::msg::StringPubSubType,
+                                    std_msgs::msg::StringPubSubType>(
+        participant, "echo_service", request);
+
+    if (future.wait_for(std::chrono::seconds{2}) == std::future_status::ready) {
+        const auto &response = future.get();
+        // Print the received message
+        std::cout << response.data() << std::endl;
+    }
+
+    return 0;
+}
+```
+
+**Python Example:**
+
+```Python
+import asyncio
+import provizio_dds
+
+async def main():
+    participant = provizio_dds.make_domain_participant()
+    request = provizio_dds.String()
+    request.data("hello")
+    response = await provizio_dds.request(
+        participant,
+        provizio_dds.StringPubSubType,
+        provizio_dds.StringPubSubType,
+        provizio_dds.String,
+        request,
+        service_name="echo_service",
+    )
+    print(response.data())
+
+asyncio.run(main())
+```
+
+### Creating a Service
+
+**C++ Example:**
+
+```C++
+#include "provizio/dds/request_response.h"
+#include <std_msgs/msg/StringPubSubTypes.h>
+#include <iostream>
+
+int main() {
+    auto participant = provizio::dds::make_domain_participant();
+
+    // Create an "echo" service using a single service name for both topics
+    auto service = provizio::dds::make_service<std_msgs::msg::StringPubSubType,
+                                               std_msgs::msg::StringPubSubType>(
+        participant,
+        "echo_service",
+        [](const std_msgs::msg::String &request) {
+            std_msgs::msg::String response;
+            response.data(request.data());
+            return response; // synchronous handler, return std::future for async requests handling
+        }
+    );
+
+    std::cin.get(); // Wait for any user input
+
+    return 0;
+}
+```
+
+**Python Example:**
+
+```Python
+import provizio_dds
+
+participant = provizio_dds.make_domain_participant()
+
+def handle_request(request: provizio_dds.String) -> provizio_dds.String:
+    response = provizio_dds.String()
+    response.data(request.data())
+    return response
+
+service = provizio_dds.Service(
+    participant,
+    provizio_dds.StringPubSubType,  # request PubSub type
+    provizio_dds.String,            # request data type
+    provizio_dds.StringPubSubType,  # response PubSub type
+    handle_request,                 # can be sync or async
+    service_name="echo_service",
+)
+
+input("Press any key to finish...")
+
+# Ensure you call service.stop() on exit to stop internal threads, otherwise the application will keep running
+service.stop()
+```
+
+**Notes:**
+
+- Both synchronous and asynchronous service handlers are supported. Asynchronous handlers return `std::future` (C++) or are `async def` coroutines (Python).
+- Reliability is set to RELIABLE for response readers/writers by default. The client’s request Publisher uses default (volatile) durability, while the service’s response Publisher uses TRANSIENT_LOCAL durability with a small history (depth 10) for robust delivery (compatible with ROS 2).
+- Before publishing the first request, a short graph-based “readiness” wait is performed to ensure endpoints are matched and stable, avoiding races immediately after discovery.
+- Optionally, an extra post-match delay can be specified on the client request API to allow more endpoints (e.g., multiple services) to match before the first publish. See C++ `provizio::dds::request(..., std::chrono::milliseconds post_match_delay)` and Python `provizio_dds.request(..., post_match_delay_sec=0.0)`.
+- To drop a request silently from a service handler, throw `provizio::dds::ignore_request` (C++) or raise `provizio_dds.Service.IgnoreRequest` (Python). Such requests are discarded without warnings.
+
+### ROS 2 compatibility
+
+- Publish/subscribe is compatible with ROS 2 starting from Humble.
+- Request/response is compatible with ROS 2 starting from Jazzy.
+- For both publish/subscribe and request/response to interoperate with ROS 2, either:
+  - Keep the default `max_history_depth` on subscribers and services/requests, or
+  - Configure ROS 2 QoS to use TRANSIENT_LOCAL durability on the ROS 2 publishers with appropriate history depth for better reliability.
 
 ## Points Accumulation and Multi-Radar Fusion
 

@@ -17,5 +17,5 @@ add_subdirectory(simplest_subscriber)
 
 # TODO: Windows version
 add_test(NAME simplest_pub_sub COMMAND
-    sh -c "$<TARGET_FILE:simplest_publisher> & $<TARGET_FILE:simplest_subscriber>"
+    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { $<TARGET_FILE:simplest_publisher> & $<TARGET_FILE:simplest_subscriber>; }"
 )
