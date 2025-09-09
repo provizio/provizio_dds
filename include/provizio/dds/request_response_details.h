@@ -67,7 +67,7 @@ namespace provizio::dds::detail
     /**
      * @brief Checks whether a GUID refers to a DataReader endpoint (subscriber GUID).
      */
-    bool is_subscriber_guid(const guid &guid_to_check);
+    bool is_subscriber(const guid &guid_to_check);
 
     template <typename function_type, typename = void> struct returns_future : std::false_type
     {

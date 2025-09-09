@@ -50,7 +50,7 @@ namespace provizio::dds::detail
         return default_queue_size;
     }
 
-    bool is_subscriber_guid(const guid &guid_to_check)
+    bool is_subscriber(const guid &guid_to_check)
     {
         constexpr std::uint8_t subscriber_guid_test_bitmask = 0x04;
         constexpr std::size_t guid_test_byte_index = 3;

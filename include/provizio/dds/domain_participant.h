@@ -35,8 +35,8 @@ namespace provizio::dds
      * @brief Wrapper over eprosima::fastdds::dds::DomainParticipant taking care of TypeSupport and Topic
      * registration.
      *
-     * @note register_type and register_topic do so just once per type/topic name, any consequent registration
-     * simply reuses the registered TypeSupport/Topic.
+     * @note Registration when register_type and register_topic is performed just once per type/topic name, any
+     * consequent registration simply reuses the registered TypeSupport/Topic.
      */
     class domain_participant
     {

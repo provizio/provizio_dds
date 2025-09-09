@@ -220,7 +220,7 @@ namespace provizio::dds
         using response_type = typename response_pub_sub_type::type;
 
         /**
-         * @brief Construct a new future response object. For internal use only.
+         * @brief Construct a new future response object.
          */
         future_response(
             std::shared_ptr<detail::service_client_basic<request_pub_sub_type, response_pub_sub_type>> basic_client,
@@ -365,7 +365,7 @@ namespace provizio::dds
     bool service<request_pub_sub_type, response_pub_sub_type,
                  handle_request_function_type>::is_subscriber_matched_mutex_prelocked(const guid &subscriber_guid)
     {
-        if (!detail::is_subscriber_guid(subscriber_guid))
+        if (!detail::is_subscriber(subscriber_guid))
         {
             return true;
         }

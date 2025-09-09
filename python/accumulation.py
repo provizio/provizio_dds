@@ -43,11 +43,11 @@ else:
     import gps_utils
 
 
-def is_point_static(point: [float]) -> bool:
+def is_point_static(point: List[float]) -> bool:
     """Standard accumulation filter that only keeps points with ground relative radial velocities around 0.
 
     Args:
-        point (float]): a point to filter, as a list of float values matching the format used in provizio_dds.point_cloud2.
+        point: a point to filter, as a list of float values matching the format used in provizio_dds.point_cloud2.
 
     Returns:
         bool: True for points detected as static.
@@ -71,13 +71,16 @@ class RigidTransform:
     """
 
     def __init__(
-        self, position: [float] = None, rotation: [float] = None, from_matrix=None
+        self,
+        position: List[float] = None,
+        rotation: List[float] = None,
+        from_matrix=None,
     ) -> None:
         """Constructs a RigidTransform. If no arguments specified, makes an identity transform (no translation, no rotation).
 
         Args:
-            position ([float], optional): When specified, defines the translation as 3-components array (x, y, z) and from_matrix must be None. Defaults to None.
-            rotation ([float], optional): When specified, defines the rotation as either 3 euler angles (roll, pitch, yaw) in radians or a 4-component quaternion (w, x, y, z) and from_matrix must be None. Defaults to None.
+            position (optional): When specified, defines the translation as 3-components array (x, y, z) and from_matrix must be None. Defaults to None.
+            rotation (optional): When specified, defines the rotation as either 3 euler angles (roll, pitch, yaw) in radians or a 4-component quaternion (w, x, y, z) and from_matrix must be None. Defaults to None.
             from_matrix (optional): When specified, defines the whole 4x4 transformation matrix and both position and rotation must be None. Defaults to None.
         """
         assert (position is None and rotation is None) or (
@@ -358,6 +361,7 @@ class PointCloudsAccumulator:
 
     class _AccumulatedPointCloud:
         """Container for a single accumulated point cloud and the ego pose at reception time."""
+
         def __init__(
             self, points, ego_localization_when_received: RigidTransform
         ) -> None:
@@ -587,6 +591,9 @@ class DDSPointCloudsAccumulator:
         """Processes an incoming `NavSatFix` message to update ego localization.
 
         Orientation (yaw) is estimated from recent positions history.
+
+        Args:
+            nav_sat_fix: Incoming NavSatFix sample.
         """
         assert not self.no_localization
 
@@ -626,7 +633,12 @@ class DDSPointCloudsAccumulator:
             self._latest_ego_localization = RigidTransform(ego_position, [0, 0, yaw])
 
     def _on_extrinsics(self, topic_name, transform_stamped: TransformStamped):
-        """Processes an incoming `TransformStamped` with extrinsics for radars or localization sensor."""
+        """Processes an incoming `TransformStamped` with extrinsics for radars or localization sensor.
+
+        Args:
+            topic_name: DDS topic the extrinsics have been published to.
+            transform_stamped: Incoming TransformStamped sample.
+        """
         with self._mutex:
             frame_id = transform_stamped.child_frame_id()
             if (
@@ -647,7 +659,11 @@ class DDSPointCloudsAccumulator:
             self._extrinsics[frame_id] = extrinsics
 
     def _on_point_cloud(self, point_cloud: PointCloud2):
-        """Processes an incoming radar `PointCloud2` and accumulates its points if prerequisites are met."""
+        """Processes an incoming radar `PointCloud2` and accumulates its points if prerequisites are met.
+
+        Args:
+            point_cloud: Incoming PointCloud2 sample.
+        """
         with self._mutex:
             ego_localization = self._get_current_ego_localization()
             if ego_localization is None:
@@ -684,9 +700,11 @@ class DDSPointCloudsAccumulator:
 
     def _get_localization_extrinsics(self, frame_id: str) -> RigidTransform:
         """Resolves localization extrinsics transform for a given frame id.
-
         If no extrinsics topic is configured, identity is returned.
         Returns None if extrinsics are expected but not yet available.
+
+        Args:
+            frame_id: DDS frame id to get extrinsics for.
         """
         if not self.localization_frame_id:
             # Great, now we know the localization frame id
@@ -705,7 +723,7 @@ class DDSPointCloudsAccumulator:
         else:
             return _IDENTITY_TRANSFORM
 
-    def _estimate_yaw(self, current_ego_enu_position: [float]):
+    def _estimate_yaw(self, current_ego_enu_position: List[float]):
         """Estimates yaw from displacement between current and past ENU positions.
 
         Args:
