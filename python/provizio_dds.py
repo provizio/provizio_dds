@@ -516,7 +516,7 @@ async def request(
     request_topic_name: str = None,
     response_topic_name: str = None,
     service_name: str = None,
-    post_match_delay_sec: float = 0.0,
+    post_match_delay_sec: float = 0.5,
 ):
     """Send a request and await the response.
 
