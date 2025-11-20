@@ -117,7 +117,7 @@ namespace provizio::dds
     future_response<request_pub_sub_type, response_pub_sub_type> request(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, typename request_pub_sub_type::type &request_data,
-        std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{0});
+        std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{500});
 
     /**
      * @brief Sends a request to a service.
@@ -138,7 +138,7 @@ namespace provizio::dds
     future_response<request_pub_sub_type, response_pub_sub_type> request(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
         typename request_pub_sub_type::type &request_data,
-        std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{0});
+        std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{500});
 
     /**
      * @brief A request/response service.

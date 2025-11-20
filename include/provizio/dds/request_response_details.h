@@ -15,8 +15,6 @@
 #ifndef DDS_REQUEST_RESPONSE_DETAILS
 #define DDS_REQUEST_RESPONSE_DETAILS
 
-#include <iostream>
-
 #include <array>
 #include <assert.h>
 #include <chrono>
@@ -249,11 +247,11 @@ namespace provizio::dds::detail
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
                              const std::string &response_topic_name,
                              handle_response_function_type handle_response_function,
-                             std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{0});
+                             std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{500});
         template <typename handle_response_function_type>
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
                              handle_response_function_type handle_response_function,
-                             std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{0});
+                             std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{500});
 
         /**
          * @brief Destructor stops the background readiness wait and joins its future to ensure clean shutdown.
