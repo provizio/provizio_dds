@@ -59,8 +59,6 @@ try
             return response;
         });
 
-    // Client: send 1..5, expect all to succeed, with an extra 0.5s delay after readiness to let both services match
-    constexpr std::chrono::milliseconds post_match_delay{500};
     std::cout << log_prefix << "Starting..." << std::endl;
     const std::vector<int> values{1, 2, 3, 4, 5};
     for (const int value : values)
@@ -68,7 +66,7 @@ try
         std_msgs::msg::Int32 req;
         req.data(value);
         auto fut = provizio::dds::request<std_msgs::msg::Int32PubSubType, std_msgs::msg::Int64PubSubType>(
-            participant, service_name, req, post_match_delay);
+            participant, service_name, req);
 
         if (fut.wait_for(10s) != std::future_status::ready)
         {

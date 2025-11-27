@@ -15,6 +15,7 @@
 #ifndef DDS_PUBLISHER
 #define DDS_PUBLISHER
 
+#include <condition_variable>
 #include <memory>
 #include <string>
 #include <thread>
@@ -55,7 +56,7 @@ namespace provizio::dds
      *
      * In addition to publish APIs, the interface provides a helper to wait until the writer is matched and stable
      * for a short "settle" period (useful before the first write to avoid races right after discovery):
-     * wait_till_matched().
+     * get_num_matched_subscribers().
      */
     template <typename data_pub_sub_type> class data_publisher
     {
@@ -95,11 +96,11 @@ namespace provizio::dds
          * @param timeout Total timeout duration.
          * @param settle_time The minimum time the match must remain stable (no further status changes) to be
          * considered "ready".
-         * @return true if matched and stable within timeout, false otherwise.
+         * @return non-negative number of matched subscribers if stable within timeout, -1 otherwise.
          */
-        virtual bool wait_till_matched(const std::chrono::milliseconds &timeout = std::chrono::milliseconds{3000},
-                                       const std::chrono::milliseconds &settle_time = std::chrono::milliseconds{
-                                           50}) const = 0;
+        virtual int get_num_matched_subscribers(std::chrono::milliseconds timeout = std::chrono::milliseconds{3000},
+                                                std::chrono::milliseconds settle_time = std::chrono::milliseconds{
+                                                    250}) const = 0;
     };
 
     /**
@@ -188,16 +189,19 @@ namespace provizio::dds
          * @brief Blocks until this publisher has at least one stable match for a short settle window.
          * @param timeout Total timeout duration.
          * @param settle_time The minimum time the match must remain stable.
-         * @return true if matched and stable within timeout, false otherwise.
+         * @return non-negative number of matched subscribers if stable within timeout, -1 otherwise.
          */
-        bool wait_till_matched(const std::chrono::milliseconds &timeout,
-                               const std::chrono::milliseconds &settle_time) const override;
+        int get_num_matched_subscribers(std::chrono::milliseconds timeout,
+                                        std::chrono::milliseconds settle_time) const override;
 
       private:
         publisher_handle(std::shared_ptr<domain_participant> participant, const std::string &topic_name,
                          on_matched_function_type on_matched_function, std::unique_ptr<DataWriterListener> &&listener,
                          ReliabilityQosPolicyKind reliability_kind, std::int32_t history_depth);
 
+        int num_matched_subscribers{0};
+        mutable std::mutex num_matched_subscribers_mutex;
+        mutable std::condition_variable num_matched_subscribers_cv;
         std::shared_ptr<domain_participant> participant;
         dds::TypeSupport type_support;
         on_matched_function_type on_matched_function;
@@ -282,24 +286,34 @@ namespace provizio::dds
             void on_publication_matched(DataWriter *writer, const PublicationMatchedStatus &info) override
             {
                 (void)writer;
-                constexpr size_t arity = function_traits<on_matched_function_type>::arity;
-                if constexpr (arity == 2)
+
                 {
-                    if (info.current_count > 0 && info.current_count_change == info.current_count)
-                    {
-                        // Just matched the first publisher
-                        publisher.on_matched_function(publisher, true);
-                    }
-                    else if (info.current_count == 0 && info.current_count_change < 0)
-                    {
-                        // Just unmatched the last publisher
-                        publisher.on_matched_function(publisher, false);
-                    }
+                    std::lock_guard<std::mutex> lock{publisher.num_matched_subscribers_mutex};
+                    publisher.num_matched_subscribers = info.current_count;
                 }
-                else
+                publisher.num_matched_subscribers_cv.notify_all();
+
+                if constexpr (!std::is_same_v<on_matched_function_type, void *>)
                 {
-                    publisher.on_matched_function(publisher, info.current_count_change > 0,
-                                                  static_cast<const guid &>(info.last_subscription_handle));
+                    constexpr size_t arity = function_traits<on_matched_function_type>::arity;
+                    if constexpr (arity == 2)
+                    {
+                        if (info.current_count > 0 && info.current_count_change == info.current_count)
+                        {
+                            // Just matched the first publisher
+                            publisher.on_matched_function(publisher, true);
+                        }
+                        else if (info.current_count == 0 && info.current_count_change < 0)
+                        {
+                            // Just unmatched the last publisher
+                            publisher.on_matched_function(publisher, false);
+                        }
+                    }
+                    else
+                    {
+                        publisher.on_matched_function(publisher, info.current_count_change > 0,
+                                                      static_cast<const guid &>(info.last_subscription_handle));
+                    }
                 }
             }
 
@@ -312,7 +326,8 @@ namespace provizio::dds
     publisher_handle<data_pub_sub_type, on_matched_function_type>::publisher_handle(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
         const ReliabilityQosPolicyKind reliability_kind, const std::int32_t history_depth)
-        : publisher_handle(std::move(participant), topic_name, nullptr, std::unique_ptr<DataWriterListener>{},
+        : publisher_handle(std::move(participant), topic_name, nullptr,
+                           std::make_unique<detail::data_writer_listener<data_pub_sub_type, void *>>(*this),
                            reliability_kind, history_depth)
     {
     }
@@ -402,39 +417,38 @@ namespace provizio::dds
     }
 
     template <typename data_pub_sub_type, typename on_matched_function_type>
-    bool publisher_handle<data_pub_sub_type, on_matched_function_type>::wait_till_matched(
-        const std::chrono::milliseconds &timeout, const std::chrono::milliseconds &settle_time) const
+    int publisher_handle<data_pub_sub_type, on_matched_function_type>::get_num_matched_subscribers(
+        const std::chrono::milliseconds timeout, const std::chrono::milliseconds settle_time) const
     {
-        using clock = std::chrono::steady_clock;
-        const auto deadline = clock::now() + timeout;
-        constexpr std::chrono::milliseconds iteration_sleep{10};
-
-        eprosima::fastdds::dds::PublicationMatchedStatus status;
-        clock::time_point stable_since{};
-        bool has_stable_since = false;
-        while (clock::now() < deadline)
+        std::unique_lock<std::mutex> lock{num_matched_subscribers_mutex};
+        const auto timeout_point = std::chrono::steady_clock::now() + timeout;
+        const std::chrono::milliseconds min_attempt_time{50};
+        if (!num_matched_subscribers_cv.wait_for(lock, std::max(timeout - settle_time, min_attempt_time),
+                                                 [this] { return num_matched_subscribers > 0; }))
         {
-            data_writer->get_publication_matched_status(status);
-            if (status.current_count > 0)
-            {
-                if (!has_stable_since)
-                {
-                    stable_since = clock::now();
-                    has_stable_since = true;
-                }
-                else if (clock::now() - stable_since >= settle_time)
-                {
-                    return true;
-                }
-            }
-            else
-            {
-                has_stable_since = false;
-            }
-            std::this_thread::sleep_for(iteration_sleep);
+            // No matches
+            return 0;
         }
 
-        return false;
+        if (settle_time.count() > 0)
+        {
+            do
+            {
+                if (!num_matched_subscribers_cv.wait_for(
+                        lock, settle_time, [this, num_matched_subscribers_was = num_matched_subscribers] {
+                            return num_matched_subscribers_was != num_matched_subscribers;
+                        }))
+                {
+                    // No change during the settle_time period
+                    return num_matched_subscribers;
+                }
+            } while (std::chrono::steady_clock::now() < timeout_point);
+
+            // Wasn't ever stable for settle_time until the timeout
+            return -1;
+        }
+
+        return num_matched_subscribers;
     }
 } // namespace provizio::dds
 

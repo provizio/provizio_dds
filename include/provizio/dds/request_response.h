@@ -100,9 +100,10 @@ namespace provizio::dds
     /**
      * @brief Sends a request to a service.
      *
-     * Creates a client that waits for graph discovery to become stable and, optionally, sleeps for a short
-     * post-match delay before publishing the first request. This is useful when multiple services may match on the
-     * same topic and you want to allow time for all of them to appear.
+     * Creates a client that waits for graph discovery to become stable and, optionally, enforces both
+     * a post-match settling delay and a finite total matching timeout before publishing the first request.
+     * This is useful when multiple services may match on the same topic and you want to allow time for all of
+     * them to appear, while still being able to fail fast if nothing matches.
      *
      * @tparam request_pub_sub_type The type of the request message.
      * @tparam response_pub_sub_type The type of the response message.
@@ -110,35 +111,42 @@ namespace provizio::dds
      * @param request_topic_name The name of the request topic.
      * @param response_topic_name The name of the response topic.
      * @param request_data The request data.
-     * @param post_match_delay Optional extra delay after endpoints are matched and stable, before the first publish.
+     * @param post_match_delay Optional extra delay (settle window) after endpoints are matched and stable,
+     * before the first publish. Use 0 to skip the additional wait.
+     * @param service_match_timeout Optional deadline for endpoint matching. Use 0 to wait indefinitely.
      * @return future_response<request_pub_sub_type, response_pub_sub_type> A future object to get the response.
      */
     template <typename request_pub_sub_type, typename response_pub_sub_type>
     future_response<request_pub_sub_type, response_pub_sub_type> request(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, typename request_pub_sub_type::type &request_data,
-        std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{500});
+        std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{0},
+        std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0});
 
     /**
      * @brief Sends a request to a service.
      *
-     * Creates a client that waits for graph discovery to become stable and, optionally, sleeps for a short
-     * post-match delay before publishing the first request. This is useful when multiple services may match on the
-     * same topic and you want to allow time for all of them to appear.
+     * Creates a client that waits for graph discovery to become stable and, optionally, enforces both
+     * a post-match settling delay and a finite total matching timeout before publishing the first request.
+     * This is useful when multiple services may match on the same topic and you want to allow time for all of
+     * them to appear, while still being able to fail fast if nothing matches.
      *
      * @tparam request_pub_sub_type The type of the request message.
      * @tparam response_pub_sub_type The type of the response message.
      * @param participant The DomainParticipant.
      * @param service_name The name of the service.
      * @param request_data The request data.
-     * @param post_match_delay Optional extra delay after endpoints are matched and stable, before the first publish.
+     * @param post_match_delay Optional extra delay (settle window) after endpoints are matched and stable,
+     * before the first publish. Use 0 to skip the additional wait.
+     * @param service_match_timeout Optional deadline for endpoint matching. Use 0 to wait indefinitely.
      * @return future_response<request_pub_sub_type, response_pub_sub_type> A future object to get the response.
      */
     template <typename request_pub_sub_type, typename response_pub_sub_type>
     future_response<request_pub_sub_type, response_pub_sub_type> request(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
         typename request_pub_sub_type::type &request_data,
-        std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{500});
+        std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{0},
+        std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0});
 
     /**
      * @brief A request/response service.
@@ -453,7 +461,7 @@ namespace provizio::dds
     future_response<request_pub_sub_type, response_pub_sub_type> request(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, typename request_pub_sub_type::type &request_data,
-        const std::chrono::milliseconds post_match_delay)
+        const std::chrono::milliseconds post_match_delay, std::chrono::milliseconds service_match_timeout)
     {
         using response_type = typename response_pub_sub_type::type;
         auto response = std::make_shared<detail::response_data<response_type>>();
@@ -477,26 +485,22 @@ namespace provizio::dds
                     }
                 }
             },
-            post_match_delay);
+            post_match_delay, service_match_timeout);
 
-        if (client->request(request_data, context))
-        {
-            return {client, response};
-        }
-        else
-        {
-            return {nullptr, nullptr};
-        }
+        client->request(request_data, context);
+        return {client, response};
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
     future_response<request_pub_sub_type, response_pub_sub_type> request(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
-        typename request_pub_sub_type::type &request_data, const std::chrono::milliseconds post_match_delay)
+        typename request_pub_sub_type::type &request_data, const std::chrono::milliseconds post_match_delay,
+        const std::chrono::milliseconds service_match_timeout)
     {
         return request<request_pub_sub_type, response_pub_sub_type>(
             std::move(participant), detail::request_prefix + service_name + detail::request_suffix,
-            detail::response_prefix + service_name + detail::response_suffix, request_data, post_match_delay);
+            detail::response_prefix + service_name + detail::response_suffix, request_data, post_match_delay,
+            service_match_timeout);
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
@@ -518,8 +522,16 @@ namespace provizio::dds
         }
 
         std::unique_lock<std::mutex> lock{data->mutex()};
-        if (data->cv().wait_until(lock, timeout_time, [&]() { return data->is_set_mutex_prelocked(); }))
+        std::exception_ptr error{};
+        if (data->cv().wait_until(lock, timeout_time, [&]() {
+                return (error = data->get_error_mutex_prelocked()) != nullptr || data->is_set_mutex_prelocked();
+            }))
         {
+            if (error)
+            {
+                std::rethrow_exception(error);
+            }
+
             return std::future_status::ready;
         }
 
