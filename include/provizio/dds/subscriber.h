@@ -112,8 +112,7 @@ namespace provizio::dds
          * considered "ready".
          * @return non-negative number of matched publishers if stable within timeout, -1 otherwise.
          */
-        int get_num_matched_publishers(std::chrono::milliseconds timeout = std::chrono::milliseconds{3000},
-                                       std::chrono::milliseconds settle_time = std::chrono::milliseconds{50}) const;
+        int get_num_matched_publishers(std::chrono::milliseconds timeout, std::chrono::milliseconds settle_time) const;
 
       private:
         std::shared_ptr<domain_participant> participant;

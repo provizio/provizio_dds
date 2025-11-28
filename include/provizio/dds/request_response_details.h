@@ -341,13 +341,15 @@ namespace provizio::dds::detail
         using deferred_request = std::pair<typename request_pub_sub_type::type,
                                            std::shared_ptr<request_context<typename response_pub_sub_type::type>>>;
 
-        void do_request(typename request_pub_sub_type::type &request_data,
-                        request_context<typename response_pub_sub_type::type> &context);
+        void do_request_mutex_prelocked(typename request_pub_sub_type::type &request_data,
+                                        request_context<typename response_pub_sub_type::type> &context);
         void request_deferred_mutex_prelocked();
         bool stopped() const;
 
         /** @brief Default time window used to verify that match counts stay stable. */
         static constexpr std::chrono::milliseconds default_wait_for_stable_matches_period{250};
+        /** @brief Minimal waiting time for stable match checking. */
+        static constexpr std::chrono::milliseconds min_wait_for_stable_matches_period{50};
 
         mutable std::mutex mutex;
         bool stop{false};
@@ -604,6 +606,9 @@ namespace provizio::dds::detail
                     error = std::make_exception_ptr(timeout_exception{"Service matching timed out"});
                     break;
                 }
+
+                // To avoid too heavy CPU load
+                std::this_thread::sleep_for(min_wait_for_stable_matches_period);
             }
 
             std::unique_lock<std::mutex> lock{mutex};
@@ -651,7 +656,7 @@ namespace provizio::dds::detail
 
         if (matched)
         {
-            do_request(request_data, *context);
+            do_request_mutex_prelocked(request_data, *context);
         }
         else
         {
@@ -660,7 +665,7 @@ namespace provizio::dds::detail
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
-    void service_client_basic<request_pub_sub_type, response_pub_sub_type>::do_request(
+    void service_client_basic<request_pub_sub_type, response_pub_sub_type>::do_request_mutex_prelocked(
         typename request_pub_sub_type::type &request_data,
         request_context<typename response_pub_sub_type::type> &context)
     {
@@ -693,7 +698,7 @@ namespace provizio::dds::detail
     {
         for (auto &it : deferred_requests)
         {
-            do_request(it.first, *it.second);
+            do_request_mutex_prelocked(it.first, *it.second);
         }
         deferred_requests.clear();
     }

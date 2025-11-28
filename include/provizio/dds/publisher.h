@@ -98,9 +98,8 @@ namespace provizio::dds
          * considered "ready".
          * @return non-negative number of matched subscribers if stable within timeout, -1 otherwise.
          */
-        virtual int get_num_matched_subscribers(std::chrono::milliseconds timeout = std::chrono::milliseconds{3000},
-                                                std::chrono::milliseconds settle_time = std::chrono::milliseconds{
-                                                    250}) const = 0;
+        virtual int get_num_matched_subscribers(std::chrono::milliseconds timeout,
+                                                std::chrono::milliseconds settle_time) const = 0;
     };
 
     /**

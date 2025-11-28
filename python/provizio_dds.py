@@ -410,7 +410,7 @@ class Publisher(_TopicHandle):
             self._num_matched_cv.notify_all()
 
     def get_num_matched_subscribers(
-        self, timeout_sec: float = 3.0, settle_time_sec: float = 0.25
+        self, timeout_sec: float, settle_time_sec: float
     ) -> int:
         """Return the stable number of matched subscribers or -1 if unstable until timeout."""
 
@@ -554,7 +554,7 @@ class Subscriber(_TopicHandle):
             self._num_matched_cv.notify_all()
 
     def get_num_matched_publishers(
-        self, timeout_sec: float = 3.0, settle_time_sec: float = 0.05
+        self, timeout_sec: float, settle_time_sec: float
     ) -> int:
         """Return the stable number of matched publishers or -1 if unstable until timeout."""
 
@@ -678,6 +678,9 @@ async def request(
 
             if num_subscribers > 0 and num_subscribers == num_publishers:
                 return
+
+            # To avoid too heavy CPU load
+            await asyncio.sleep(_MIN_MATCH_WAIT_SEC)
 
     try:
         await _wait_for_matching()
