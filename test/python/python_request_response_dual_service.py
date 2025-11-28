@@ -72,7 +72,6 @@ async def main():
             provizio_dds.Int64,
             msg,
             service_name=service_name,
-            post_match_delay_sec=0.5,
         )
         expected = v * v
         if resp.data() != expected:
