@@ -282,6 +282,9 @@ namespace provizio::dds::detail
             using std::runtime_error::runtime_error;
         };
 
+        /** @brief Default time window used to verify that match counts stay stable. */
+        static constexpr std::chrono::milliseconds default_wait_for_stable_matches_period{1000};
+
       public:
         /**
          * @brief Basic service client that sends requests and receives responses.
@@ -298,14 +301,15 @@ namespace provizio::dds::detail
          * @param request_topic_name Request topic name.
          * @param response_topic_name Response topic name.
          * @param handle_response_function Callback invoked for every received response sample.
-         * @param post_match_delay Additional settling window that the match count must remain stable for before
-         * sending the first request (0 skips the extra wait).
+         * @param stable_matches_period Additional settling window that the match count must remain stable for before
+         * sending the first request (0 skips the extra wait). Useful when there are multiple sensors in the network, so
+         * we make sure to match all of them prior to sending the request.
          * @param service_match_timeout Maximum time to wait for publisher/subscriber matching (0 waits indefinitely).
          */
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
                              const std::string &response_topic_name,
                              handle_response_function_type handle_response_function,
-                             std::chrono::milliseconds post_match_delay,
+                             std::chrono::milliseconds stable_matches_period,
                              std::chrono::milliseconds service_match_timeout);
         template <typename handle_response_function_type>
         /**
@@ -313,13 +317,14 @@ namespace provizio::dds::detail
          * @param participant Domain participant to create entities with.
          * @param service_name Logical service name (used to derive request/response topics).
          * @param handle_response_function Callback invoked for every received response sample.
-         * @param post_match_delay Additional settling window that the match count must remain stable for before
-         * sending the first request (0 skips the extra wait).
+         * @param stable_matches_period Additional settling window that the match count must remain stable for before
+         * sending the first request (0 skips the extra wait). Useful when there are multiple sensors in the network, so
+         * we make sure to match all of them prior to sending the request.
          * @param service_match_timeout Maximum time to wait for publisher/subscriber matching (0 waits indefinitely).
          */
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
                              handle_response_function_type handle_response_function,
-                             std::chrono::milliseconds post_match_delay,
+                             std::chrono::milliseconds stable_matches_period,
                              std::chrono::milliseconds service_match_timeout);
 
         /**
@@ -346,8 +351,6 @@ namespace provizio::dds::detail
         void request_deferred_mutex_prelocked();
         bool stopped() const;
 
-        /** @brief Default time window used to verify that match counts stay stable. */
-        static constexpr std::chrono::milliseconds default_wait_for_stable_matches_period{250};
         /** @brief Minimal waiting time for stable match checking. */
         static constexpr std::chrono::milliseconds min_wait_for_stable_matches_period{50};
 
@@ -574,59 +577,61 @@ namespace provizio::dds::detail
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, handle_response_function_type handle_response_function,
-        const std::chrono::milliseconds post_match_delay, const std::chrono::milliseconds service_match_timeout)
+        const std::chrono::milliseconds stable_matches_period, const std::chrono::milliseconds service_match_timeout)
         : publisher(make_publisher<request_pub_sub_type>(participant, request_topic_name, RELIABLE_RELIABILITY_QOS)),
           subscriber(make_subscriber<response_pub_sub_type>(
               participant, response_topic_name, std::move(handle_response_function), RELIABLE_RELIABILITY_QOS))
     {
-        wait_till_matched_future = std::async(std::launch::async, [this, post_match_delay, service_match_timeout]() {
-            // Wait for the publisher and subscriber to have the same amount of matches across a period as a way to
-            // establish connection to one or more services on the topic
-            const auto timeout_point = std::chrono::steady_clock::now() + service_match_timeout;
-            const auto check_period =
-                post_match_delay.count() > 0 ? post_match_delay : default_wait_for_stable_matches_period;
-            while (!stopped())
-            {
-                auto matched_subscribers = std::async(std::launch::async, [&] {
-                    return publisher->get_num_matched_subscribers(service_match_timeout, check_period);
-                });
-                auto matched_publishers = std::async(std::launch::async, [&] {
-                    return subscriber->get_num_matched_publishers(service_match_timeout, check_period);
-                });
-                int num_matched_subscribers = matched_subscribers.get();
-                if (num_matched_subscribers > 0 && num_matched_subscribers == matched_publishers.get())
+        wait_till_matched_future =
+            std::async(std::launch::async, [this, stable_matches_period, service_match_timeout]() {
+                // Wait for the publisher and subscriber to have the same amount of matches across a period as a way to
+                // establish connection to one or more services on the topic
+                const auto timeout_point = std::chrono::steady_clock::now() + service_match_timeout;
+                const auto check_period =
+                    stable_matches_period.count() > 0 ? stable_matches_period : min_wait_for_stable_matches_period;
+                while (!stopped())
                 {
-                    // Same number of matched endpoints in both the publisher and the subscriber, we're good to proceed
-                    break;
+                    auto matched_subscribers = std::async(std::launch::async, [&] {
+                        return publisher->get_num_matched_subscribers(service_match_timeout, check_period);
+                    });
+                    auto matched_publishers = std::async(std::launch::async, [&] {
+                        return subscriber->get_num_matched_publishers(service_match_timeout, check_period);
+                    });
+                    int num_matched_subscribers = matched_subscribers.get();
+                    if (num_matched_subscribers > 0 && num_matched_subscribers == matched_publishers.get())
+                    {
+                        // Same number of matched endpoints in both the publisher and the subscriber, we're good to
+                        // proceed
+                        break;
+                    }
+
+                    if (service_match_timeout.count() != 0 && std::chrono::steady_clock::now() >= timeout_point)
+                    {
+                        std::unique_lock<std::mutex> lock{mutex};
+                        error = std::make_exception_ptr(timeout_exception{"Service matching timed out"});
+                        break;
+                    }
+
+                    // To avoid too heavy CPU load
+                    std::this_thread::sleep_for(min_wait_for_stable_matches_period);
                 }
 
-                if (service_match_timeout.count() != 0 && std::chrono::steady_clock::now() >= timeout_point)
-                {
-                    std::unique_lock<std::mutex> lock{mutex};
-                    error = std::make_exception_ptr(timeout_exception{"Service matching timed out"});
-                    break;
-                }
-
-                // To avoid too heavy CPU load
-                std::this_thread::sleep_for(min_wait_for_stable_matches_period);
-            }
-
-            std::unique_lock<std::mutex> lock{mutex};
-            matched = true; // It's OK even if there was an timeout|stop|error as error is already set then
-            request_deferred_mutex_prelocked();
-            return matched;
-        });
+                std::unique_lock<std::mutex> lock{mutex};
+                matched = true; // It's OK even if there was an timeout|stop|error as error is already set then
+                request_deferred_mutex_prelocked();
+                return matched;
+            });
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
     template <typename handle_response_function_type>
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
-        handle_response_function_type handle_response_function, const std::chrono::milliseconds post_match_delay,
+        handle_response_function_type handle_response_function, const std::chrono::milliseconds stable_matches_period,
         const std::chrono::milliseconds service_match_timeout)
         : service_client_basic(std::move(participant), request_prefix + service_name + request_suffix,
                                response_prefix + service_name + response_suffix, std::move(handle_response_function),
-                               post_match_delay, service_match_timeout)
+                               stable_matches_period, service_match_timeout)
     {
     }
 

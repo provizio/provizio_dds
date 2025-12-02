@@ -572,7 +572,7 @@ async def request(
     request_topic_name: str = None,
     response_topic_name: str = None,
     service_name: str = None,
-    post_match_delay_sec: float = 0.0,
+    stable_matches_period_sec: float = 0.0,
     service_match_timeout_sec: float = 0.0,
 ):
     """Send a request and await the response.
@@ -592,7 +592,7 @@ async def request(
         request_topic_name: Optional explicit request topic name.
         response_topic_name: Optional explicit response topic name.
         service_name: Optional base name to derive request/response topics.
-        post_match_delay_sec: Optional settling window (seconds) that match counts must remain stable before
+        stable_matches_period_sec: Optional settling window (seconds) that match counts must remain stable before
             sending the first request. Set to 0 to skip the extra wait.
         service_match_timeout_sec: Optional deadline (seconds) to complete endpoint matching. Set to 0 to wait indefinitely.
     Returns:
@@ -646,8 +646,8 @@ async def request(
 
     async def _wait_for_matching():
         check_period = (
-            post_match_delay_sec
-            if post_match_delay_sec and post_match_delay_sec > 0.0
+            stable_matches_period_sec
+            if stable_matches_period_sec and stable_matches_period_sec > 0.0
             else _DEFAULT_STABLE_MATCH_WINDOW_SEC
         )
         match_deadline = (
