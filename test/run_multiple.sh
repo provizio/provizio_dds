@@ -20,7 +20,6 @@ commands=("$@")
 
 pids=()
 for cmd in "${commands[@]}"; do
-    echo ${cmd}...
     eval "${cmd}" &
     pids+=($!)
 done

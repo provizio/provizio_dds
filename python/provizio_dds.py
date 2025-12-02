@@ -95,7 +95,7 @@ class QosDefaults:
 USE_DEFAULT_QOS_DURABILITY = -1
 NO_HISTORY = 0
 
-_DEFAULT_STABLE_MATCH_WINDOW_SEC = 0.25
+_DEFAULT_STABLE_MATCH_WINDOW_SEC = 1.0
 _MIN_MATCH_WAIT_SEC = 0.05
 
 
@@ -572,7 +572,7 @@ async def request(
     request_topic_name: str = None,
     response_topic_name: str = None,
     service_name: str = None,
-    stable_matches_period_sec: float = 0.0,
+    stable_matches_period_sec: float = _DEFAULT_STABLE_MATCH_WINDOW_SEC,
     service_match_timeout_sec: float = 0.0,
 ):
     """Send a request and await the response.
@@ -593,7 +593,7 @@ async def request(
         response_topic_name: Optional explicit response topic name.
         service_name: Optional base name to derive request/response topics.
         stable_matches_period_sec: Optional settling window (seconds) that match counts must remain stable before
-            sending the first request. Set to 0 to skip the extra wait.
+            sending the first request (defaults to 1.0s). Set to 0 to skip the extra wait.
         service_match_timeout_sec: Optional deadline (seconds) to complete endpoint matching. Set to 0 to wait indefinitely.
     Returns:
         The response data instance.
@@ -647,8 +647,8 @@ async def request(
     async def _wait_for_matching():
         check_period = (
             stable_matches_period_sec
-            if stable_matches_period_sec and stable_matches_period_sec > 0.0
-            else _DEFAULT_STABLE_MATCH_WINDOW_SEC
+            if stable_matches_period_sec is not None and stable_matches_period_sec > 0.0
+            else _MIN_MATCH_WAIT_SEC
         )
         match_deadline = (
             time.monotonic() + service_match_timeout_sec
