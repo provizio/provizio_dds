@@ -17,6 +17,9 @@ find_package(Threads REQUIRED)
 add_executable(request_response_client request_response_client.cpp)
 target_link_libraries(request_response_client PUBLIC provizio_dds Threads::Threads)
 
+add_executable(request_response_reliability_client request_response_reliability_client.cpp)
+target_link_libraries(request_response_reliability_client PUBLIC provizio_dds Threads::Threads)
+
 add_executable(request_response_concurrent_requests request_response_concurrent_requests.cpp)
 target_link_libraries(request_response_concurrent_requests PUBLIC provizio_dds Threads::Threads)
 
