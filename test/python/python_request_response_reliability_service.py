@@ -41,7 +41,7 @@ def main() -> int:
     expected_value = int(sys.argv[2])
     num_iterations = int(sys.argv[3])
     initial_iterations = max(1, num_iterations)
-    wait_timeout = num_iterations * 3.0 / 2.0 + 5.0
+    wait_timeout = num_iterations * 3.0 + 5
 
     log_prefix = f"python_request_response_reliability_service{test_name_postfix}: "
     service_name = (

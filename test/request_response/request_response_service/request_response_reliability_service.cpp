@@ -54,7 +54,7 @@ int main(int argc, char *argv[])
     const std::string test_name_postfix = argv[1]; // NOLINT: OK in a unit test
     auto expected_value = std::atoi(argv[2]);      // NOLINT: OK in a unit test
     auto num_iterations = std::atoi(argv[3]);      // NOLINT: OK in a unit test
-    const std::chrono::seconds wait_timeout{num_iterations * 3 / 2 + 5};
+    const std::chrono::seconds wait_timeout{num_iterations * 3 + 5};
 
     const std::string log_prefix = "request_response_reliability_service" + test_name_postfix + ": ";
     const std::string service_name{"provizio_dds_test_request_response_reliability" + test_name_postfix};

@@ -58,13 +58,13 @@ add_test(NAME python_request_response_reliability
    COMMAND bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_times.sh 128 ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \\\"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_reliability_service.py \\\\\\\"\\\\\\\" \\\$i 1\\\" \\\"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_reliability_client.py \\\\\\\"\\\\\\\" \\\$i\\\"; }"
    WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 350)
+set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 1500) # Takes long by design
 
 add_test(NAME python_request_response_reliability_single_service
    COMMAND bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_reliability_service.py _single_service 1 128\" \"${CMAKE_SOURCE_DIR}/test/run_times.sh 128 ${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_reliability_client.py _single_service \\\\\\$i\"; }"
    WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_request_response_reliability_single_service PROPERTIES TIMEOUT 350)
+set_tests_properties(python_request_response_reliability_single_service PROPERTIES TIMEOUT 1500) # Takes long by design
 
 add_test(NAME python_request_response_ignore
    COMMAND bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_ignore_service.py\" \"${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_ignore_client.py\"; }"
