@@ -121,19 +121,14 @@ def _get_stable_match_count(
         while True:
             previous = accessor()
 
-            if timeout_sec > 0.0:
-                remaining = timeout_point - time.monotonic()
-                if remaining <= 0.0:
-                    return -1
-                wait_timeout = min(settle_time_sec, remaining)
-            else:
-                wait_timeout = settle_time_sec
-
             def _count_changed(prev=previous):
                 return accessor() != prev
 
-            if not condition.wait_for(_count_changed, timeout=wait_timeout):
+            if not condition.wait_for(_count_changed, timeout=settle_time_sec):
                 return previous
+
+            if timeout_point - time.monotonic() <= 0.0:
+                return -1
 
 
 class ServiceMatchingTimeoutError(RuntimeError):

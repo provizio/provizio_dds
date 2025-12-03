@@ -107,7 +107,7 @@ namespace provizio::dds
 
         /**
          * @brief Blocks until this subscriber has at least one stable match for a short settle window.
-         * @param timeout Total timeout duration.
+         * @param timeout Total timeout duration, takes a single attempt when 0.
          * @param settle_time The minimum time the match must remain stable (no further status changes) to be
          * considered "ready".
          * @return non-negative number of matched publishers if stable within timeout, -1 otherwise.
