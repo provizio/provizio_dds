@@ -591,11 +591,16 @@ namespace provizio::dds::detail
                     stable_matches_period.count() > 0 ? stable_matches_period : min_wait_for_stable_matches_period;
                 while (!stopped())
                 {
+                    const auto remaining_timeout = service_match_timeout.count() == 0
+                                                       ? service_match_timeout
+                                                       : std::max(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                                      timeout_point - std::chrono::steady_clock::now()),
+                                                                  std::chrono::milliseconds{0});
                     auto matched_subscribers = std::async(std::launch::async, [&] {
-                        return publisher->get_num_matched_subscribers(service_match_timeout, check_period);
+                        return publisher->get_num_matched_subscribers(remaining_timeout, check_period);
                     });
                     auto matched_publishers = std::async(std::launch::async, [&] {
-                        return subscriber->get_num_matched_publishers(service_match_timeout, check_period);
+                        return subscriber->get_num_matched_publishers(remaining_timeout, check_period);
                     });
                     int num_matched_subscribers = matched_subscribers.get();
                     if (num_matched_subscribers > 0 && num_matched_subscribers == matched_publishers.get())
@@ -605,7 +610,7 @@ namespace provizio::dds::detail
                         break;
                     }
 
-                    if (service_match_timeout.count() != 0 && std::chrono::steady_clock::now() >= timeout_point)
+                    if (service_match_timeout.count() != 0 && remaining_timeout.count() <= 0)
                     {
                         std::unique_lock<std::mutex> lock{mutex};
                         error = std::make_exception_ptr(timeout_exception{"Service matching timed out"});
