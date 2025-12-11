@@ -44,16 +44,18 @@ def main() -> int:
     wait_timeout = num_iterations * 3.0 + 5
 
     log_prefix = f"python_request_response_reliability_service{test_name_postfix}: "
-    service_name = (
-        f"provizio_dds_test_request_response_reliability{test_name_postfix}"
-    )
+    service_name = f"provizio_dds_test_request_response_reliability{test_name_postfix}"
     domain_id = 14
 
+    max_wait_both_sides_ms = 1999
+    wait_in_server_over_ms = 1000  # In every iteration we either postpone the client or the server, never both
+    ms_in_s = 1000.0
+
     random.seed(expected_value)
-    wait_ms = random.randint(0, 1999)
-    if wait_ms >= 1000:
+    wait_ms = random.randint(0, max_wait_both_sides_ms)
+    if wait_ms >= wait_in_server_over_ms:
         print(f"{log_prefix}{_timestamp()}Waiting {wait_ms}ms...")
-        time.sleep(wait_ms / 1000.0)
+        time.sleep(wait_ms / ms_in_s)
 
     condition_variable = threading.Condition()
     requests_processed = False
@@ -97,6 +99,7 @@ def main() -> int:
         max_history_depth=initial_iterations,
     )
 
+    simulated_request_processing_time_sec=0.25
     try:
         with condition_variable:
             finished = condition_variable.wait_for(
@@ -109,7 +112,7 @@ def main() -> int:
         if not received_expected_values:
             return 1
 
-        time.sleep(0.25)
+        time.sleep(simulated_request_processing_time_sec)
         print(
             f"{log_prefix}{_timestamp()}Successfully processed value "
             f"{expected_value}"
@@ -121,4 +124,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

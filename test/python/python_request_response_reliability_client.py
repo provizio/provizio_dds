@@ -41,17 +41,19 @@ async def main() -> int:
     value = int(sys.argv[2])
 
     log_prefix = f"python_request_response_reliability_client{test_name_postfix}: "
-    service_name = (
-        f"provizio_dds_test_request_response_reliability{test_name_postfix}"
-    )
+    service_name = f"provizio_dds_test_request_response_reliability{test_name_postfix}"
     domain_id = 14
     timeout_sec = 5.0
 
+    max_wait_both_sides_ms = 1999
+    wait_in_client_under_ms = 1000  # In every iteration we either postpone the client or the server, never both
+    ms_in_s = 1000.0
+
     random.seed(value)
-    wait_ms = random.randint(0, 1999)
-    if wait_ms < 1000:
+    wait_ms = random.randint(0, max_wait_both_sides_ms)
+    if wait_ms < wait_in_client_under_ms:
         print(f"{log_prefix}{_timestamp()}Waiting {wait_ms}ms...")
-        await asyncio.sleep(wait_ms / 1000.0)
+        await asyncio.sleep(wait_ms / ms_in_s)
 
     domain_participant = provizio_dds.make_domain_participant(domain_id)
 
@@ -92,4 +94,3 @@ async def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
-

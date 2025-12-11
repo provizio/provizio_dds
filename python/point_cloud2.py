@@ -109,13 +109,15 @@ def read_points(
     """
     assert isinstance(cloud, PointCloud2), "Cloud is not a provizio_dds.PointCloud2"
 
+    dtype = dtype_from_fields(cloud.fields(), point_step=cloud.point_step())
+
     if cloud.data() is None or cloud.data().size() == 0:
-        return np.empty(0)
+        return np.empty(0, dtype=dtype)
 
     # Cast bytes to numpy array
     points = np.ndarray(
         shape=(cloud.width() * cloud.height(),),
-        dtype=dtype_from_fields(cloud.fields(), point_step=cloud.point_step()),
+        dtype=dtype,
         buffer=bytearray(
             ctypes.cast(int(cloud.data().get_buffer()), ctypes.POINTER(ctypes.c_uint8))[
                 : cloud.data().size()

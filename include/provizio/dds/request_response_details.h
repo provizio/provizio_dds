@@ -697,6 +697,8 @@ namespace provizio::dds::detail
 
         if (!success)
         {
+            // If an error has already occurred (e.g., timeout or interruption), propagate it. Otherwise, report the
+            // publish failure here.
             context.error(error != nullptr
                               ? error
                               : std::make_exception_ptr(failed_to_publish_exception{"Failed to publish the request"}));

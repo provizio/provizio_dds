@@ -106,7 +106,7 @@ def _get_stable_match_count(
     settle_time_sec: float,
 ) -> int:
     settle_time_sec = max(0.0, settle_time_sec)
-    timeout_sec = max(0.0 if timeout_sec is None else timeout_sec, 0.0)
+    timeout_sec = max(timeout_sec, 0.0) if timeout_sec is not None else 0.0
     start_time = time.monotonic()
     timeout_point = start_time + timeout_sec
     wait_for_match = max(timeout_sec - settle_time_sec, _MIN_MATCH_WAIT_SEC)
@@ -669,9 +669,12 @@ async def request(
                 None,
                 lambda: response_subscriber.get_num_matched_publishers(remaining, check_period),
             )
-            num_subscribers, num_publishers = await asyncio.gather(pub_task, sub_task)
+            num_matched_subscribers, num_matched_publishers = await asyncio.gather(pub_task, sub_task)
 
-            if num_subscribers > 0 and num_subscribers == num_publishers:
+            if (
+                num_matched_subscribers > 0
+                and num_matched_subscribers == num_matched_publishers
+            ):
                 return
 
             # To avoid too heavy CPU load
