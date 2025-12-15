@@ -95,6 +95,49 @@ class QosDefaults:
 USE_DEFAULT_QOS_DURABILITY = -1
 NO_HISTORY = 0
 
+_DEFAULT_STABLE_MATCH_WINDOW_SEC = 1.0
+_MIN_MATCH_WAIT_SEC = 0.05
+
+
+def _get_stable_match_count(
+    condition: threading.Condition,
+    accessor: Callable[[], int],
+    timeout_sec: float,
+    settle_time_sec: float,
+) -> int:
+    settle_time_sec = max(0.0, settle_time_sec)
+    timeout_sec = max(timeout_sec, 0.0) if timeout_sec is not None else 0.0
+    start_time = time.monotonic()
+    timeout_point = start_time + timeout_sec
+    wait_for_match = max(timeout_sec - settle_time_sec, _MIN_MATCH_WAIT_SEC)
+
+    with condition:
+        if not condition.wait_for(lambda: accessor() > 0, timeout=wait_for_match):
+            return 0
+
+        if settle_time_sec <= 0.0:
+            return accessor()
+
+        while True:
+            previous = accessor()
+
+            def _count_changed(prev=previous):
+                return accessor() != prev
+
+            if not condition.wait_for(_count_changed, timeout=settle_time_sec):
+                return previous
+
+            if timeout_point - time.monotonic() <= 0.0:
+                return -1
+
+
+class ServiceMatchingTimeoutError(RuntimeError):
+    """Raised when DDS endpoints do not match within the requested timeout."""
+
+
+class RequestPublishError(RuntimeError):
+    """Raised when the request DataWriter fails to publish."""
+
 
 def make_domain_participant(domain_id: int = 0):
     """Creates a new DDS Domain Participant that automatically cleans up internal objects on deletion
@@ -239,17 +282,23 @@ class Publisher(_TopicHandle):
             del self._on_has_subscriber_changed_function
 
         def on_publication_matched(self, _, info):
+            publisher = self._publisher()
+            if publisher is None:
+                return
+
+            publisher._update_num_matched_subscribers(info.current_count)
+
             if self._on_has_subscriber_changed_function:
                 if self._on_has_subscriber_changed_takes_guid:
                     if info.current_count_change > 0:
                         self._on_has_subscriber_changed_function(
-                            self._publisher(),
+                            publisher,
                             True,
                             info.last_subscription_handle.get_guid(),
                         )
                     elif info.current_count_change < 0:
                         self._on_has_subscriber_changed_function(
-                            self._publisher(),
+                            publisher,
                             False,
                             info.last_subscription_handle.get_guid(),
                         )
@@ -260,12 +309,12 @@ class Publisher(_TopicHandle):
                     ):
                         # Just matched the first publisher
                         self._on_has_subscriber_changed_function(
-                            self._publisher(), True
+                            publisher, True
                         )
                     elif info.current_count == 0 and info.current_count_change < 0:
                         # Just unmatched the last publisher
                         self._on_has_subscriber_changed_function(
-                            self._publisher(), False
+                            publisher, False
                         )
 
     def __init__(
@@ -289,6 +338,8 @@ class Publisher(_TopicHandle):
         """
 
         super().__init__(domain_participant, topic_name, pub_sub_type)
+        self._num_matched_cv = threading.Condition()
+        self._num_matched_subscribers = 0
 
         qos_defaults = QosDefaults(pub_sub_type)
 
@@ -348,36 +399,32 @@ class Publisher(_TopicHandle):
             return self._writer.write(data, params)
         return self._writer.write(data)
 
-    def wait_till_matched(self, timeout_sec: float = 3.0, settle_time_sec: float = 0.05) -> bool:
-        """Poll PublicationMatchedStatus until matched and stable for settle_time_sec."""
-        pm_status = PublicationMatchedStatus()
-        deadline = time.monotonic() + timeout_sec
-        stable_since = None
-        sleep_s = 0.01
-        while time.monotonic() < deadline:
-            self._writer.get_publication_matched_status(pm_status)
-            if pm_status.current_count > 0:
-                if stable_since is None:
-                    stable_since = time.monotonic()
-                elif time.monotonic() - stable_since >= settle_time_sec:
-                    return True
-            else:
-                stable_since = None
-            time.sleep(sleep_s)
-        return False
+    def _update_num_matched_subscribers(self, count: int):
+        with self._num_matched_cv:
+            self._num_matched_subscribers = count
+            self._num_matched_cv.notify_all()
 
+    def get_num_matched_subscribers(
+        self, timeout_sec: float, settle_time_sec: float
+    ) -> int:
+        """Return the stable number of matched subscribers or -1 if unstable until timeout."""
+
+        return _get_stable_match_count(
+            self._num_matched_cv, lambda: self._num_matched_subscribers, timeout_sec, settle_time_sec
+        )
 
 class Subscriber(_TopicHandle):
     """Provides subscription functionality for a DDS data type and topic name specified when constructing"""
 
     class _ReaderListener(DataReaderListener):
         def __init__(
-            self, data_type, on_data_function, on_has_publisher_changed_function
+            self, data_type, on_data_function, on_has_publisher_changed_function, subscriber
         ):
             super().__init__()
             self._data_type = data_type
             self._on_data_function = on_data_function
             self._on_has_publisher_changed_function = on_has_publisher_changed_function
+            self._subscriber = weakref.ref(subscriber)
             try:
                 sig = inspect.signature(self._on_data_function)
                 self._on_data_takes_info = len(sig.parameters) == 2
@@ -403,6 +450,12 @@ class Subscriber(_TopicHandle):
                     self._on_data_function(data)
 
         def on_subscription_matched(self, _, info):
+            subscriber = self._subscriber()
+            if subscriber is None:
+                return
+
+            subscriber._update_num_matched_publishers(info.current_count)
+
             if self._on_has_publisher_changed_function:
                 if (
                     info.current_count > 0
@@ -436,6 +489,8 @@ class Subscriber(_TopicHandle):
         :param reliability_kind: Optional, a DDS data reader reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
         """
         super().__init__(domain_participant, topic_name, pub_sub_type)
+        self._num_matched_cv = threading.Condition()
+        self._num_matched_publishers = 0
 
         qos_defaults = QosDefaults(pub_sub_type)
 
@@ -453,7 +508,7 @@ class Subscriber(_TopicHandle):
 
         # Create DataReader
         self._listener = Subscriber._ReaderListener(
-            data_type, on_data_function, on_has_publisher_changed_function
+            data_type, on_data_function, on_has_publisher_changed_function, self
         )
         self._reader_qos = DataReaderQos()
         self._subscriber.get_default_datareader_qos(self._reader_qos)
@@ -488,23 +543,19 @@ class Subscriber(_TopicHandle):
     def get_guid(self):
         return self._reader.guid()
 
-    def wait_till_matched(self, timeout_sec: float = 3.0, settle_time_sec: float = 0.05) -> bool:
-        """Poll SubscriptionMatchedStatus until matched and stable for settle_time_sec."""
-        sm_status = SubscriptionMatchedStatus()
-        deadline = time.monotonic() + timeout_sec
-        stable_since = None
-        sleep_s = 0.01
-        while time.monotonic() < deadline:
-            self._reader.get_subscription_matched_status(sm_status)
-            if sm_status.current_count > 0:
-                if stable_since is None:
-                    stable_since = time.monotonic()
-                elif time.monotonic() - stable_since >= settle_time_sec:
-                    return True
-            else:
-                stable_since = None
-            time.sleep(sleep_s)
-        return False
+    def _update_num_matched_publishers(self, count: int):
+        with self._num_matched_cv:
+            self._num_matched_publishers = count
+            self._num_matched_cv.notify_all()
+
+    def get_num_matched_publishers(
+        self, timeout_sec: float, settle_time_sec: float
+    ) -> int:
+        """Return the stable number of matched publishers or -1 if unstable until timeout."""
+
+        return _get_stable_match_count(
+            self._num_matched_cv, lambda: self._num_matched_publishers, timeout_sec, settle_time_sec
+        )
 
 
 async def request(
@@ -516,7 +567,8 @@ async def request(
     request_topic_name: str = None,
     response_topic_name: str = None,
     service_name: str = None,
-    post_match_delay_sec: float = 0.5,
+    stable_matches_period_sec: float = _DEFAULT_STABLE_MATCH_WINDOW_SEC,
+    service_match_timeout_sec: float = 0.0,
 ):
     """Send a request and await the response.
 
@@ -535,9 +587,15 @@ async def request(
         request_topic_name: Optional explicit request topic name.
         response_topic_name: Optional explicit response topic name.
         service_name: Optional base name to derive request/response topics.
-        post_match_delay_sec: Optional delay in seconds to allow additional endpoints to match (e.g., multiple services).
+        stable_matches_period_sec: Optional settling window (seconds) that match counts must remain stable before
+            sending the first request (defaults to 1.0s). Set to 0 to skip the extra wait.
+        service_match_timeout_sec: Optional deadline (seconds) to complete endpoint matching. Set to 0 to wait indefinitely.
     Returns:
-        The response data instance, or None if publishing the request failed.
+        The response data instance.
+
+    Raises:
+        ServiceMatchingTimeoutError: If endpoints fail to match within the timeout.
+        RequestPublishError: If publishing the request fails.
     """
     if request_topic_name is None:
         assert (
@@ -581,34 +639,67 @@ async def request(
         reliability_kind=RELIABLE_RELIABILITY_QOS,
     )
 
-    # Wait for both endpoints to be matched before publishing the request
-    pub_ready = False
-    sub_ready = False
-    while not (pub_ready and sub_ready):
-        if not pub_ready:
-            pub_ready = await loop.run_in_executor(None, lambda: request_publisher.wait_till_matched())
-        if not sub_ready:
-            sub_ready = await loop.run_in_executor(None, lambda: response_subscriber.wait_till_matched())
+    async def _wait_for_matching():
+        check_period = (
+            stable_matches_period_sec
+            if stable_matches_period_sec is not None and stable_matches_period_sec > 0.0
+            else _MIN_MATCH_WAIT_SEC
+        )
+        match_deadline = (
+            time.monotonic() + service_match_timeout_sec
+            if service_match_timeout_sec and service_match_timeout_sec > 0.0
+            else None
+        )
 
-    # Optional delay to allow additional endpoints to match (e.g., multiple services)
-    if post_match_delay_sec and post_match_delay_sec > 0.0:
-        await asyncio.sleep(post_match_delay_sec)
+        while True:
+            if match_deadline is not None:
+                remaining = match_deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise ServiceMatchingTimeoutError(
+                        f"Request endpoints were not matched within {service_match_timeout_sec} seconds"
+                    )
+            else:
+                remaining = 0.0
 
-    params = WriteParams()
-    params.related_sample_identity().writer_guid(response_subscriber.get_guid())
+            pub_task = loop.run_in_executor(
+                None,
+                lambda: request_publisher.get_num_matched_subscribers(remaining, check_period),
+            )
+            sub_task = loop.run_in_executor(
+                None,
+                lambda: response_subscriber.get_num_matched_publishers(remaining, check_period),
+            )
+            num_matched_subscribers, num_matched_publishers = await asyncio.gather(pub_task, sub_task)
 
-    with lock:
-        if not request_publisher.publish(request_data, params):
-            return None
-        request_identity.writer_guid(response_subscriber.get_guid())
-        request_identity.sequence_number(params.sample_identity().sequence_number())
+            if (
+                num_matched_subscribers > 0
+                and num_matched_subscribers == num_matched_publishers
+            ):
+                return
 
-    result = await future
+            # To avoid too heavy CPU load
+            await asyncio.sleep(_MIN_MATCH_WAIT_SEC)
 
-    del request_publisher
-    del response_subscriber
+    try:
+        await _wait_for_matching()
 
-    return result
+        params = WriteParams()
+        params.related_sample_identity().writer_guid(response_subscriber.get_guid())
+
+        with lock:
+            if not request_publisher.publish(request_data, params):
+                raise RequestPublishError("Failed to publish the DDS request")
+            request_identity.writer_guid(response_subscriber.get_guid())
+            request_identity.sequence_number(params.sample_identity().sequence_number())
+
+        return await future
+    except Exception:
+        if not future.done():
+            future.cancel()
+        raise
+    finally:
+        del request_publisher
+        del response_subscriber
 
 
 class Service:

@@ -322,7 +322,7 @@ service.stop()
 - Both synchronous and asynchronous service handlers are supported. Asynchronous handlers return `std::future` (C++) or are `async def` coroutines (Python).
 - Reliability is set to RELIABLE for response readers/writers by default. The client’s request Publisher uses default (volatile) durability, while the service’s response Publisher uses TRANSIENT_LOCAL durability with a small history (depth 10) for robust delivery (compatible with ROS 2).
 - Before publishing the first request, a short graph-based “readiness” wait is performed to ensure endpoints are matched and stable, avoiding races immediately after discovery.
-- Optionally, an extra post-match delay can be specified on the client request API to allow more endpoints (e.g., multiple services) to match before the first publish. See C++ `provizio::dds::request(..., std::chrono::milliseconds post_match_delay)` and Python `provizio_dds.request(..., post_match_delay_sec=0.5)`.
+- Optionally, the client request API lets you enforce a post-match settling window and (if desired) a finite matching timeout before the first request publish. See C++ `provizio::dds::request(..., std::chrono::milliseconds stable_matches_period = 1000ms, std::chrono::milliseconds service_match_timeout = 0ms)`, and Python `provizio_dds.request(..., stable_matches_period_sec=1.0, service_match_timeout_sec=0.0)` for the settling window control (use 0 to skip the extra wait).
 - To drop a request silently from a service handler, throw `provizio::dds::ignore_request` (C++) or raise `provizio_dds.Service.IgnoreRequest` (Python). Such requests are discarded without warnings.
 
 ### ROS 2 compatibility

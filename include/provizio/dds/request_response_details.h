@@ -200,10 +200,14 @@ namespace provizio::dds::detail
     {
       public:
         /** @return True if a value has been set. The mutex() has to be locked by the caller!*/
-        const bool is_set_mutex_prelocked() const;
+        bool is_set_mutex_prelocked() const;
+        /** @return Stored exception (if any). The mutex() has to be locked by the caller! */
+        std::exception_ptr get_error_mutex_prelocked() const;
         /** @brief Sets the response, notifying any waiters. The mutex() has to be locked by the caller! Throws if
          * already set. */
         void set_mutex_prelocked(const response_type &response);
+        /** @brief Stores an exception and notifies waiters. Safe to call without holding mutex(). */
+        void set_error(std::exception_ptr error);
         /** @brief Gets the response. Throws std::future_error if unset. */
         const response_type &get() const;
         /** @brief Access to internal mutex for waiting. */
@@ -215,12 +219,27 @@ namespace provizio::dds::detail
         mutable std::mutex response_mutex;
         mutable std::condition_variable value_cv;
         response_type value;
+        std::exception_ptr error;
         bool has_value{false};
     };
 
     template <typename response_type> struct request_context
     {
         using sample_identity = eprosima::fastrtps::rtps::SampleIdentity;
+
+        /**
+         * @brief Propagates an exception to the shared response, if it is still alive.
+         * @param the_error Exception pointer to store.
+         */
+        void error(std::exception_ptr the_error)
+        {
+            auto response_shared = response.lock();
+            if (response_shared)
+            {
+                response_shared->set_error(the_error);
+            }
+        }
+
         std::mutex mutex;
         sample_identity identity;
         std::weak_ptr<response_data<response_type>> response;
@@ -237,21 +256,76 @@ namespace provizio::dds::detail
     {
       public:
         /**
+         * @brief Exception thrown when matching publishers/subscribers times out.
+         */
+        class timeout_exception : public std::runtime_error
+        {
+          public:
+            using std::runtime_error::runtime_error;
+        };
+
+        /**
+         * @brief Exception thrown when a request is interrupted (e.g., client destruction).
+         */
+        class interrupted_exception : public std::runtime_error
+        {
+          public:
+            using std::runtime_error::runtime_error;
+        };
+
+        /**
+         * @brief Exception thrown when the request DataWriter fails to publish.
+         */
+        class failed_to_publish_exception : public std::runtime_error
+        {
+          public:
+            using std::runtime_error::runtime_error;
+        };
+
+        /** @brief Default time window used to verify that match counts stay stable. */
+        static constexpr std::chrono::milliseconds default_wait_for_stable_matches_period{1000};
+
+      public:
+        /**
          * @brief Basic service client that sends requests and receives responses.
          *
          * Creates a volatile (default) request DataWriter and a reliable response DataReader, and internally
-         * waits for graph discovery to become stable (using wait_till_matched on both endpoints) before sending the
-         * first request. Requests issued before readiness are queued and flushed automatically once matched.
+         * waits for graph discovery to become stable (using get_num_matched_subscribers/publishers on both
+         * endpoints) before sending the first request. Requests issued before readiness are queued and flushed
+         * automatically once matched.
          */
         template <typename handle_response_function_type>
+        /**
+         * @brief Builds a client from explicit request/response topic names.
+         * @param participant Domain participant to create entities with.
+         * @param request_topic_name Request topic name.
+         * @param response_topic_name Response topic name.
+         * @param handle_response_function Callback invoked for every received response sample.
+         * @param stable_matches_period Additional settling window that the match count must remain stable for before
+         * sending the first request (0 skips the extra wait). Useful when there are multiple sensors in the network, so
+         * we make sure to match all of them prior to sending the request.
+         * @param service_match_timeout Maximum time to wait for publisher/subscriber matching (0 waits indefinitely).
+         */
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
                              const std::string &response_topic_name,
                              handle_response_function_type handle_response_function,
-                             std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{500});
+                             std::chrono::milliseconds stable_matches_period,
+                             std::chrono::milliseconds service_match_timeout);
         template <typename handle_response_function_type>
+        /**
+         * @brief Builds a client using a logical service name (topics are inferred).
+         * @param participant Domain participant to create entities with.
+         * @param service_name Logical service name (used to derive request/response topics).
+         * @param handle_response_function Callback invoked for every received response sample.
+         * @param stable_matches_period Additional settling window that the match count must remain stable for before
+         * sending the first request (0 skips the extra wait). Useful when there are multiple sensors in the network, so
+         * we make sure to match all of them prior to sending the request.
+         * @param service_match_timeout Maximum time to wait for publisher/subscriber matching (0 waits indefinitely).
+         */
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
                              handle_response_function_type handle_response_function,
-                             std::chrono::milliseconds post_match_delay = std::chrono::milliseconds{500});
+                             std::chrono::milliseconds stable_matches_period,
+                             std::chrono::milliseconds service_match_timeout);
 
         /**
          * @brief Destructor stops the background readiness wait and joins its future to ensure clean shutdown.
@@ -259,25 +333,31 @@ namespace provizio::dds::detail
         ~service_client_basic();
 
         /**
-         * @brief Sends a request. If endpoints are not matched yet, defers the request, which then will be sent
-         * when the endpoints are matched.
-         * @return True if the request has been sent or deferred successfully.
+         * @brief Sends a request or queues it until matching completes.
+         *
+         * If endpoints are not matched yet, the request is deferred and gets flushed automatically once the
+         * client becomes ready. Failures (matching timeout, publish failure, interruption) are propagated via
+         * the @p context by setting an exception on its associated response_data.
          */
-        bool request(typename request_pub_sub_type::type &request_data,
+        void request(typename request_pub_sub_type::type &request_data,
                      const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context);
 
       private:
         using deferred_request = std::pair<typename request_pub_sub_type::type,
                                            std::shared_ptr<request_context<typename response_pub_sub_type::type>>>;
 
-        bool do_request(typename request_pub_sub_type::type &request_data,
-                        request_context<typename response_pub_sub_type::type> &context);
+        void do_request_mutex_prelocked(typename request_pub_sub_type::type &request_data,
+                                        request_context<typename response_pub_sub_type::type> &context);
         void request_deferred_mutex_prelocked();
         bool stopped() const;
+
+        /** @brief Minimal waiting time for stable match checking. */
+        static constexpr std::chrono::milliseconds min_wait_for_stable_matches_period{50};
 
         mutable std::mutex mutex;
         bool stop{false};
         bool matched{false};
+        std::exception_ptr error;
         std::vector<deferred_request> deferred_requests;
         std::future<bool> wait_till_matched_future;
         std::shared_ptr<data_publisher<request_pub_sub_type>> publisher;
@@ -436,9 +516,14 @@ namespace provizio::dds::detail
         }
     }
 
-    template <typename response_type> const bool response_data<response_type>::is_set_mutex_prelocked() const
+    template <typename response_type> bool response_data<response_type>::is_set_mutex_prelocked() const
     {
         return has_value;
+    }
+
+    template <typename response_type> std::exception_ptr response_data<response_type>::get_error_mutex_prelocked() const
+    {
+        return error;
     }
 
     template <typename response_type>
@@ -453,9 +538,23 @@ namespace provizio::dds::detail
         value_cv.notify_all();
     }
 
+    template <typename response_type> void response_data<response_type>::set_error(std::exception_ptr error)
+    {
+        {
+            std::lock_guard<std::mutex> lock{response_mutex};
+            this->error = error;
+        }
+        value_cv.notify_all();
+    }
+
     template <typename response_type> const response_type &response_data<response_type>::get() const
     {
         const std::lock_guard<std::mutex> lock{response_mutex};
+        if (error)
+        {
+            std::rethrow_exception(error);
+        }
+
         if (!has_value)
         {
             throw std::future_error{std::future_errc::no_state};
@@ -478,50 +577,66 @@ namespace provizio::dds::detail
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, handle_response_function_type handle_response_function,
-        const std::chrono::milliseconds post_match_delay)
+        const std::chrono::milliseconds stable_matches_period, const std::chrono::milliseconds service_match_timeout)
         : publisher(make_publisher<request_pub_sub_type>(participant, request_topic_name, RELIABLE_RELIABILITY_QOS)),
           subscriber(make_subscriber<response_pub_sub_type>(
               participant, response_topic_name, std::move(handle_response_function), RELIABLE_RELIABILITY_QOS))
     {
-        wait_till_matched_future = std::async(std::launch::async, [this, post_match_delay]() {
-            const std::chrono::milliseconds iteration_timeout{100};
-            while (!stopped() && !publisher->wait_till_matched(iteration_timeout))
-            {
-            }
-            while (!stopped() && !subscriber->wait_till_matched(iteration_timeout))
-            {
-            }
-
-            std::unique_lock<std::mutex> lock{mutex};
-            if (!stop)
-            {
-                if (post_match_delay > std::chrono::milliseconds{0})
+        wait_till_matched_future =
+            std::async(std::launch::async, [this, stable_matches_period, service_match_timeout]() {
+                // Wait for the publisher and subscriber to have the same amount of matches across a period as a way to
+                // establish connection to one or more services on the topic
+                const auto timeout_point = std::chrono::steady_clock::now() + service_match_timeout;
+                const auto check_period =
+                    stable_matches_period.count() > 0 ? stable_matches_period : min_wait_for_stable_matches_period;
+                while (!stopped())
                 {
-                    lock.unlock();
-                    std::this_thread::sleep_for(post_match_delay);
-                    lock.lock();
-                    if (stop)
+                    const auto remaining_timeout = service_match_timeout.count() == 0
+                                                       ? service_match_timeout
+                                                       : std::max(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                                      timeout_point - std::chrono::steady_clock::now()),
+                                                                  std::chrono::milliseconds{0});
+                    auto matched_subscribers = std::async(std::launch::async, [&] {
+                        return publisher->get_num_matched_subscribers(remaining_timeout, check_period);
+                    });
+                    auto matched_publishers = std::async(std::launch::async, [&] {
+                        return subscriber->get_num_matched_publishers(remaining_timeout, check_period);
+                    });
+                    int num_matched_subscribers = matched_subscribers.get();
+                    if (num_matched_subscribers > 0 && num_matched_subscribers == matched_publishers.get())
                     {
-                        return false;
+                        // Same number of matched endpoints in both the publisher and the subscriber, we're good to
+                        // proceed
+                        break;
                     }
-                }
-                matched = true;
-                request_deferred_mutex_prelocked();
-                return true;
-            }
 
-            return false;
-        });
+                    if (service_match_timeout.count() != 0 && remaining_timeout.count() <= 0)
+                    {
+                        std::unique_lock<std::mutex> lock{mutex};
+                        error = std::make_exception_ptr(timeout_exception{"Service matching timed out"});
+                        break;
+                    }
+
+                    // To avoid too heavy CPU load
+                    std::this_thread::sleep_for(min_wait_for_stable_matches_period);
+                }
+
+                std::unique_lock<std::mutex> lock{mutex};
+                matched = true; // It's OK even if there was an timeout|stop|error as error is already set then
+                request_deferred_mutex_prelocked();
+                return matched;
+            });
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
     template <typename handle_response_function_type>
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
-        handle_response_function_type handle_response_function, std::chrono::milliseconds post_match_delay)
+        handle_response_function_type handle_response_function, const std::chrono::milliseconds stable_matches_period,
+        const std::chrono::milliseconds service_match_timeout)
         : service_client_basic(std::move(participant), request_prefix + service_name + request_suffix,
                                response_prefix + service_name + response_suffix, std::move(handle_response_function),
-                               post_match_delay)
+                               stable_matches_period, service_match_timeout)
     {
     }
 
@@ -530,50 +645,64 @@ namespace provizio::dds::detail
     {
         {
             const std::lock_guard<std::mutex> lock{mutex};
+            error = std::make_exception_ptr(interrupted_exception{"Request interrupted"});
             stop = true;
         }
         wait_till_matched_future.wait();
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
-    bool service_client_basic<request_pub_sub_type, response_pub_sub_type>::request(
+    void service_client_basic<request_pub_sub_type, response_pub_sub_type>::request(
         typename request_pub_sub_type::type &request_data,
         const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context)
     {
         const std::lock_guard<std::mutex> lock{mutex};
-        if (stop)
+
+        if (error)
         {
-            // Already stopped
-            return false;
+            context->error(error);
+            return;
         }
 
         if (matched)
         {
-            return do_request(request_data, *context);
+            do_request_mutex_prelocked(request_data, *context);
         }
         else
         {
             deferred_requests.emplace_back(request_data, context);
-            return true;
         }
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
-    bool service_client_basic<request_pub_sub_type, response_pub_sub_type>::do_request(
+    void service_client_basic<request_pub_sub_type, response_pub_sub_type>::do_request_mutex_prelocked(
         typename request_pub_sub_type::type &request_data,
         request_context<typename response_pub_sub_type::type> &context)
     {
-        const auto subscriber_guid = subscriber->get_guid();
-        WriteParams params;
-        params.related_sample_identity().writer_guid() = subscriber_guid;
-        const std::lock_guard<std::mutex> lock{context.mutex};
-        const bool success = publisher->publish(request_data, params);
-        if (success)
+        bool success = false;
+
+        if (!error)
         {
-            context.identity.writer_guid() = subscriber_guid;
-            context.identity.sequence_number() = params.sample_identity().sequence_number();
+            const auto subscriber_guid = subscriber->get_guid();
+            WriteParams params;
+            params.related_sample_identity().writer_guid() = subscriber_guid;
+            const std::lock_guard<std::mutex> lock{context.mutex};
+            if (publisher->publish(request_data, params))
+            {
+                context.identity.writer_guid() = subscriber_guid;
+                context.identity.sequence_number() = params.sample_identity().sequence_number();
+                success = true;
+            }
         }
-        return success;
+
+        if (!success)
+        {
+            // If an error has already occurred (e.g., timeout or interruption), propagate it. Otherwise, report the
+            // publish failure here.
+            context.error(error != nullptr
+                              ? error
+                              : std::make_exception_ptr(failed_to_publish_exception{"Failed to publish the request"}));
+        }
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
@@ -581,7 +710,7 @@ namespace provizio::dds::detail
     {
         for (auto &it : deferred_requests)
         {
-            do_request(it.first, *it.second);
+            do_request_mutex_prelocked(it.first, *it.second);
         }
         deferred_requests.clear();
     }

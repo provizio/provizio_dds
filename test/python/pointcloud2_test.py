@@ -151,4 +151,13 @@ assert (
 ), "Got:" + str(read_points[0])
 
 
+# read_points_list with an empty point cloud
+read_points = provizio_dds.point_cloud2.read_points_list(
+    provizio_dds.point_cloud2.make_radar_entities(
+        provizio_dds.point_cloud2.make_header(10, 20, "test_entities"), []
+    )
+)
+assert (len(read_points) == 0)
+
+
 print("Success")

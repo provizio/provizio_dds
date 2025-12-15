@@ -42,10 +42,20 @@ execute_process(
     ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
 
 if(VERSION STREQUAL "")
-    # Tag not found, use the 0.0.yearmonthday instead for unreleased versions
-    string(TIMESTAMP CURRENT_DATE "%y%m%d")
-    string(TIMESTAMP CURRENT_TIME "%H%M%S")
-    set(PROVIZIO_DDS_VERSION "0.${CURRENT_DATE}.${CURRENT_TIME}")
+    # Tag not found, derive a deterministic version (0.yyyymmdd.hhmmss) from the HEAD commit timestamp
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" show -s --format=%cd --date=format:%Y%m%d
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE COMMIT_DATE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" show -s --format=%cd --date=format:%H%M%S
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE COMMIT_TIME
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    set(PROVIZIO_DDS_VERSION "0.${COMMIT_DATE}.${COMMIT_TIME}")
 else(VERSION STREQUAL "")
     string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" VERSION "${VERSION}")
     set(PROVIZIO_DDS_VERSION "${VERSION}")

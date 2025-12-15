@@ -15,6 +15,7 @@
 #ifndef DDS_SUBSCRIBER
 #define DDS_SUBSCRIBER
 
+#include <condition_variable>
 #include <memory>
 #include <string>
 #include <thread>
@@ -35,6 +36,32 @@ namespace provizio::dds
      * @file subscriber.h
      * @brief RAII subscriber wrappers and helpers for receiving DDS data.
      */
+
+    template <typename data_pub_sub_type> class subscriber_handle;
+    /**
+     * @brief Internal DataReaderListener that tracks publisher match counts for readiness helpers.
+     */
+    class data_reader_listener : public DataReaderListener
+    {
+      public:
+        void on_subscription_matched(DataReader *reader, const SubscriptionMatchedStatus &info) override
+        {
+            (void)reader;
+
+            {
+                std::lock_guard<std::mutex> lock{num_matched_publishers_mutex};
+                num_matched_publishers = info.current_count;
+            }
+            num_matched_publishers_cv.notify_all();
+        }
+
+      private:
+        mutable std::mutex num_matched_publishers_mutex;
+        mutable std::condition_variable num_matched_publishers_cv;
+        int num_matched_publishers{0};
+
+        template <typename data_pub_sub_type> friend class subscriber_handle;
+    };
 
     /**
      * @brief Encapsulates DDS Subscriber and DataReader functionality in a single entity with automatic life cycle
@@ -68,7 +95,7 @@ namespace provizio::dds
          */
         subscriber_handle(
             std::shared_ptr<domain_participant> participant, const std::string &topic_name,
-            std::shared_ptr<DataReaderListener> data_listener,
+            std::shared_ptr<data_reader_listener> data_listener,
             ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datareader_reliability_kind,
             std::int32_t max_history_depth = use_default_qos_durability);
         ~subscriber_handle();
@@ -80,18 +107,17 @@ namespace provizio::dds
 
         /**
          * @brief Blocks until this subscriber has at least one stable match for a short settle window.
-         * @param timeout Total timeout duration.
+         * @param timeout Total timeout duration, takes a single attempt when 0.
          * @param settle_time The minimum time the match must remain stable (no further status changes) to be
          * considered "ready".
-         * @return true if matched and stable within timeout, false otherwise.
+         * @return non-negative number of matched publishers if stable within timeout, -1 otherwise.
          */
-        bool wait_till_matched(const std::chrono::milliseconds &timeout = std::chrono::milliseconds{3000},
-                               const std::chrono::milliseconds &settle_time = std::chrono::milliseconds{50}) const;
+        int get_num_matched_publishers(std::chrono::milliseconds timeout, std::chrono::milliseconds settle_time) const;
 
       private:
         std::shared_ptr<domain_participant> participant;
         dds::TypeSupport type_support;
-        std::shared_ptr<DataReaderListener> data_listener;
+        std::shared_ptr<data_reader_listener> data_listener;
         std::shared_ptr<topic> the_topic;
         Subscriber *subscriber = nullptr;
         DataReader *data_reader = nullptr;
@@ -160,7 +186,7 @@ namespace provizio::dds
     template <typename data_pub_sub_type>
     subscriber_handle<data_pub_sub_type>::subscriber_handle(std::shared_ptr<domain_participant> participant,
                                                             const std::string &topic_name,
-                                                            std::shared_ptr<DataReaderListener> data_listener,
+                                                            std::shared_ptr<data_reader_listener> data_listener,
                                                             const ReliabilityQosPolicyKind reliability_kind,
                                                             const std::int32_t max_history_depth)
         : participant(std::move(participant)),
@@ -217,75 +243,78 @@ namespace provizio::dds
     }
 
     template <typename data_pub_sub_type>
-    bool subscriber_handle<data_pub_sub_type>::wait_till_matched(const std::chrono::milliseconds &timeout,
-                                                                 const std::chrono::milliseconds &settle_time) const
+    int subscriber_handle<data_pub_sub_type>::get_num_matched_publishers(
+        const std::chrono::milliseconds timeout, const std::chrono::milliseconds settle_time) const
     {
-        using clock = std::chrono::steady_clock;
-        const auto deadline = clock::now() + timeout;
-        constexpr std::chrono::milliseconds iteration_sleep{10};
-
-        eprosima::fastdds::dds::SubscriptionMatchedStatus status;
-        clock::time_point stable_since{};
-        bool has_stable_since = false;
-        while (clock::now() < deadline)
+        std::unique_lock<std::mutex> lock{data_listener->num_matched_publishers_mutex};
+        const auto timeout_point = std::chrono::steady_clock::now() + timeout;
+        const std::chrono::milliseconds min_attempt_time{50};
+        if (!data_listener->num_matched_publishers_cv.wait_for(
+                lock, std::max(timeout - settle_time, min_attempt_time),
+                [this] { return data_listener->num_matched_publishers > 0; }))
         {
-            data_reader->get_subscription_matched_status(status);
-            if (status.current_count > 0)
-            {
-                if (!has_stable_since)
-                {
-                    stable_since = clock::now();
-                    has_stable_since = true;
-                }
-                else if (clock::now() - stable_since >= settle_time)
-                {
-                    return true;
-                }
-            }
-            else
-            {
-                has_stable_since = false;
-            }
-            std::this_thread::sleep_for(iteration_sleep);
+            // No matches
+            return 0;
         }
 
-        return false;
+        if (settle_time.count() > 0)
+        {
+            do
+            {
+                if (!data_listener->num_matched_publishers_cv.wait_for(
+                        lock, settle_time, [this, num_matched_publishers_was = data_listener->num_matched_publishers] {
+                            return num_matched_publishers_was != data_listener->num_matched_publishers;
+                        }))
+                {
+                    // No change during the settle_time period
+                    return data_listener->num_matched_publishers;
+                }
+            } while (std::chrono::steady_clock::now() < timeout_point);
+
+            // Wasn't ever stable for settle_time until the timeout
+            return -1;
+        }
+
+        return data_listener->num_matched_publishers;
     }
 
-    template <typename data_type, typename on_data_function_type>
-    class on_data_function_data_listener : public DataReaderListener
+    namespace detail
     {
-      public:
-        on_data_function_data_listener(on_data_function_type &&on_data_function)
-            : on_data_function(std::move(on_data_function))
+        template <typename data_type, typename on_data_function_type>
+        class on_data_function_data_listener : public data_reader_listener
         {
-        }
-
-        void on_data_available(DataReader *reader) override
-        {
-            data_type data;
-            SampleInfo info;
-            while (reader->take_next_sample(&data, &info) == ReturnCode_t::RETCODE_OK)
+          public:
+            on_data_function_data_listener(on_data_function_type &&on_data_function)
+                : on_data_function(std::move(on_data_function))
             {
-                if (info.valid_data)
+            }
+
+            void on_data_available(DataReader *reader) override
+            {
+                data_type data;
+                SampleInfo info;
+                while (reader->take_next_sample(&data, &info) == ReturnCode_t::RETCODE_OK)
                 {
-                    constexpr size_t arity = function_traits<on_data_function_type>::arity;
-                    static_assert(arity == 1 || arity == 2, "Incorrect number of arguments in on_data_function");
-                    if constexpr (arity == 1)
+                    if (info.valid_data)
                     {
-                        on_data_function(data);
-                    }
-                    else
-                    {
-                        on_data_function(data, info);
+                        constexpr size_t arity = function_traits<on_data_function_type>::arity;
+                        static_assert(arity == 1 || arity == 2, "Incorrect number of arguments in on_data_function");
+                        if constexpr (arity == 1)
+                        {
+                            on_data_function(data);
+                        }
+                        else
+                        {
+                            on_data_function(data, info);
+                        }
                     }
                 }
             }
-        }
 
-      private:
-        on_data_function_type on_data_function;
-    };
+          private:
+            on_data_function_type on_data_function;
+        };
+    } // namespace detail
 
     template <typename data_pub_sub_type, typename on_data_function_type>
     std::shared_ptr<subscriber_handle<data_pub_sub_type>> make_subscriber(
@@ -295,41 +324,45 @@ namespace provizio::dds
     {
         return std::make_shared<subscriber_handle<data_pub_sub_type>>(
             std::move(participant), topic_name,
-            std::make_shared<on_data_function_data_listener<typename data_pub_sub_type::type, on_data_function_type>>(
+            std::make_shared<
+                detail::on_data_function_data_listener<typename data_pub_sub_type::type, on_data_function_type>>(
                 std::move(on_data_function)),
             reliability_kind, max_history_depth);
     }
 
-    template <typename data_type, typename on_data_function_type, typename on_has_publisher_changed_function_type>
-    class functional_data_listener : public on_data_function_data_listener<data_type, on_data_function_type>
+    namespace detail
     {
-      public:
-        functional_data_listener(on_data_function_type &&on_data_function,
-                                 on_has_publisher_changed_function_type &&on_has_publisher_changed_function)
-            : on_data_function_data_listener<data_type, on_data_function_type>(std::move(on_data_function)),
-              on_has_publisher_changed_function(std::move(on_has_publisher_changed_function))
+        template <typename data_type, typename on_data_function_type, typename on_has_publisher_changed_function_type>
+        class functional_data_listener : public on_data_function_data_listener<data_type, on_data_function_type>
         {
-        }
-
-        void on_subscription_matched(DataReader *reader, const SubscriptionMatchedStatus &info) override
-
-        {
-            (void)reader;
-            if (info.current_count > 0 && info.current_count_change == info.current_count)
+          public:
+            functional_data_listener(on_data_function_type &&on_data_function,
+                                     on_has_publisher_changed_function_type &&on_has_publisher_changed_function)
+                : on_data_function_data_listener<data_type, on_data_function_type>(std::move(on_data_function)),
+                  on_has_publisher_changed_function(std::move(on_has_publisher_changed_function))
             {
-                // Just matched the first publisher
-                on_has_publisher_changed_function(true);
             }
-            else if (info.current_count == 0 && info.current_count_change < 0)
-            {
-                // Just unmatched the last publisher
-                on_has_publisher_changed_function(false);
-            }
-        }
 
-      private:
-        on_has_publisher_changed_function_type on_has_publisher_changed_function;
-    };
+            void on_subscription_matched(DataReader *reader, const SubscriptionMatchedStatus &info) override
+            {
+                on_data_function_data_listener<data_type, on_data_function_type>::on_subscription_matched(reader, info);
+
+                if (info.current_count > 0 && info.current_count_change == info.current_count)
+                {
+                    // Just matched the first publisher
+                    on_has_publisher_changed_function(true);
+                }
+                else if (info.current_count == 0 && info.current_count_change < 0)
+                {
+                    // Just unmatched the last publisher
+                    on_has_publisher_changed_function(false);
+                }
+            }
+
+          private:
+            on_has_publisher_changed_function_type on_has_publisher_changed_function;
+        };
+    } // namespace detail
 
     template <typename data_pub_sub_type, typename on_data_function_type,
               typename on_has_publisher_changed_function_type>
@@ -341,8 +374,8 @@ namespace provizio::dds
     {
         return std::make_shared<subscriber_handle<data_pub_sub_type>>(
             std::move(participant), topic_name,
-            std::make_shared<functional_data_listener<typename data_pub_sub_type::type, on_data_function_type,
-                                                      on_has_publisher_changed_function_type>>(
+            std::make_shared<detail::functional_data_listener<typename data_pub_sub_type::type, on_data_function_type,
+                                                              on_has_publisher_changed_function_type>>(
                 std::move(on_data_function), std::move(on_has_publisher_changed_function)),
             reliability_kind, max_history_depth);
     }

@@ -22,6 +22,16 @@ add_test(NAME request_response COMMAND
     bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service> serial_requests\" \"$<TARGET_FILE:request_response_client>\"; }"
 )
 
+add_test(NAME request_response_reliability COMMAND
+    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_times.sh 128 ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \\\"$<TARGET_FILE:request_response_reliability_service> \\\\\\\"\\\\\\\" \\\$i 1\\\" \\\"$<TARGET_FILE:request_response_reliability_client> \\\\\\\"\\\\\\\" \\\$i\\\"; }"
+)
+set_tests_properties(request_response_reliability PROPERTIES TIMEOUT 1500) # Takes long by design
+
+add_test(NAME request_response_reliability_single_service COMMAND
+    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_reliability_service> _single_service 1 128\" \"${CMAKE_SOURCE_DIR}/test/run_times.sh 128 $<TARGET_FILE:request_response_reliability_client> _single_service \\\\\\$i\"; }"
+)
+set_tests_properties(request_response_reliability_single_service PROPERTIES TIMEOUT 1500) # Takes long by design
+
 add_test(NAME request_response_concurrent_requests_serial_service COMMAND
     bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service>\" \"$<TARGET_FILE:request_response_concurrent_requests>\"; }"
 )

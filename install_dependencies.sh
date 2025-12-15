@@ -172,7 +172,7 @@ else
       apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main"
       apt update
       apt install -y --no-install-recommends kitware-archive-keyring
-      apt install -y --no-install-recommends --allow-downgrades cmake=${CMAKE_VERSION} cmake-data=${CMAKE_VERSION}
+      apt install -y --no-install-recommends --allow-downgrades cmake=${CMAKE_VERSION} cmake-data=${CMAKE_VERSION} || echo "Skipping installing cmake, it's likely already installed and held"
   else
       apt install -y --no-install-recommends cmake
   fi
