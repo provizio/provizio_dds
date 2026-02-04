@@ -28,7 +28,7 @@ if(NOT foonathan_memory_FOUND)
         CMAKE_ARGS "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_INSTALL_PREFIX=${FOONATHAN_MEMORY_INSTALL_DIR}"
     )
     add_custom_target(get_foonathan_memory ALL
-        COMMAND "${CMAKE_COMMAND}" -E create_symlink "${FOONATHAN_MEMORY_INSTALL_DIR}/lib/libfoonathan_memory-*.a" "${FOONATHAN_MEMORY_INSTALL_DIR}/lib/libfoonathan_memory.a"
+        COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_SOURCE_DIR}/create_foonathan_symlink.cmake"
     )
     add_dependencies(get_foonathan_memory libfoonathan_memory)
 endif(NOT foonathan_memory_FOUND)
