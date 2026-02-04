@@ -593,6 +593,7 @@ else(HAS_BIN_CACHE)
     endif(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS AND NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
 
     if(ENABLE_TESTS)
+        message(STATUS "ENABLE_TESTS is ON: tests will be built and enabled.")
         add_subdirectory(test)
     endif(ENABLE_TESTS)
 endif(HAS_BIN_CACHE)

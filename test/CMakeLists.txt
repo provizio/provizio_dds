@@ -24,5 +24,6 @@ add_subdirectory(request_response_concurrent)
 add_subdirectory(ros_interop)
 
 if(PYTHON_BINDINGS)
+    message(STATUS "PYTHON_BINDINGS is ON: Python tests will be built and enabled.")
     add_subdirectory(python)
 endif(PYTHON_BINDINGS)
