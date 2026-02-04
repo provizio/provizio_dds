@@ -40,7 +40,7 @@ else
   IDLS_COMMIT_HASH="$(git ls-remote https://github.com/provizio/provizio_dds_idls.git | grep -w "${PROVIZIO_DDS_IDLS_VERSION}" | awk '{print $1}')"
 
   # sha256 has of all non-ignored files in this repo except "media" and "cache" directories 
-  PROVIZIO_DDS_CONTENTS_HASH="$(git ls-files | grep -wv media | grep -wv cache | xargs -d '\n' cat | sha256sum | awk '{print $1}')"
+  PROVIZIO_DDS_CONTENTS_HASH="$(git ls-files | grep -wv media | grep -wv cache | xargs -d '\n' cat 2>/dev/null | sha256sum | awk '{print $1}')"
 fi
 
 echo "linux_${CPU_ARCH}.${PROVIZIO_DDS_CONTENTS_HASH}.idls_${IDLS_COMMIT_HASH}.${BUILD_TYPE}"
