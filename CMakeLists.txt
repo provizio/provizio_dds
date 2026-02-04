@@ -267,7 +267,7 @@ else(HAS_BIN_CACHE)
         )
         set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules" ${CMAKE_MODULE_PATH})
         find_package(foonathan_memory REQUIRED)
-        link_directories("${FOONATHAN_MEMORY_INSTALL_DIR}/lib")
+        # Link directory is set by Findfoonathan_memory.cmake based on actual location (lib/lib64/lib32)
 
         # Fast-DDS (https://github.com/provizio/Fast-DDS)
         set(FAST_DDS_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/fast_dds_build")
