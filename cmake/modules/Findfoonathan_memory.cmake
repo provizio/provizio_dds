@@ -3,13 +3,20 @@ find_package(foonathan_memory QUIET NO_MODULE)
 if(NOT foonathan_memory_FOUND)
     set(foonathan_memory_DIR "${CMAKE_BINARY_DIR}/../foonathan_memory/install")
 
-    # Check for libfoonathan_memory.a in lib, lib64, or lib32
+    # Check for foonathan_memory library in lib, lib64, or lib32
     set(foonathan_memory_LIB_DIR "")
     foreach(lib_subdir lib lib64 lib32)
+        # Unix: libfoonathan_memory.a
         if(EXISTS "${foonathan_memory_DIR}/${lib_subdir}/libfoonathan_memory.a")
             set(foonathan_memory_LIB_DIR "${foonathan_memory_DIR}/${lib_subdir}")
             break()
         endif(EXISTS "${foonathan_memory_DIR}/${lib_subdir}/libfoonathan_memory.a")
+        # Windows/MSVC: foonathan_memory*.lib
+        file(GLOB foonathan_memory_LIB_FILES "${foonathan_memory_DIR}/${lib_subdir}/foonathan_memory*.lib")
+        if(foonathan_memory_LIB_FILES)
+            set(foonathan_memory_LIB_DIR "${foonathan_memory_DIR}/${lib_subdir}")
+            break()
+        endif(foonathan_memory_LIB_FILES)
     endforeach(lib_subdir lib lib64 lib32)
 
     if(foonathan_memory_LIB_DIR)
