@@ -286,6 +286,19 @@ else(HAS_BIN_CACHE)
         )
         link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
+        # On Windows, installed libraries have versioned names (e.g. fastrtps-2.14.lib).
+        # Derive the versioned library names from FAST_DDS_VERSION (e.g. "v2.14.2" -> "2.14").
+        if(WIN32)
+            string(REGEX REPLACE "^v?" "" FAST_DDS_VERSION_STRIPPED "${FAST_DDS_VERSION}")
+            string(REGEX MATCH "^[0-9]+\\.[0-9]+" FAST_DDS_MAJOR_MINOR "${FAST_DDS_VERSION_STRIPPED}")
+            set(FASTRTPS_LIB "fastrtps-${FAST_DDS_MAJOR_MINOR}")
+            # fastcdr version is independent; read from its installed lib
+            set(FASTCDR_LIB "fastcdr-2.2")
+        else(WIN32)
+            set(FASTRTPS_LIB "fastrtps")
+            set(FASTCDR_LIB "fastcdr")
+        endif(WIN32)
+
         set(FAST_DDS_DEPENDENCIES libfast_dds)
         set(FAST_DDS_INCLUDE_DIRS "${FAST_DDS_INSTALL_DIR}/include/")
     endif(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
@@ -315,7 +328,7 @@ else(HAS_BIN_CACHE)
     endif(FAST_DDS_DEPENDENCIES)
 
     target_include_directories(provizio_dds_types SYSTEM PUBLIC include ${PROVIZIO_DDS_IDLS_SRC_DIR} ${FAST_DDS_INCLUDE_DIRS})
-    target_link_libraries(provizio_dds_types PUBLIC fastrtps fastcdr)
+    target_link_libraries(provizio_dds_types PUBLIC ${FASTRTPS_LIB} ${FASTCDR_LIB})
     set_target_properties(provizio_dds_types PROPERTIES DEFINE_SYMBOL "PROVIZIO_DDS_TYPES_EXPORTS")
 
     # provizio_dds library
@@ -325,7 +338,7 @@ else(HAS_BIN_CACHE)
         src/topic.cpp
     )
     add_library(provizio_dds SHARED ${PROVIZIO_DDS_SOURCES})
-    target_link_libraries(provizio_dds PUBLIC provizio_dds_types fastrtps fastcdr)
+    target_link_libraries(provizio_dds PUBLIC provizio_dds_types ${FASTRTPS_LIB} ${FASTCDR_LIB})
     set_target_properties(provizio_dds PROPERTIES DEFINE_SYMBOL "PROVIZIO_DDS_EXPORTS")
 
     # Installation config
