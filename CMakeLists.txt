@@ -321,6 +321,8 @@ else(HAS_BIN_CACHE)
 
     if(WIN32)
         target_compile_definitions(provizio_dds_types PRIVATE EPROSIMA_USER_DLL_EXPORT)
+        # Disable eProsima auto-linking (#pragma comment(lib, ...)) — linking is handled by CMake
+        target_compile_definitions(provizio_dds_types PUBLIC EPROSIMA_ALL_NO_LIB FASTCDR_DYN_LINK)
     endif(WIN32)
 
     if(FAST_DDS_DEPENDENCIES)
