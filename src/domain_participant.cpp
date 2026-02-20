@@ -28,8 +28,6 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 #include <fastdds/dds/topic/qos/TopicQos.hpp>
 #include <fastrtps/types/TypesBase.h>
-#include <fastrtps/xmlparser/XMLParserCommon.h>
-
 #include "provizio/dds/topic.h"
 
 namespace provizio::dds
@@ -45,10 +43,9 @@ namespace provizio::dds
         // In Fast-DDS 3 it's now DEFAULT_FASTDDS_ENV_VARIABLE and its value has changed from
         // FASTRTPS_DEFAULT_PROFILES_FILE to FASTDDS_DEFAULT_PROFILES_FILE. When upgrading, make sure to update it
         // in provizio_dds.py too.
-        inline const char *xml_profiles_env_variable()
-        {
-            return eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE;
-        }
+        // Note: hardcoded instead of using eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE
+        // because that extern const lacks __declspec(dllimport) in Fast-DDS headers, causing LNK2019 on MSVC.
+        constexpr const char *xml_profiles_env_variable = "FASTRTPS_DEFAULT_PROFILES_FILE";
     } // namespace
 
     domain_participant::domain_participant(const DomainId_t domain_id)
@@ -57,7 +54,7 @@ namespace provizio::dds
         DomainParticipantQos customized_qos;
 
         bool xml_profile = false;
-        if (auto *const file_path = std::getenv(xml_profiles_env_variable())) // NOLINT: getenv required
+        if (auto *const file_path = std::getenv(xml_profiles_env_variable)) // NOLINT: getenv required
         {
             xml_profile = std::filesystem::exists(file_path) && !std::filesystem::is_directory(file_path);
         }
