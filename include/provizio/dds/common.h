@@ -18,6 +18,18 @@
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/rtps/common/Guid.h>
 
+// DLL export/import macro for provizio_dds shared library.
+// PROVIZIO_DDS_EXPORTS is defined automatically by CMake (DEFINE_SYMBOL property) when building the DLL.
+#ifdef _WIN32
+    #ifdef PROVIZIO_DDS_EXPORTS
+        #define PROVIZIO_DDS_API __declspec(dllexport)
+    #else
+        #define PROVIZIO_DDS_API __declspec(dllimport)
+    #endif
+#else
+    #define PROVIZIO_DDS_API
+#endif
+
 namespace provizio::dds
 {
     /**
