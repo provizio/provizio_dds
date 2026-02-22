@@ -38,7 +38,7 @@ namespace provizio::dds
      * @note Registration when register_type and register_topic is performed just once per type/topic name, any
      * consequent registration simply reuses the registered TypeSupport/Topic.
      */
-    class domain_participant
+    class PROVIZIO_DDS_API domain_participant
     {
       public:
         /**
@@ -117,7 +117,7 @@ namespace provizio::dds
      * @see
      * https://fast-dds.docs.eprosima.com/en/latest/fastdds/api_reference/dds_pim/domain/domainparticipant.html
      */
-    std::shared_ptr<domain_participant> make_domain_participant(DomainId_t domain_id = 0);
+    PROVIZIO_DDS_API std::shared_ptr<domain_participant> make_domain_participant(DomainId_t domain_id = 0);
 } // namespace provizio::dds
 
 #endif // DDS_DOMAIN_PARTICIPANT

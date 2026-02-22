@@ -348,7 +348,8 @@ else(HAS_BIN_CACHE)
     install(
         TARGETS provizio_dds provizio_dds_types
         RUNTIME DESTINATION bin
-        LIBRARY DESTINATION lib)
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib)
     install(DIRECTORY include/provizio DESTINATION include)
     install(DIRECTORY "${PROVIZIO_DDS_IDLS_SRC_DIR}/" DESTINATION include FILES_MATCHING PATTERN "*.h")
 

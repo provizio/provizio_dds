@@ -61,12 +61,12 @@ namespace provizio::dds::detail
      * @param max_history_depth Use negative value to keep default, 0 for minimal, positive for specific max queue size.
      * @return Maximum number of requests to buffer.
      */
-    std::size_t to_max_queue_size(const std::int32_t max_history_depth);
+    PROVIZIO_DDS_API std::size_t to_max_queue_size(const std::int32_t max_history_depth);
 
     /**
      * @brief Checks whether a GUID refers to a DataReader endpoint (subscriber GUID).
      */
-    bool is_subscriber(const guid &guid_to_check);
+    PROVIZIO_DDS_API bool is_subscriber(const guid &guid_to_check);
 
     template <typename function_type, typename = void> struct returns_future : std::false_type
     {
@@ -103,7 +103,7 @@ namespace provizio::dds::detail
     /**
      * @brief Hash functor for `guid` to be used in unordered containers.
      */
-    struct guid_hash
+    struct PROVIZIO_DDS_API guid_hash
     {
         std::size_t operator()(const guid &the_guid) const;
     };
