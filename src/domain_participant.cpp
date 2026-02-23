@@ -45,7 +45,7 @@ namespace provizio::dds
         // in provizio_dds.py too.
         // Note: hardcoded instead of using eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE
         // because that extern const lacks __declspec(dllimport) in Fast-DDS headers, causing LNK2019 on MSVC.
-        constexpr const char *xml_profiles_env_variable = "FASTRTPS_DEFAULT_PROFILES_FILE";
+        constexpr char xml_profiles_env_variable[] = "FASTRTPS_DEFAULT_PROFILES_FILE";
     } // namespace
 
     domain_participant::domain_participant(const DomainId_t domain_id)
