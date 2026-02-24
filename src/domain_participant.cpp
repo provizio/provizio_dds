@@ -21,6 +21,7 @@
 #include <mutex>
 #include <string>
 
+#include "provizio/dds/topic.h"
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
@@ -28,7 +29,6 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 #include <fastdds/dds/topic/qos/TopicQos.hpp>
 #include <fastrtps/types/TypesBase.h>
-#include "provizio/dds/topic.h"
 
 namespace provizio::dds
 {

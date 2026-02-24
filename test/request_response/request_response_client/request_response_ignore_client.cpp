@@ -29,8 +29,9 @@ try
     const std::string service_name{"provizio_dds_test_request_response_ignore"};
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr std::chrono::seconds time_to_match{3};
-    constexpr std::chrono::seconds timeout{15};        // Longer timeout: DDS entity matching can be slow on some platforms (e.g. Windows)
-    constexpr std::chrono::seconds ignore_timeout{5};  // Shorter timeout for requests that should be ignored
+    constexpr std::chrono::seconds timeout{
+        15}; // Longer timeout: DDS entity matching can be slow on some platforms (e.g. Windows)
+    constexpr std::chrono::seconds ignore_timeout{5}; // Shorter timeout for requests that should be ignored
     const std::array<int, 5> requests{1, 2, 3, 4, 5};
 
     auto participant = provizio::dds::make_domain_participant(domain_id);
