@@ -61,6 +61,11 @@ int main(int argc, char *argv[])
         domain_participant, service_name,
         [&](const std_msgs::msg::Int32 &request) {
             // returns std::future for a delayed response
+// log_prefix capture is required by MSVC but clang considers it unnecessary for constexpr
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-lambda-capture"
+#endif
             return std::async(std::launch::async, [request, &mutex, &got_requests, &condition_variable,
                                                    requests_expected, &log_prefix]() {
                 std_msgs::msg::Int64 response;
@@ -82,6 +87,9 @@ int main(int argc, char *argv[])
                 std::cout << log_prefix << "Response sent (" << request.data() << " => " << value << ")" << std::endl;
                 return response;
             });
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
         },
         max_history_depth);
 
