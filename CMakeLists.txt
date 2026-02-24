@@ -353,7 +353,7 @@ else(HAS_BIN_CACHE)
         # Debug builds add a 'd' suffix (e.g. fastrtpsd-2.14.lib).
         # Derive the versioned library names from FAST_DDS_VERSION (e.g. "v2.14.2" -> "2.14").
         if(WIN32)
-            string(REGEX REPLACE "^v?" "" FAST_DDS_VERSION_STRIPPED "${FAST_DDS_VERSION}")
+            string(REGEX REPLACE "^v" "" FAST_DDS_VERSION_STRIPPED "${FAST_DDS_VERSION}")
             string(REGEX MATCH "^[0-9]+\\.[0-9]+" FAST_DDS_MAJOR_MINOR "${FAST_DDS_VERSION_STRIPPED}")
             if(CMAKE_BUILD_TYPE STREQUAL "Debug")
                 set(FAST_DDS_DEBUG_SUFFIX "d")
