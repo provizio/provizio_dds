@@ -54,8 +54,13 @@ build_dir = source_dir + "/build/python_packaging"
 install_dir = build_dir + "/install"
 target_dir = build_dir + "/packages"
 os.makedirs(build_dir, exist_ok=True)
-# TODO: Windows support
-if os.path.isfile(f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types.so"):
+# Check for already-built libraries (platform-specific extension)
+_lib_names = (
+    f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types.so",
+    f"{target_dir}/provizio_dds_python_types/provizio_dds_types.dll",
+    f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types.dylib",
+)
+if any(os.path.isfile(lib) for lib in _lib_names):
     print(f"Already built in {build_dir}, only packaging...", flush=True)
 else:
     needs_building = True
@@ -123,6 +128,7 @@ setup(
     platforms=[
         "Operating System :: POSIX :: Linux",
         "OPERATING SYSTEM :: MACOS :: MACOS X",
+        "Operating System :: Microsoft :: Windows",
     ],
     url="https://github.com/provizio/provizio_dds",
     long_description=readme,
@@ -134,5 +140,5 @@ setup(
         "provizio_dds_python_types": f"{target_dir}/provizio_dds_python_types",
         "provizio_dds": f"{target_dir}/provizio_dds",
     },
-    package_data={"": ["*.so*", "*.dll", "*.dylib"]},
+    package_data={"": ["*.so*", "*.dll", "*.pyd", "*.dylib"]},
 )

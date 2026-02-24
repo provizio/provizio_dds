@@ -26,12 +26,10 @@ from typing import Any, Callable, Optional
 import time
 from queue import Queue
 
-# until https://bugs.python.org/issue46276 is fixed we can apply this workaround
-# on windows
+# On Windows, Python 3.8+ restricts DLL search paths (https://bugs.python.org/issue46276).
+# Add the directory containing this module so dependent DLLs can be found.
 if os.name == "nt":
-    import win32api
-
-    win32api.LoadLibrary("provizio_dds_python_types")
+    os.add_dll_directory(os.path.dirname(os.path.abspath(__file__)))
 
 from provizio_dds_python_types import *
 from fastdds import *

@@ -16,34 +16,59 @@ add_subdirectory(request_response_service)
 add_subdirectory(request_response_client)
 add_subdirectory(request_response_dual_service)
 
-# TODO: Windows tests
-
 add_test(NAME request_response COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service> serial_requests\" \"$<TARGET_FILE:request_response_client>\"; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "$<TARGET_FILE:request_response_service> serial_requests"
+    "$<TARGET_FILE:request_response_client>"
 )
 
 add_test(NAME request_response_reliability COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_times.sh 128 ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \\\"$<TARGET_FILE:request_response_reliability_service> \\\\\\\"\\\\\\\" \\\$i 1\\\" \\\"$<TARGET_FILE:request_response_reliability_client> \\\\\\\"\\\\\\\" \\\$i\\\"; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" "128"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "$<TARGET_FILE:request_response_reliability_service> \"\" {i} 1"
+    "$<TARGET_FILE:request_response_reliability_client> \"\" {i}"
 )
 set_tests_properties(request_response_reliability PROPERTIES TIMEOUT 1500) # Takes long by design
 
 add_test(NAME request_response_reliability_single_service COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_reliability_service> _single_service 1 128\" \"${CMAKE_SOURCE_DIR}/test/run_times.sh 128 $<TARGET_FILE:request_response_reliability_client> _single_service \\\\\\$i\"; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "$<TARGET_FILE:request_response_reliability_service> _single_service 1 128"
+    "${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/run_times.py 128 $<TARGET_FILE:request_response_reliability_client> _single_service {i}"
 )
 set_tests_properties(request_response_reliability_single_service PROPERTIES TIMEOUT 1500) # Takes long by design
 
 add_test(NAME request_response_concurrent_requests_serial_service COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_service>\" \"$<TARGET_FILE:request_response_concurrent_requests>\"; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "$<TARGET_FILE:request_response_service>"
+    "$<TARGET_FILE:request_response_concurrent_requests>"
 )
 
 add_test(NAME request_response_dual_service_test COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && $<TARGET_FILE:request_response_dual_service>"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "$<TARGET_FILE:request_response_dual_service>"
 )
 
 add_test(NAME request_response_ignore COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_ignore_service>\" \"$<TARGET_FILE:request_response_ignore_client>\"; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "$<TARGET_FILE:request_response_ignore_service>"
+    "$<TARGET_FILE:request_response_ignore_client>"
 )
 
 add_test(NAME request_response_ignore_async COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_ignore_service_async>\" \"$<TARGET_FILE:request_response_ignore_client>\"; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "$<TARGET_FILE:request_response_ignore_service_async>"
+    "$<TARGET_FILE:request_response_ignore_client>"
 )
+
+if(WIN32)
+    set_tests_properties(
+        request_response
+        request_response_reliability
+        request_response_reliability_single_service
+        request_response_concurrent_requests_serial_service
+        request_response_dual_service_test
+        request_response_ignore
+        request_response_ignore_async
+        PROPERTIES ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}"
+    )
+endif(WIN32)

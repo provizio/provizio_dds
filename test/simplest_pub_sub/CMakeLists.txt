@@ -15,7 +15,11 @@
 add_subdirectory(simplest_publisher)
 add_subdirectory(simplest_subscriber)
 
-# TODO: Windows version
 add_test(NAME simplest_pub_sub COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { $<TARGET_FILE:simplest_publisher> & $<TARGET_FILE:simplest_subscriber>; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "$<TARGET_FILE:simplest_publisher>"
+    "$<TARGET_FILE:simplest_subscriber>"
 )
+if(WIN32)
+    set_tests_properties(simplest_pub_sub PROPERTIES ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
+endif(WIN32)

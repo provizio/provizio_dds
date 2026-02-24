@@ -136,6 +136,9 @@ if(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
     StandardConfig(SAFETY_CRITICAL)
 else(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
     set(CMAKE_CXX_STANDARD 17)
+    if(MSVC)
+        add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/EHsc>" /wd4068 /wd4996)
+    endif(MSVC)
     if(STATIC_ANALYSIS)
         message(WARNING "STATIC_ANALYSIS setting doesn't have any effect when DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS is ON")
     endif(STATIC_ANALYSIS)
@@ -254,14 +257,14 @@ else(HAS_BIN_CACHE)
         # Let's build Fast-DDS
         message(STATUS "Fast-DDS will be built. Version ${FAST_DDS_VERSION} with foonathan_memory_vendor version ${FOONATHAN_MEMORY_VENDOR_VERSION}.")
 
-        # OpenSSL is required for Fast-DDS
+        # OpenSSL is used by Fast-DDS for its security plugin
         find_package(OpenSSL REQUIRED)
 
         # foonathan_memory_vendor (Required for Fast-DDS)
         set(FOONATHAN_MEMORY_DIR "${CMAKE_CURRENT_BINARY_DIR}/foonathan_memory")
         file(MAKE_DIRECTORY "${FOONATHAN_MEMORY_DIR}")
         execute_process(
-            COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}"
+            COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}" "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
             WORKING_DIRECTORY "${FOONATHAN_MEMORY_DIR}"
         )
         execute_process(
@@ -278,6 +281,10 @@ else(HAS_BIN_CACHE)
         set(FAST_DDS_PREFIX "${CMAKE_CURRENT_BINARY_DIR}")
         set(FAST_DDS_GITHUB_PROJECT "provizio/Fast-DDS")
         set(FAST_DDS_INSTALL_DIR "${FAST_DDS_BINARY_DIR}/install")
+        set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules" "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
+        if(NOT OPENSSL_FOUND)
+            list(APPEND FAST_DDS_CMAKE_ARGS "-DSECURITY=OFF")
+        endif(NOT OPENSSL_FOUND)
         ExternalProject_Add(libfast_dds
             GIT_REPOSITORY "https://github.com/${FAST_DDS_GITHUB_PROJECT}.git"
             GIT_TAG "${FAST_DDS_VERSION}"
@@ -285,17 +292,41 @@ else(HAS_BIN_CACHE)
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
-            CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules" "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib"
+            CMAKE_ARGS ${FAST_DDS_CMAKE_ARGS}
         )
         link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
         # On Windows, installed libraries have versioned names (e.g. fastrtps-2.14.lib).
+        # Debug builds add a 'd' suffix (e.g. fastrtpsd-2.14.lib).
         # Derive the versioned library names from FAST_DDS_VERSION (e.g. "v2.14.2" -> "2.14").
         if(WIN32)
             string(REGEX REPLACE "^v?" "" FAST_DDS_VERSION_STRIPPED "${FAST_DDS_VERSION}")
             string(REGEX MATCH "^[0-9]+\\.[0-9]+" FAST_DDS_MAJOR_MINOR "${FAST_DDS_VERSION_STRIPPED}")
-            set(FASTRTPS_LIB "fastrtps-${FAST_DDS_MAJOR_MINOR}")
-            set(FASTCDR_LIB "fastcdr-${FAST_CDR_VERSION}")
+            if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+                set(FAST_DDS_DEBUG_SUFFIX "d")
+            else()
+                set(FAST_DDS_DEBUG_SUFFIX "")
+            endif()
+            set(FASTRTPS_LIB "fastrtps${FAST_DDS_DEBUG_SUFFIX}-${FAST_DDS_MAJOR_MINOR}")
+            set(FASTCDR_LIB "fastcdr${FAST_DDS_DEBUG_SUFFIX}-${FAST_CDR_VERSION}")
+
+            # Create imported targets with unversioned names so that third-party CMake
+            # code (e.g. Fast-DDS-Python) that does target_link_libraries(... fastcdr fastrtps)
+            # resolves to the correct versioned libraries without patching.
+            if(NOT TARGET fastcdr)
+                add_library(fastcdr SHARED IMPORTED)
+                set_target_properties(fastcdr PROPERTIES
+                    IMPORTED_IMPLIB "${FAST_DDS_INSTALL_DIR}/lib/${FASTCDR_LIB}.lib"
+                    IMPORTED_LOCATION "${FAST_DDS_INSTALL_DIR}/bin/${FASTCDR_LIB}.dll"
+                )
+            endif()
+            if(NOT TARGET fastrtps)
+                add_library(fastrtps SHARED IMPORTED)
+                set_target_properties(fastrtps PROPERTIES
+                    IMPORTED_IMPLIB "${FAST_DDS_INSTALL_DIR}/lib/${FASTRTPS_LIB}.lib"
+                    IMPORTED_LOCATION "${FAST_DDS_INSTALL_DIR}/bin/${FASTRTPS_LIB}.dll"
+                )
+            endif()
         else(WIN32)
             set(FASTRTPS_LIB "fastrtps")
             set(FASTCDR_LIB "fastcdr")
@@ -417,7 +448,11 @@ else(HAS_BIN_CACHE)
             "project(fastdds_python VERSION ${FAST_DDS_PYTHON_VERSION})
         
         # Disable treating warnings as errors in Fast-DDS-python
-        add_compile_options(-Wno-error -Wno-unused-parameter -Wno-sign-compare -Wno-deprecated-declarations)
+        if(MSVC)
+            add_compile_options(/W0)
+        else()
+            add_compile_options(-Wno-error -Wno-unused-parameter -Wno-sign-compare -Wno-deprecated-declarations)
+        endif()
 
         # Adds missing ThreadSettings definition
         if(MSVC)
@@ -427,6 +462,11 @@ else(HAS_BIN_CACHE)
             add_definitions(-include \"${FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER}\")
         endif(MSVC)
         
+        # Disable eProsima auto-linking and enable DLL imports on Windows
+        if(WIN32)
+            add_definitions(-DEPROSIMA_ALL_DYN_LINK -DEPROSIMA_ALL_NO_LIB)
+        endif()
+
         add_subdirectory(src/swig)
         "
         )
@@ -489,7 +529,11 @@ else(HAS_BIN_CACHE)
         endif(UNIX AND NOT APPLE AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 
         # We have to disable some of the warnings in the generated code
-        target_compile_options(provizio_dds_python_types PRIVATE -Wno-delete-non-virtual-dtor -Wno-unused-parameter -Wno-missing-field-initializers -Wno-deprecated-declarations -Wno-error)
+        if(MSVC)
+            target_compile_options(provizio_dds_python_types PRIVATE /W0 /bigobj)
+        else()
+            target_compile_options(provizio_dds_python_types PRIVATE -Wno-delete-non-virtual-dtor -Wno-unused-parameter -Wno-missing-field-initializers -Wno-deprecated-declarations -Wno-error)
+        endif()
 
         swig_link_libraries(provizio_dds_python_types
             Python3::Module
@@ -513,13 +557,20 @@ else(HAS_BIN_CACHE)
             add_dependencies(provizio_dds_python_types${SWIG_COMPILATION_POSTFIX} ${FAST_DDS_DEPENDENCIES})
         endif(FAST_DDS_DEPENDENCIES)
 
+        # On Windows, SWIG Python modules are .pyd, not .dll
+        if(WIN32)
+            set(PYTHON_EXTENSION_SUFFIX ".pyd")
+        else()
+            set(PYTHON_EXTENSION_SUFFIX "${CMAKE_SHARED_LIBRARY_SUFFIX}")
+        endif()
+
         set(FASTDDS_PYTHON_LIBS
             "${fast_dds_python_BINARY_DIR}/src/swig/fastdds.py"
-            "${fast_dds_python_BINARY_DIR}/src/swig/_fastdds_python${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            "${fast_dds_python_BINARY_DIR}/src/swig/_fastdds_python${PYTHON_EXTENSION_SUFFIX}"
         )
         set(PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS
             "${CMAKE_CURRENT_BINARY_DIR}/provizio_dds_python_types.py"
-            "${CMAKE_CURRENT_BINARY_DIR}/_provizio_dds_python_types${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            "${CMAKE_CURRENT_BINARY_DIR}/_provizio_dds_python_types${PYTHON_EXTENSION_SUFFIX}"
         )
         set(PROVIZIO_DDS_PYTHON_LIBS
             "${CMAKE_CURRENT_SOURCE_DIR}/python/provizio_dds.py"
@@ -535,8 +586,19 @@ else(HAS_BIN_CACHE)
 
         if(FAST_DDS_INSTALL_DIR)
             file(GLOB FASTDDS_LIBS "${FAST_DDS_INSTALL_DIR}/lib/*${CMAKE_SHARED_LIBRARY_SUFFIX}*")
+            if(WIN32)
+                # On Windows, DLLs are in bin/, not lib/
+                file(GLOB FASTDDS_BIN_LIBS "${FAST_DDS_INSTALL_DIR}/bin/*.dll")
+                list(APPEND FASTDDS_LIBS ${FASTDDS_BIN_LIBS})
+            endif()
             set(PROVIZIO_DDS_ALL_PYTHON_LIBS ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${FASTDDS_LIBS})
         endif(FAST_DDS_INSTALL_DIR)
+
+        if(WIN32)
+            # On Windows, Python extension modules (.pyd) need the provizio_dds DLLs at runtime.
+            # These are added via generator expressions in test/python/CMakeLists.txt.
+            set(PROVIZIO_DDS_PYTHON_EXTRA_DLLS provizio_dds provizio_dds_types)
+        endif()
 
         # Find the installation path
         if(PYTHON_PACKAGES_INSTALL_DIR)
@@ -613,6 +675,8 @@ else(HAS_BIN_CACHE)
 
     if(ENABLE_TESTS)
         message(STATUS "ENABLE_TESTS is ON: tests will be built and enabled.")
+        include(CTest)
+        enable_testing()
         add_subdirectory(test)
     endif(ENABLE_TESTS)
 endif(HAS_BIN_CACHE)

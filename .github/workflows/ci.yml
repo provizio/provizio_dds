@@ -173,6 +173,64 @@ jobs:
       - run: bash -c "source /opt/ros/${{matrix.ros}}/setup.bash && .github/workflows/build.sh -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DSTATIC_ANALYSIS=${STATIC_ANALYSIS} -DPYTHON_BINDINGS=${PYTHON_BINDINGS} -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}"
       - run: bash -c "source /opt/ros/${{matrix.ros}}/setup.bash && .github/workflows/test.sh"
 
+  build-windows-cpp:
+    name: Build (Windows)
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        build_type: [Debug, Release]
+        with_python: [OFF, ON]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install SWIG
+        if: matrix.with_python == 'ON'
+        run: choco install swig -y
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DPYTHON_BINDINGS=${{matrix.with_python}} -DENABLE_TESTS=ON -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON
+      - name: Build
+        run: cmake --build build -- -j 16
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        build_type: [Debug, Release]
+        with_python: [OFF, ON]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install SWIG
+        if: matrix.with_python == 'ON'
+        run: choco install swig -y
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DPYTHON_BINDINGS=${{matrix.with_python}} -DENABLE_TESTS=ON -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON -DENABLE_ROS_TESTS=OFF
+      - name: Build
+        run: cmake --build build -- -j 16
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
+  test-windows-pip-package:
+    name: Test pip package (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install SWIG
+        run: choco install swig -y
+      - name: Create venv and install package
+        run: |
+          python -m venv "$env:TEMP\provizio_dds_test_pip.venv"
+          . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
+          python -m pip install wheel setuptools
+          python -m pip install -v .
+      - name: Test pip package
+        run: |
+          . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
+          python test\run_parallel.py "python test\python\python_publisher.py" "python test\python\python_subscriber.py"
+          python test\python\pointcloud2_test.py
+
   test-congested-networks-simple-discovery:
     name: Test working in congested networks (Simple Discovery)
     needs: commit-cache
