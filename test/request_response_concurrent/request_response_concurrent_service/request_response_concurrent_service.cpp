@@ -60,7 +60,7 @@ int main(int argc, char *argv[])
     auto service = provizio::dds::make_service<std_msgs::msg::Int32PubSubType, std_msgs::msg::Int64PubSubType>(
         domain_participant, service_name,
         [&](const std_msgs::msg::Int32 &request) {
-            // returns std::future for a delayed response
+    // returns std::future for a delayed response
 // log_prefix capture is required by MSVC but clang considers it unnecessary for constexpr
 #if defined(__clang__)
 #pragma clang diagnostic push

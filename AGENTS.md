@@ -128,5 +128,6 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
 
 - License: Apache 2.0 header required on all source files.
 - Coding standards enforced by `provizio/coding_standards` (downloaded at configure time). Disable with `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON` for faster local iteration.
+- **Formatting and static analysis**: All C/C++ code must conform to the repository `.clang-format` (Microsoft style) and `.clang-tidy` configurations. CI enforces these checks and will reject non-conforming code. Run `clang-format -i <file>` before committing to ensure compliance.
 - Runtime sanitizers (ASan/TSan/MSan) are explicitly disabled due to known Fast-DDS issues.
 - ROS 2 topic names use the `rt/` prefix convention.
