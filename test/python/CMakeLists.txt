@@ -4,6 +4,7 @@ set(TEST_PATH "${CMAKE_CURRENT_BINARY_DIR}")
 # Suppressing errors as packages can be installed manually, as the case in CI
 add_custom_target(python_tests ALL
     COMMAND ${PYTHON_EXECUTABLE} -c "import subprocess, sys$<SEMICOLON> subprocess.call([sys.executable, '-m', 'pip', 'install', 'numpy>=1.16', 'transforms3d>=0.4.1', '--quiet'])"
+    VERBATIM
 )
 file(GLOB TEST_SCRIPTS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
 foreach(FILE ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${TEST_SCRIPTS})

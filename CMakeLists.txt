@@ -552,6 +552,8 @@ else(HAS_BIN_CACHE)
         # Disable eProsima auto-linking and enable DLL imports on Windows
         if(WIN32)
             add_definitions(-DEPROSIMA_ALL_DYN_LINK -DEPROSIMA_ALL_NO_LIB)
+            # Prevent SWIG from auto-linking python3XX_d.lib in Debug builds
+            add_definitions(-DSWIG_PYTHON_INTERPRETER_NO_DEBUG)
         endif()
 
         add_subdirectory(src/swig)
@@ -618,6 +620,8 @@ else(HAS_BIN_CACHE)
         # We have to disable some of the warnings in the generated code
         if(MSVC)
             target_compile_options(provizio_dds_python_types PRIVATE /W0 /bigobj)
+            # Prevent SWIG from auto-linking python3XX_d.lib in Debug builds
+            target_compile_definitions(provizio_dds_python_types PRIVATE SWIG_PYTHON_INTERPRETER_NO_DEBUG)
         else()
             target_compile_options(provizio_dds_python_types PRIVATE -Wno-delete-non-virtual-dtor -Wno-unused-parameter -Wno-missing-field-initializers -Wno-deprecated-declarations -Wno-error)
         endif()
