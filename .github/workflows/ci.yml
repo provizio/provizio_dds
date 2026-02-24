@@ -29,9 +29,33 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   
+  build-cache-windows:
+    name: Build bin cache for build speed-up (Windows)
+    runs-on: windows-latest
+    strategy:
+        matrix:
+            build_type: [Release]
+        fail-fast: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build cache
+        run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}"
+      - name: Get cache artifact name
+        id: cache_name
+        run: |
+          $name = .\bin_cache_config_name.ps1 -BuildType "${{matrix.build_type}}"
+          echo "cache_artifact_name=$name" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{env.cache_artifact_name}}
+          path: cache/${{env.cache_artifact_name}}.zip
+          if-no-files-found: error
+          retention-days: 1
+
   commit-cache:
     name: Commit bin cache
-    needs: build-cache
+    needs: [build-cache, build-cache-windows]
     runs-on: ubuntu-latest
     outputs:
       cache_commit_sha: ${{steps.cache_commit_sha.outputs.cache_commit_sha}}
@@ -213,9 +237,12 @@ jobs:
 
   test-windows-pip-package:
     name: Test pip package (Windows)
+    needs: commit-cache
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Install SWIG
         run: choco install swig -y

@@ -71,7 +71,7 @@ project(provizio_dds VERSION ${PROVIZIO_DDS_VERSION})
 set(HAS_BIN_CACHE FALSE)
 
 if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BIN_CACHE}" STREQUAL "FALSE"))
-    if(UNIX AND NOT APPLE) # Currently, Linux only
+    if(UNIX AND NOT APPLE) # Linux
         execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/bin_cache_config_name.sh" "${CMAKE_BUILD_TYPE}" "${PROVIZIO_DDS_IDLS_VERSION}" OUTPUT_VARIABLE BIN_CACHE_CONFIG_NAME)
         string(STRIP "${BIN_CACHE_CONFIG_NAME}" BIN_CACHE_CONFIG_NAME)
         set(BIN_CACHE_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cache/${BIN_CACHE_CONFIG_NAME}.zip")
@@ -101,6 +101,37 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                 message(STATUS "Prebuilt binaries located, but won't be used as they were built in a newer Linux kernel")
             endif("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
         endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
+    elseif(WIN32)
+        # Find PowerShell
+        find_program(POWERSHELL_EXECUTABLE NAMES pwsh powershell)
+        if(POWERSHELL_EXECUTABLE)
+            execute_process(
+                COMMAND "${POWERSHELL_EXECUTABLE}" -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/bin_cache_config_name.ps1" "${CMAKE_BUILD_TYPE}" "${PROVIZIO_DDS_IDLS_VERSION}"
+                OUTPUT_VARIABLE BIN_CACHE_CONFIG_NAME
+                RESULT_VARIABLE BIN_CACHE_CONFIG_RESULT
+            )
+            string(STRIP "${BIN_CACHE_CONFIG_NAME}" BIN_CACHE_CONFIG_NAME)
+
+            if(BIN_CACHE_CONFIG_RESULT EQUAL 0 AND NOT BIN_CACHE_CONFIG_NAME STREQUAL "")
+                set(BIN_CACHE_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cache/${BIN_CACHE_CONFIG_NAME}.zip")
+                set(BIN_CACHE_PARENT_PATH "${CMAKE_CURRENT_BINARY_DIR}/cache")
+                set(BIN_CACHE_PATH "${BIN_CACHE_PARENT_PATH}/${BIN_CACHE_CONFIG_NAME}")
+                set(CACHED_PROVIZIO_DDS_DLL "${BIN_CACHE_PATH}/bin/provizio_dds.dll")
+                set(CACHED_PROVIZIO_DDS_LIB "${BIN_CACHE_PATH}/lib/provizio_dds.lib")
+                set(CACHED_PROVIZIO_DDS_TYPES_DLL "${BIN_CACHE_PATH}/bin/provizio_dds_types.dll")
+                set(CACHED_PROVIZIO_DDS_TYPES_LIB "${BIN_CACHE_PATH}/lib/provizio_dds_types.lib")
+
+                if(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
+                    execute_process(
+                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force"
+                    )
+                endif(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
+
+                if(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}")
+                    set(HAS_BIN_CACHE TRUE)
+                endif(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}")
+            endif(BIN_CACHE_CONFIG_RESULT EQUAL 0 AND NOT BIN_CACHE_CONFIG_NAME STREQUAL "")
+        endif(POWERSHELL_EXECUTABLE)
     endif(UNIX AND NOT APPLE)
 endif(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BIN_CACHE}" STREQUAL "FALSE"))
 
@@ -158,33 +189,55 @@ if(HAS_BIN_CACHE)
     message(STATUS "Prebuilt binaries are located and will be used...")
 
     add_library(provizio_dds SHARED IMPORTED)
-    set_target_properties(provizio_dds PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "${BIN_CACHE_PATH}/include"
-        IMPORTED_CONFIGURATIONS "RELEASE;DEBUG"
-        IMPORTED_LOCATION "${CACHED_PROVIZIO_DDS_SO}"
-        MAP_IMPORTED_CONFIG_RELWITHDEBINFO ${CMAKE_BUILD_TYPE}
-        MAP_IMPORTED_CONFIG_MINSIZEREL ${CMAKE_BUILD_TYPE}
-    )
-
     add_library(provizio_dds_types SHARED IMPORTED)
-    set_target_properties(provizio_dds_types PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "${BIN_CACHE_PATH}/include"
-        IMPORTED_CONFIGURATIONS "RELEASE;DEBUG"
-        IMPORTED_LOCATION "${CACHED_PROVIZIO_DDS_TYPES_SO}"
-        MAP_IMPORTED_CONFIG_RELWITHDEBINFO ${CMAKE_BUILD_TYPE}
-        MAP_IMPORTED_CONFIG_MINSIZEREL ${CMAKE_BUILD_TYPE}
-    )
+
+    if(WIN32)
+        set_target_properties(provizio_dds PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${BIN_CACHE_PATH}/include"
+            IMPORTED_CONFIGURATIONS "RELEASE;DEBUG"
+            IMPORTED_IMPLIB "${CACHED_PROVIZIO_DDS_LIB}"
+            IMPORTED_LOCATION "${CACHED_PROVIZIO_DDS_DLL}"
+            MAP_IMPORTED_CONFIG_RELWITHDEBINFO ${CMAKE_BUILD_TYPE}
+            MAP_IMPORTED_CONFIG_MINSIZEREL ${CMAKE_BUILD_TYPE}
+        )
+        set_target_properties(provizio_dds_types PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${BIN_CACHE_PATH}/include"
+            IMPORTED_CONFIGURATIONS "RELEASE;DEBUG"
+            IMPORTED_IMPLIB "${CACHED_PROVIZIO_DDS_TYPES_LIB}"
+            IMPORTED_LOCATION "${CACHED_PROVIZIO_DDS_TYPES_DLL}"
+            MAP_IMPORTED_CONFIG_RELWITHDEBINFO ${CMAKE_BUILD_TYPE}
+            MAP_IMPORTED_CONFIG_MINSIZEREL ${CMAKE_BUILD_TYPE}
+        )
+    else(WIN32)
+        set_target_properties(provizio_dds PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${BIN_CACHE_PATH}/include"
+            IMPORTED_CONFIGURATIONS "RELEASE;DEBUG"
+            IMPORTED_LOCATION "${CACHED_PROVIZIO_DDS_SO}"
+            MAP_IMPORTED_CONFIG_RELWITHDEBINFO ${CMAKE_BUILD_TYPE}
+            MAP_IMPORTED_CONFIG_MINSIZEREL ${CMAKE_BUILD_TYPE}
+        )
+        set_target_properties(provizio_dds_types PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${BIN_CACHE_PATH}/include"
+            IMPORTED_CONFIGURATIONS "RELEASE;DEBUG"
+            IMPORTED_LOCATION "${CACHED_PROVIZIO_DDS_TYPES_SO}"
+            MAP_IMPORTED_CONFIG_RELWITHDEBINFO ${CMAKE_BUILD_TYPE}
+            MAP_IMPORTED_CONFIG_MINSIZEREL ${CMAKE_BUILD_TYPE}
+        )
+    endif(WIN32)
 
     install(DIRECTORY "${BIN_CACHE_PATH}/include/" DESTINATION include)
 
-    if(DONT_INSTALL_STDCPP_LIBS)
+    if(WIN32)
+        install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib)
+        install(DIRECTORY "${BIN_CACHE_PATH}/bin/" DESTINATION bin)
+    elseif(DONT_INSTALL_STDCPP_LIBS)
         install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
             PATTERN "libstdc++.so*" EXCLUDE
             PATTERN "libgcc_s.so*" EXCLUDE
         )
-    else(DONT_INSTALL_STDCPP_LIBS)
+    else()
         install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib)
-    endif(DONT_INSTALL_STDCPP_LIBS)
+    endif()
 
     if(PYTHON_BINDINGS)
         # Output the version to the version file, to be used by setup.py
@@ -389,6 +442,9 @@ else(HAS_BIN_CACHE)
     if(FAST_DDS_INSTALL_DIR)
         install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/include/" DESTINATION include)
         install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib)
+        if(WIN32)
+            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/bin/" DESTINATION bin)
+        endif(WIN32)
     endif(FAST_DDS_INSTALL_DIR)
 
     # Python
