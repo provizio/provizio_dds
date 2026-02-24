@@ -338,6 +338,26 @@ else(HAS_BIN_CACHE)
         if(NOT OPENSSL_FOUND)
             list(APPEND FAST_DDS_CMAKE_ARGS "-DSECURITY=OFF")
         endif(NOT OPENSSL_FOUND)
+        # Declare library byproducts so the Ninja generator knows which build
+        # rule produces them (required for imported-target file-level deps).
+        if(WIN32)
+            string(REGEX REPLACE "^v" "" _FD_VER_STRIPPED "${FAST_DDS_VERSION}")
+            string(REGEX MATCH "^[0-9]+\\.[0-9]+" _FD_MAJOR_MINOR "${_FD_VER_STRIPPED}")
+            if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+                set(_FD_DBG_SUFFIX "d")
+            else()
+                set(_FD_DBG_SUFFIX "")
+            endif()
+            set(_FAST_DDS_BYPRODUCTS
+                "${FAST_DDS_INSTALL_DIR}/lib/fastcdr${_FD_DBG_SUFFIX}-${FAST_CDR_VERSION}.lib"
+                "${FAST_DDS_INSTALL_DIR}/lib/fastrtps${_FD_DBG_SUFFIX}-${_FD_MAJOR_MINOR}.lib"
+            )
+        else()
+            set(_FAST_DDS_BYPRODUCTS
+                "${FAST_DDS_INSTALL_DIR}/lib/libfastcdr${CMAKE_SHARED_LIBRARY_SUFFIX}"
+                "${FAST_DDS_INSTALL_DIR}/lib/libfastrtps${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            )
+        endif()
         ExternalProject_Add(libfast_dds
             GIT_REPOSITORY "https://github.com/${FAST_DDS_GITHUB_PROJECT}.git"
             GIT_TAG "${FAST_DDS_VERSION}"
@@ -346,6 +366,7 @@ else(HAS_BIN_CACHE)
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
             CMAKE_ARGS ${FAST_DDS_CMAKE_ARGS}
+            BUILD_BYPRODUCTS ${_FAST_DDS_BYPRODUCTS}
         )
         link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
