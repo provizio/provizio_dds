@@ -31,7 +31,8 @@ try
     const std::string service_name{"provizio_dds_test_request_response"};
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr std::chrono::seconds time_to_match{5};
-    constexpr std::chrono::milliseconds timeout{10000}; // DDS entity matching can be slow on some platforms (e.g. Windows)
+    constexpr std::chrono::milliseconds timeout{
+        10000}; // DDS entity matching can be slow on some platforms (e.g. Windows)
 
     // These are x and x^2 pairs, except of those with expected values of 0 which means we want to interrupt the
     // requests and make sure all behaves well

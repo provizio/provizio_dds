@@ -85,8 +85,8 @@ try
     const auto received_value = future_response.get().data();
     if (received_value != value)
     {
-        std::cerr << test_log_prefix << timestamp() << "Unexpected response " << received_value << ", expected " << value
-                  << std::endl;
+        std::cerr << test_log_prefix << timestamp() << "Unexpected response " << received_value << ", expected "
+                  << value << std::endl;
         return 1;
     }
 
