@@ -207,9 +207,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Install SWIG
-        if: matrix.with_python == 'ON'
-        run: choco install swig -y
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython "${{matrix.with_python}}"
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DPYTHON_BINDINGS=${{matrix.with_python}} -DENABLE_TESTS=ON -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON
       - name: Build
@@ -225,9 +224,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Install SWIG
-        if: matrix.with_python == 'ON'
-        run: choco install swig -y
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython "${{matrix.with_python}}"
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DPYTHON_BINDINGS=${{matrix.with_python}} -DENABLE_TESTS=ON -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON -DENABLE_ROS_TESTS=OFF
       - name: Build
@@ -244,8 +242,8 @@ jobs:
         with:
           ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Install SWIG
-        run: choco install swig -y
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython ON
       - name: Create venv and install package
         run: |
           python -m venv "$env:TEMP\provizio_dds_test_pip.venv"
