@@ -26,10 +26,6 @@ if ($WithPython -ne "OFF") {
     Write-Host "Installing SWIG..."
     choco install swig -y
     if ($LASTEXITCODE -ne 0) { throw "Failed to install SWIG" }
-
-    Write-Host "Installing setuptools (provides distutils for Python 3.12+)..."
-    python -m pip install setuptools
-    if ($LASTEXITCODE -ne 0) { throw "Failed to install setuptools" }
 }
 
 if ($StaticAnalysis -ne "OFF") {

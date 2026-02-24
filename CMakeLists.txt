@@ -489,6 +489,16 @@ else(HAS_BIN_CACHE)
             GIT_TAG "v${FAST_DDS_PYTHON_VERSION}"
         )
         FetchContent_Populate(fast_dds_python)
+
+        # Patch fast_dds_python to use stdlib sysconfig instead of removed distutils (Python 3.12+)
+        set(FASTDDS_PYTHON_SWIG_CMAKE_FILE "${fast_dds_python_SOURCE_DIR}/fastdds_python/src/swig/CMakeLists.txt")
+        file(READ "${FASTDDS_PYTHON_SWIG_CMAKE_FILE}" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT)
+        string(REGEX REPLACE
+            [=[from distutils import sysconfig; print\(sysconfig\.get_python_lib\(plat_specific=True, prefix='([^']*)' \) \)]=]
+            [=[import sysconfig; print(sysconfig.get_path('platlib', vars={'base': '\1', 'platbase': '\1'}))]=]
+            FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        file(WRITE "${FASTDDS_PYTHON_SWIG_CMAKE_FILE}" "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+
         set(FASTDDS_PYTHON_CMAKE_DIR "${fast_dds_python_SOURCE_DIR}/fastdds_python")
         set(FASTDDS_PYTHON_CMAKE_FILE "${FASTDDS_PYTHON_CMAKE_DIR}/CMakeLists.txt")
         set(FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER "${CMAKE_CURRENT_BINARY_DIR}/FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER.h")
@@ -671,7 +681,7 @@ else(HAS_BIN_CACHE)
             file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${PROVIZIO_DDS_VERSION}")
         else(PYTHON_PACKAGES_INSTALL_DIR)
             # Installation as .py files
-            execute_process(COMMAND ${Python3_EXECUTABLE} -c "from distutils import sysconfig; print(sysconfig.get_python_lib(plat_specific=True, prefix='${CMAKE_INSTALL_PREFIX}' ) )"
+            execute_process(COMMAND ${Python3_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_path('platlib', vars={'base': '${CMAKE_INSTALL_PREFIX}', 'platbase': '${CMAKE_INSTALL_PREFIX}'}))"
                 OUTPUT_VARIABLE _ABS_PYTHON_MODULE_PATH
                 OUTPUT_STRIP_TRAILING_WHITESPACE
             )
