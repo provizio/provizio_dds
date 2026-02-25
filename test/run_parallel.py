@@ -17,22 +17,44 @@
 # Cross-platform replacement for run_multiple.sh
 # Launches all arguments as parallel subprocesses, waits for all, exits non-zero if any fails
 # Also handles ROS environment cleanup (equivalent of unset_ros.sh)
+#
+# Per-command ROS environment:
+#   By default, ROS environment variables are cleaned to avoid conflicts with
+#   provizio_dds's bundled Fast-DDS. Commands that need the full ROS environment
+#   (e.g. ros2 CLI, ROS Python nodes) should be prefixed with "--ros:" so they
+#   inherit the original ROS-sourced environment.
 
 import os
 import sys
 import subprocess
 
-# Unset ROS environment variables to avoid interference (cross-platform equivalent of unset_ros.sh)
+ROS_CMD_PREFIX = "--ros:"
+
+# Save the original environment before any modifications
+original_env = os.environ.copy()
+
+# Build a clean environment with ROS entries removed (avoids conflicts with
+# ROS-bundled Fast-DDS, which is non-backwards-compatible with provizio_dds's version)
 ament = os.environ.get("AMENT_PREFIX_PATH", "")
 if ament:
+    clean_env = os.environ.copy()
     for var in ("PYTHONPATH", "LD_LIBRARY_PATH", "PATH"):
-        val = os.environ.get(var, "")
+        val = clean_env.get(var, "")
         if val:
-            os.environ[var] = os.pathsep.join(
+            clean_env[var] = os.pathsep.join(
                 p for p in val.split(os.pathsep) if not p.startswith(ament)
             )
-    os.environ.pop("AMENT_PREFIX_PATH", None)
+    clean_env.pop("AMENT_PREFIX_PATH", None)
+else:
+    clean_env = original_env
 
-procs = [subprocess.Popen(cmd, shell=True) for cmd in sys.argv[1:]]
+# Launch each command with the appropriate environment
+procs = []
+for cmd in sys.argv[1:]:
+    if cmd.startswith(ROS_CMD_PREFIX):
+        procs.append(subprocess.Popen(cmd[len(ROS_CMD_PREFIX):], shell=True, env=original_env))
+    else:
+        procs.append(subprocess.Popen(cmd, shell=True, env=clean_env))
+
 codes = [p.wait() for p in procs]
 sys.exit(0 if all(c == 0 for c in codes) else 1)

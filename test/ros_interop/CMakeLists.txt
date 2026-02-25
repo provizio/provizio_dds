@@ -32,21 +32,23 @@ if(ENABLE_ROS_TESTS)
         message(WARNING "ENABLE_ROS_TESTS is ON, but ROS tests don't support Windows at the moment, so ROS-interoperability tests will be excluded")
     else(WIN32)
         message(STATUS "Including ROS-interoperability tests as ENABLE_ROS_TESTS is ON")
-        
+
         add_subdirectory(ros_interop_subscriber)
         add_subdirectory(ros_interop_publisher)
         add_subdirectory(ros_interop_service)
         add_subdirectory(ros_interop_request)
 
+        # provizio_dds binaries run with ROS env cleaned (default), while
+        # ROS commands use the "--ros:" prefix to keep the full ROS environment.
         add_test(NAME ros_interop_subscriber COMMAND
             "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
             "$<TARGET_FILE:ros_interop_subscriber>"
-            "timeout 8 ros2 run demo_nodes_cpp talker || true"
+            "--ros:timeout 8 ros2 run demo_nodes_cpp talker || true"
         )
         add_test(NAME ros_interop_publisher COMMAND
             "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
             "$<TARGET_FILE:ros_interop_publisher>"
-            "python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_publisher/ros_subscriber.py"
+            "--ros:python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_publisher/ros_subscriber.py"
         )
 
         # Request/Response are only compatible with ROS2 Jazzy+
@@ -62,11 +64,11 @@ if(ENABLE_ROS_TESTS)
             add_test(NAME ros_interop_service COMMAND
                 "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
                 "$<TARGET_FILE:ros_interop_service>"
-                "python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_service/ros_interop_client.py"
+                "--ros:python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_service/ros_interop_client.py"
             )
             add_test(NAME ros_interop_request COMMAND
                 "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-                "python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_request/ros_interop_service.py"
+                "--ros:python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_request/ros_interop_service.py"
                 "$<TARGET_FILE:ros_interop_request>"
             )
         else(RMW_FASTRPS_VERSION_RETURN_CODE EQUAL 0 AND RMW_FASTRPS_VERSION VERSION_GREATER_EQUAL "8.4.0")
