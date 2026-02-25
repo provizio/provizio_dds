@@ -143,11 +143,11 @@ else:
             raise CMakeBuildError()
 
 # Read README.md text
-with open(source_dir + "/README.md", "r") as readme_file:
+with open(source_dir + "/README.md", "r", encoding="utf-8") as readme_file:
     readme = readme_file.read()
 
 # Read Version
-with open(build_dir + "/version.txt", "r") as version_file:
+with open(build_dir + "/version.txt", "r", encoding="utf-8") as version_file:
     version = version_file.read().rstrip()
 
 setup(
