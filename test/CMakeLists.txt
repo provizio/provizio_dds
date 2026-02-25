@@ -16,9 +16,13 @@
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
 
-# On Windows, test executables need DLL directories in PATH
+# On Windows, test executables need DLL directories in PATH.
+# The ENVIRONMENT test property is a CMake list (semicolon-separated), so bare
+# semicolons inside the PATH value would be misinterpreted as list separators.
+# We must escape every semicolon in the system PATH before embedding it.
 if(WIN32)
-    set(PROVIZIO_DDS_TEST_PATH "$<TARGET_FILE_DIR:provizio_dds>\;$<TARGET_FILE_DIR:provizio_dds_types>\;${FAST_DDS_INSTALL_DIR}/bin\;${FAST_DDS_INSTALL_DIR}/lib\;$ENV{PATH}")
+    string(REPLACE ";" "\\;" _SYSTEM_PATH_ESCAPED "$ENV{PATH}")
+    set(PROVIZIO_DDS_TEST_PATH "$<TARGET_FILE_DIR:provizio_dds>\;$<TARGET_FILE_DIR:provizio_dds_types>\;${FAST_DDS_INSTALL_DIR}/bin\;${FAST_DDS_INSTALL_DIR}/lib\;${_SYSTEM_PATH_ESCAPED}")
 endif(WIN32)
 
 add_subdirectory(simplest_pub_sub)
