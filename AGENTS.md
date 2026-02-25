@@ -124,6 +124,10 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
 | `STATIC_ANALYSIS` | OFF | Enable clang-tidy static analysis |
 | `INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS` | OFF | Linux: use versioned .so names to avoid runtime conflicts |
 
+## Git Workflow
+
+- **Binary cache push conflicts**: When pushing to a feature branch and the push is rejected because the remote has newer binary cache commits (from CI `commit-cache` jobs), **force-push** (`git push --force`). The cache contains prebuilt binaries for unreleased code and has no value worth preserving — it will be rebuilt by CI on the next run.
+
 ## Conventions
 
 - License: Apache 2.0 header required on all source files.
