@@ -569,10 +569,6 @@ else(HAS_BIN_CACHE)
             add_definitions(-DSWIG_PYTHON_INTERPRETER_NO_DEBUG)
         endif()
 
-        # Suppress fastdds_python's own install rules — we install its outputs manually
-        macro(install)
-        endmacro()
-
         add_subdirectory(src/swig)
         "
         )
@@ -745,6 +741,7 @@ else(HAS_BIN_CACHE)
         )
         install(TARGETS provizio_dds_types
             LIBRARY DESTINATION "${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS_DIR}"
+            RUNTIME DESTINATION "${PROVIZIO_DDS_PYTHON_TYPES_PYTHON_LIBS_DIR}"
         )
         install(FILES
             ${PROVIZIO_DDS_PYTHON_LIBS}
@@ -762,7 +759,18 @@ else(HAS_BIN_CACHE)
             # Local build of Fast-DDS, have to be included with the package then
             install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
                 PATTERN "cmake" EXCLUDE)
+            if(WIN32)
+                # On Windows, runtime DLLs are in bin/, not lib/
+                install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/bin/" DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
+                    FILES_MATCHING PATTERN "*.dll")
+            endif(WIN32)
         endif(FAST_DDS_INSTALL_DIR)
+
+        # provizio_dds DLL is needed by the Python extension modules at runtime
+        install(TARGETS provizio_dds
+            LIBRARY DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
+            RUNTIME DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
+        )
 
         if("${CMAKE_SHARED_LIBRARY_SUFFIX}" STREQUAL ".dylib")
             # Python expects .so and .so only in import
@@ -781,6 +789,10 @@ else(HAS_BIN_CACHE)
         # Linux: link fastdds libraries by the fully-qualified name (.so.major.minor.patch) as they're incompatible between different .patch versions
         install(CODE "execute_process(COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/fully_qualified_fastdds_libs.sh\" \"${CMAKE_INSTALL_PREFIX}/lib\")")
     endif(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS AND NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
+
+    # Remove cmake config dirs installed by third-party targets (e.g. fastdds_python).
+    # These are not needed at runtime and should not be included in packages or caches.
+    install(CODE "file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake\")")
 
     if(ENABLE_TESTS)
         message(STATUS "ENABLE_TESTS is ON: tests will be built and enabled.")
