@@ -47,6 +47,8 @@ try {
         if (-not $idlsCommitHash) {
             throw "Failed to resolve IDLS commit hash for version $ProvizioIdlsVersion"
         }
+        # Truncate to 12 chars — keeps paths under MAX_PATH while remaining unique
+        $idlsCommitHash = $idlsCommitHash.Substring(0, 12)
 
         # sha256 hash of all non-ignored files in this repo except "media" and "cache" directories
         $files = git ls-files | Where-Object { $_ -notmatch '(^|\/)media(\/)' -and $_ -notmatch '(^|\/)cache(\/)' }
@@ -60,7 +62,8 @@ try {
         }
         $stream.Position = 0
         $hashBytes = $sha256.ComputeHash($stream)
-        $contentsHash = -join ($hashBytes | ForEach-Object { $_.ToString("x2") })
+        # Truncate to 16 chars — keeps paths under MAX_PATH while remaining unique
+        $contentsHash = (-join ($hashBytes | ForEach-Object { $_.ToString("x2") })).Substring(0, 16)
         $stream.Dispose()
         $sha256.Dispose()
     }
