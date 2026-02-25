@@ -75,8 +75,6 @@ else
 
     # Delete extra copy of python-specific libs produced by Fast-DDS Python wrapper (as it's already included in dedicated Python subfolder)
     rm -rf "${TARGET_PATH}"/lib/python*
-    # Delete extra cmake files
-    rm -rf "${TARGET_PATH}/lib/cmake"
 
     # Collect all the dependencies as well
     collect_libs() {

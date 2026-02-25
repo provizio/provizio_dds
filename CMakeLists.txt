@@ -462,9 +462,13 @@ else(HAS_BIN_CACHE)
 
     if(FAST_DDS_INSTALL_DIR)
         install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/include/" DESTINATION include)
-        install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib)
+        # Install only library files — exclude cmake configs, scripts, and executables
         if(WIN32)
-            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/bin/" DESTINATION bin)
+            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib FILES_MATCHING PATTERN "*.lib")
+            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/bin/" DESTINATION bin FILES_MATCHING PATTERN "*.dll")
+        else()
+            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib
+                FILES_MATCHING PATTERN "*.so*" PATTERN "*.dylib*")
         endif(WIN32)
     endif(FAST_DDS_INSTALL_DIR)
 

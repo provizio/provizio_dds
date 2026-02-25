@@ -80,20 +80,6 @@ try {
             Pop-Location
         }
 
-        # Delete extra cmake files
-        $cmakeDir = Join-Path $targetPath "lib\cmake"
-        if (Test-Path $cmakeDir) {
-            Remove-Item -Recurse -Force $cmakeDir
-        }
-
-        # Copy Fast-DDS DLLs from the build tree to cache bin/
-        $fastDdsBinDir = Join-Path $buildDir "fast_dds_build\install\bin"
-        if (Test-Path $fastDdsBinDir) {
-            $cacheBinDir = Join-Path $targetPath "bin"
-            New-Item -ItemType Directory -Path $cacheBinDir -Force | Out-Null
-            Copy-Item -Path (Join-Path $fastDdsBinDir "*.dll") -Destination $cacheBinDir -Force
-        }
-
         # Zip it
         Compress-Archive -Path $targetPath -DestinationPath $zipFile -Force
         Remove-Item -Recurse -Force $targetPath
