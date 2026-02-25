@@ -27,9 +27,16 @@ import time
 from queue import Queue
 
 # On Windows, Python 3.8+ restricts DLL search paths (https://bugs.python.org/issue46276).
-# Add the directory containing this module so dependent DLLs can be found.
+# Add the directory containing this module and all PATH entries so dependent DLLs
+# (provizio_dds, Fast-DDS, OpenSSL, etc.) can be found.
 if os.name == "nt":
     os.add_dll_directory(os.path.dirname(os.path.abspath(__file__)))
+    for _p in os.environ.get("PATH", "").split(os.pathsep):
+        if _p and os.path.isdir(_p):
+            try:
+                os.add_dll_directory(_p)
+            except OSError:
+                pass
 
 from provizio_dds_python_types import *
 from fastdds import *

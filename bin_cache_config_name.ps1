@@ -55,8 +55,11 @@ try {
         $sha256 = [System.Security.Cryptography.SHA256]::Create()
         $stream = New-Object System.IO.MemoryStream
         foreach ($file in $files) {
-            if (Test-Path $file) {
-                $bytes = [System.IO.File]::ReadAllBytes($file)
+            # Resolve to absolute path — Push-Location changes the PS location
+            # but not the .NET process CWD, so ReadAllBytes needs a full path.
+            $fullPath = Join-Path (Get-Location) $file
+            if (Test-Path $fullPath) {
+                $bytes = [System.IO.File]::ReadAllBytes($fullPath)
                 $stream.Write($bytes, 0, $bytes.Length)
             }
         }
