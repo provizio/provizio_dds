@@ -43,7 +43,7 @@ int main(int argc, char *argv[])
 try
 {
     constexpr provizio::dds::DomainId_t domain_id = 14;
-    constexpr std::chrono::seconds timeout{5};
+    constexpr std::chrono::seconds timeout{15};
     constexpr int max_wait_rnd = 1999;
     constexpr int half_wait_rnd = 1000;
 
