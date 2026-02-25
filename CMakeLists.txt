@@ -531,6 +531,12 @@ else(HAS_BIN_CACHE)
             [=[from distutils import sysconfig; print\(sysconfig\.get_python_lib\(plat_specific=True, prefix='([^']*)' \) \)]=]
             [=[import sysconfig; print(sysconfig.get_path('platlib', vars={'base': '\1', 'platbase': '\1'}))]=]
             FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        # Remove cmake config/export install rules from fastdds_python (not needed at runtime)
+        string(REGEX REPLACE "install[^\n]*EXPORT[^\n]*\n" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        string(REGEX REPLACE "configure_package_config_file[^)]*\\)" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        string(REGEX REPLACE "write_basic_package_version_file[^)]*\\)" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        string(REGEX REPLACE "install[^\n]*cmake/[^\n]*\n" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        string(REGEX REPLACE "export[^\n]*TARGETS[^\n]*\n" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
         file(WRITE "${FASTDDS_PYTHON_SWIG_CMAKE_FILE}" "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
 
         set(FASTDDS_PYTHON_CMAKE_DIR "${fast_dds_python_SOURCE_DIR}/fastdds_python")

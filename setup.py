@@ -17,8 +17,6 @@ import os
 import os.path
 import re
 import shutil
-import subprocess
-import zipfile
 from sys import platform
 
 
@@ -101,36 +99,6 @@ else:
                 print(f"Bin cache located but built using newer Linux kernel")
                 shutil.rmtree(f"{build_dir}/{bin_cache_config_name}")
                 needs_building = True
-
-    elif platform == "win32" and cmake_arguments == "":
-        ps1_script = os.path.join(source_dir, "bin_cache_config_name.ps1")
-        ps_exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-        result = subprocess.run(
-            [ps_exe, "-ExecutionPolicy", "Bypass", "-File", ps1_script],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            bin_cache_config_name = result.stdout.strip()
-            cache_zip = os.path.join(source_dir, "cache", bin_cache_config_name + ".zip")
-            if os.path.isfile(cache_zip):
-                with zipfile.ZipFile(cache_zip, "r") as zf:
-                    zf.extractall(build_dir)
-
-                cache_python_dir = os.path.join(build_dir, bin_cache_config_name, "python")
-                if os.path.isdir(cache_python_dir):
-                    if os.path.exists(target_dir):
-                        shutil.rmtree(target_dir)
-                    shutil.move(cache_python_dir, target_dir)
-                    version_src = os.path.join(target_dir, "version.txt")
-                    if os.path.isfile(version_src):
-                        shutil.copy(version_src, os.path.join(build_dir, "version.txt"))
-                    print(f"Bin cache located and will be used: {bin_cache_config_name}")
-                    needs_building = False
-
-                # Clean up extracted cache directory
-                cache_extracted = os.path.join(build_dir, bin_cache_config_name)
-                if os.path.isdir(cache_extracted):
-                    shutil.rmtree(cache_extracted)
 
     if needs_building:
         print("Building C++ libraries from source...", flush=True)

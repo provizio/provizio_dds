@@ -36,15 +36,11 @@ jobs:
         matrix:
             build_type: [Release]
         fail-fast: true
-    env:
-      WITH_PYTHON: ON
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Install dependencies
-        run: .\install_dependencies.ps1 -WithPython "${{env.WITH_PYTHON}}"
       - name: Build cache
-        run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}" "${{env.WITH_PYTHON}}"
+        run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}"
       - name: Get cache artifact name
         id: cache_name
         run: |

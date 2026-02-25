@@ -54,7 +54,9 @@ int main(int argc, char *argv[])
     const std::string test_name_postfix = argv[1]; // NOLINT: OK in a unit test
     auto expected_value = std::atoi(argv[2]);      // NOLINT: OK in a unit test
     auto num_iterations = std::atoi(argv[3]);      // NOLINT: OK in a unit test
-    const std::chrono::seconds wait_timeout{num_iterations * 3 + 15};
+    // DDS participant discovery over UDP multicast can be slow on Windows, especially on shared/virtualized CI
+    // runners after many rapid participant create/destroy cycles (OS socket cleanup and UDP port reuse delays)
+    const std::chrono::seconds wait_timeout{num_iterations * 3 + 30};
 
     const std::string log_prefix = "request_response_reliability_service" + test_name_postfix + ": ";
     const std::string service_name{"provizio_dds_test_request_response_reliability" + test_name_postfix};
