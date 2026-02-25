@@ -116,10 +116,12 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                 set(BIN_CACHE_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cache/${BIN_CACHE_CONFIG_NAME}.zip")
                 set(BIN_CACHE_PARENT_PATH "${CMAKE_CURRENT_BINARY_DIR}/cache")
                 set(BIN_CACHE_PATH "${BIN_CACHE_PARENT_PATH}/${BIN_CACHE_CONFIG_NAME}")
+                set(PYTHON_CACHE_PATH "${BIN_CACHE_PATH}/python")
                 set(CACHED_PROVIZIO_DDS_DLL "${BIN_CACHE_PATH}/bin/provizio_dds.dll")
                 set(CACHED_PROVIZIO_DDS_LIB "${BIN_CACHE_PATH}/lib/provizio_dds.lib")
                 set(CACHED_PROVIZIO_DDS_TYPES_DLL "${BIN_CACHE_PATH}/bin/provizio_dds_types.dll")
                 set(CACHED_PROVIZIO_DDS_TYPES_LIB "${BIN_CACHE_PATH}/lib/provizio_dds_types.lib")
+                set(CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD "${PYTHON_CACHE_PATH}/provizio_dds_python_types/_provizio_dds_python_types.pyd")
 
                 if(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
                     execute_process(
@@ -127,9 +129,9 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                     )
                 endif(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
 
-                if(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}")
+                if(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
                     set(HAS_BIN_CACHE TRUE)
-                endif(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}")
+                endif(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
             endif(BIN_CACHE_CONFIG_RESULT EQUAL 0 AND NOT BIN_CACHE_CONFIG_NAME STREQUAL "")
         endif(POWERSHELL_EXECUTABLE)
     endif(UNIX AND NOT APPLE)
@@ -462,13 +464,17 @@ else(HAS_BIN_CACHE)
 
     if(FAST_DDS_INSTALL_DIR)
         install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/include/" DESTINATION include)
-        # Install only library files — exclude cmake configs, scripts, and executables
+        # Install only library files — exclude cmake configs, scripts, and executables.
+        # PATTERN "cmake" EXCLUDE prevents empty lib/cmake/ directories from being created
+        # (FILES_MATCHING alone still creates the directory structure).
         if(WIN32)
-            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib FILES_MATCHING PATTERN "*.lib")
-            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/bin/" DESTINATION bin FILES_MATCHING PATTERN "*.dll")
+            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib
+                FILES_MATCHING PATTERN "*.lib" PATTERN "cmake" EXCLUDE)
+            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/bin/" DESTINATION bin
+                FILES_MATCHING PATTERN "*.dll")
         else()
             install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib
-                FILES_MATCHING PATTERN "*.so*" PATTERN "*.dylib*")
+                FILES_MATCHING PATTERN "*.so*" PATTERN "*.dylib*" PATTERN "cmake" EXCLUDE)
         endif(WIN32)
     endif(FAST_DDS_INSTALL_DIR)
 

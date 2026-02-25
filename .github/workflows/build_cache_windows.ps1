@@ -13,10 +13,11 @@
 # limitations under the License.
 
 # Use as:
-# build_cache_windows.ps1 [BUILD_TYPE=Release]
+# build_cache_windows.ps1 [BUILD_TYPE=Release] [PYTHON=ON|OFF]
 
 param(
-    [string]$BuildType = "Release"
+    [string]$BuildType = "Release",
+    [string]$Python = "ON"
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,8 +29,10 @@ try {
     $binCacheConfigName = & .\bin_cache_config_name.ps1 -BuildType $BuildType
     $binCachePath = Resolve-Path ".\cache"
     $targetPath = Join-Path $binCachePath $binCacheConfigName
+    $pythonTargetPath = Join-Path $targetPath "python"
 
     $provizioCheckFile = Join-Path $targetPath "lib\provizio_dds.lib"
+    $cachedPythonTypesPyd = Join-Path $pythonTargetPath "provizio_dds_python_types\_provizio_dds_python_types.pyd"
 
     # Check if it's already built
     $alreadyBuilt = $false
@@ -39,6 +42,9 @@ try {
         Expand-Archive -Path $zipFile -DestinationPath $binCachePath -Force
 
         if (-not (Test-Path $provizioCheckFile)) {
+            $alreadyBuilt = $false
+        }
+        if ($Python -eq "ON" -and -not (Test-Path $cachedPythonTypesPyd)) {
             $alreadyBuilt = $false
         }
 
@@ -68,6 +74,8 @@ try {
                 "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON" `
                 "-DENABLE_TESTS=OFF" `
                 "-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=OFF" `
+                "-DPYTHON_BINDINGS=$Python" `
+                "-DPYTHON_PACKAGES_INSTALL_DIR=$pythonTargetPath" `
                 "-DCMAKE_INSTALL_PREFIX=$targetPath"
             if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 
@@ -79,6 +87,11 @@ try {
         } finally {
             Pop-Location
         }
+
+        # Delete extra copy of python-specific libs produced by Fast-DDS Python wrapper
+        # (already included in the dedicated python subfolder)
+        Get-ChildItem -Path (Join-Path $targetPath "lib") -Filter "python*" -Directory -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
         # Zip it
         Compress-Archive -Path $targetPath -DestinationPath $zipFile -Force
