@@ -230,15 +230,18 @@ if(HAS_BIN_CACHE)
     install(DIRECTORY "${BIN_CACHE_PATH}/include/" DESTINATION include)
 
     if(WIN32)
-        install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib)
+        install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
+            PATTERN "cmake" EXCLUDE)
         install(DIRECTORY "${BIN_CACHE_PATH}/bin/" DESTINATION bin)
     elseif(DONT_INSTALL_STDCPP_LIBS)
         install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
             PATTERN "libstdc++.so*" EXCLUDE
             PATTERN "libgcc_s.so*" EXCLUDE
+            PATTERN "cmake" EXCLUDE
         )
     else()
-        install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib)
+        install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
+            PATTERN "cmake" EXCLUDE)
     endif()
 
     if(PYTHON_BINDINGS)
@@ -566,6 +569,10 @@ else(HAS_BIN_CACHE)
             add_definitions(-DSWIG_PYTHON_INTERPRETER_NO_DEBUG)
         endif()
 
+        # Suppress fastdds_python's own install rules — we install its outputs manually
+        macro(install)
+        endmacro()
+
         add_subdirectory(src/swig)
         "
         )
@@ -753,7 +760,8 @@ else(HAS_BIN_CACHE)
 
         if(FAST_DDS_INSTALL_DIR)
             # Local build of Fast-DDS, have to be included with the package then
-            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}")
+            install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
+                PATTERN "cmake" EXCLUDE)
         endif(FAST_DDS_INSTALL_DIR)
 
         if("${CMAKE_SHARED_LIBRARY_SUFFIX}" STREQUAL ".dylib")
