@@ -276,23 +276,11 @@ else
     # Install Python and related dependencies
     apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev python3-setuptools
 
-    # Install SWIG from source when needed:
-    # - ubuntu 18: apt swig too old
-    # - ubuntu 24: apt swig broken (https://github.com/swig/swig/issues/2794)
-    # - Python 3.14+: requires SWIG 4.4+ (apt on ubuntu 22 only has 4.0.2)
-    NEED_SWIG_SOURCE=false
-    if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_24}" = true ]; then
-      NEED_SWIG_SOURCE=true
-    else
-      python_minor=$(python3 -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo "0")
-      if [ "${python_minor}" -ge 14 ]; then
-        NEED_SWIG_SOURCE=true
-      fi
-    fi
-    if [ "${NEED_SWIG_SOURCE}" = true ]; then
-      echo "Installing SWIG v${SWIG_VERSION} from source..."
-      apt remove -y swig # But first, make sure to delete any version that may already be installed
-      if ! swig -version; then
+    # Install SWIG >= 4.4 from source (apt versions are too old or broken across Ubuntu releases)
+    CURRENT_SWIG_VERSION=$(swig -version 2>/dev/null | grep -oP 'SWIG Version \K[0-9.]+' || echo "0.0.0")
+    if [ "$(printf '%s\n' "4.4.0" "${CURRENT_SWIG_VERSION}" | sort -V | head -n1)" != "4.4.0" ]; then
+      echo "Installing SWIG v${SWIG_VERSION} from source (current: ${CURRENT_SWIG_VERSION})..."
+      apt remove -y swig 2>/dev/null || true
       (
         set -eu
 
@@ -305,10 +293,8 @@ else
         make -j8
         make install
       )
-      fi
     else
-      echo "Installing SWIG from apt..."
-      apt install -y --no-install-recommends swig
+      echo "SWIG ${CURRENT_SWIG_VERSION} already installed, skipping..."
     fi
 
     # Install specific Cython in older versions of Python (see https://github.com/numpy/numpy/issues/24377)
