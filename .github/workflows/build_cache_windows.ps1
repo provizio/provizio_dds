@@ -13,10 +13,11 @@
 # limitations under the License.
 
 # Use as:
-# build_cache_windows.ps1 [BUILD_TYPE=Release]
+# build_cache_windows.ps1 [BUILD_TYPE=Release] [PYTHON=OFF|ON]
 
 param(
-    [string]$BuildType = "Release"
+    [string]$BuildType = "Release",
+    [string]$Python = "OFF"
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,22 +29,63 @@ try {
     $binCacheConfigName = & .\bin_cache_config_name.ps1 -BuildType $BuildType
     $binCachePath = Resolve-Path ".\cache"
     $targetPath = Join-Path $binCachePath $binCacheConfigName
+    $pythonTargetPath = Join-Path $targetPath "python"
+
+    # Detect Python ABI group tag when building with Python.
+    # Python 3.10-3.13 share ABI compatibility (tag "3"), while 3.14+ broke ABI (tag "3_14").
+    $pythonVersionTag = ""
+    if ($Python -eq "ON") {
+        $pythonVersionTag = python -c "import sys; print('3_14' if sys.version_info >= (3, 14) else '3')"
+    }
+
+    $pythonCacheConfigName = ""
+    if ($pythonVersionTag) {
+        $pythonCacheConfigName = & .\bin_cache_config_name.ps1 -BuildType $BuildType -PythonVersionTag $pythonVersionTag
+    }
 
     $provizioCheckFile = Join-Path $targetPath "lib\provizio_dds.lib"
 
     # Check if it's already built
     $alreadyBuilt = $false
     $zipFile = "${targetPath}.zip"
-    if (Test-Path $zipFile) {
-        $alreadyBuilt = $true
-        Expand-Archive -Path $zipFile -DestinationPath $binCachePath -Force
 
-        if (-not (Test-Path $provizioCheckFile)) {
-            $alreadyBuilt = $false
-        }
+    if ($Python -eq "ON") {
+        # When building with Python, both general and python caches must exist
+        $pythonZipFile = Join-Path $binCachePath "${pythonCacheConfigName}.zip"
+        if ((Test-Path $zipFile) -and (Test-Path $pythonZipFile)) {
+            $alreadyBuilt = $true
 
-        if (-not $alreadyBuilt) {
+            # Verify the general cache contains expected files
+            Expand-Archive -Path $zipFile -DestinationPath $binCachePath -Force
+            if (-not (Test-Path $provizioCheckFile)) {
+                $alreadyBuilt = $false
+            }
             Remove-Item -Recurse -Force $targetPath -ErrorAction SilentlyContinue
+
+            # Verify the python cache contains expected files
+            if ($alreadyBuilt) {
+                Expand-Archive -Path $pythonZipFile -DestinationPath $binCachePath -Force
+                $pythonCacheExtracted = Join-Path $binCachePath $pythonCacheConfigName
+                $pythonCheckFile = Join-Path $pythonCacheExtracted "python\provizio_dds_python_types\_provizio_dds_python_types.pyd"
+                if (-not (Test-Path $pythonCheckFile)) {
+                    $alreadyBuilt = $false
+                }
+                Remove-Item -Recurse -Force $pythonCacheExtracted -ErrorAction SilentlyContinue
+            }
+        }
+    } else {
+        # When building without Python, only the general cache must exist
+        if (Test-Path $zipFile) {
+            $alreadyBuilt = $true
+            Expand-Archive -Path $zipFile -DestinationPath $binCachePath -Force
+
+            if (-not (Test-Path $provizioCheckFile)) {
+                $alreadyBuilt = $false
+            }
+
+            if (-not $alreadyBuilt) {
+                Remove-Item -Recurse -Force $targetPath -ErrorAction SilentlyContinue
+            }
         }
     }
 
@@ -52,24 +94,41 @@ try {
     } else {
         Write-Host "Building bin cache for ${binCacheConfigName}..."
 
-        # Delete any obsolete version
+        # Delete any obsolete version (targeted to avoid removing Python caches for
+        # other Python versions that share the same base cache name)
         $wildcardName = & .\bin_cache_config_name.ps1 -BuildType $BuildType -ProvizioIdlsVersion "WILDCARD"
-        Get-ChildItem -Path $binCachePath -Filter "${wildcardName}*" -ErrorAction SilentlyContinue |
+        # Remove only base cache dir and zip, not python-versioned ones
+        Get-ChildItem -Path $binCachePath -Filter $wildcardName -ErrorAction SilentlyContinue |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $binCachePath -Filter "${wildcardName}.zip" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        if ($pythonVersionTag) {
+            $wildcardPythonName = & .\bin_cache_config_name.ps1 -BuildType $BuildType -ProvizioIdlsVersion "WILDCARD" -PythonVersionTag $pythonVersionTag
+            Get-ChildItem -Path $binCachePath -Filter $wildcardPythonName -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -Path $binCachePath -Filter "${wildcardPythonName}.zip" -ErrorAction SilentlyContinue |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+        }
 
         # Build
         $buildDir = "build"
         New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
         Push-Location $buildDir
         try {
-            cmake .. -G Ninja `
-                "-DCMAKE_BUILD_TYPE=$BuildType" `
-                "-DIGNORE_BIN_CACHE=ON" `
-                "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON" `
-                "-DENABLE_TESTS=OFF" `
-                "-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=OFF" `
-                "-DPYTHON_BINDINGS=OFF" `
+            $cmakeArgs = @(
+                "..", "-G", "Ninja",
+                "-DCMAKE_BUILD_TYPE=$BuildType",
+                "-DIGNORE_BIN_CACHE=ON",
+                "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON",
+                "-DENABLE_TESTS=OFF",
+                "-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=OFF",
+                "-DPYTHON_BINDINGS=$Python",
                 "-DCMAKE_INSTALL_PREFIX=$targetPath"
+            )
+            if ($Python -eq "ON") {
+                $cmakeArgs += "-DPYTHON_PACKAGES_INSTALL_DIR=$pythonTargetPath"
+            }
+            cmake @cmakeArgs
             if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 
             cmake --build . -- -j 16
@@ -81,8 +140,27 @@ try {
             Pop-Location
         }
 
-        # Zip it
-        Compress-Archive -Path $targetPath -DestinationPath $zipFile -Force
+        # Delete extra copy of python-specific libs produced by Fast-DDS Python wrapper
+        $pythonLibDirs = Get-ChildItem -Path (Join-Path $targetPath "lib") -Filter "python*" -Directory -ErrorAction SilentlyContinue
+        if ($pythonLibDirs) {
+            $pythonLibDirs | Remove-Item -Recurse -Force
+        }
+
+        if ($Python -eq "ON") {
+            # Create python-versioned cache zip (python/ only)
+            $pythonCacheDir = Join-Path $binCachePath $pythonCacheConfigName
+            New-Item -ItemType Directory -Path $pythonCacheDir -Force | Out-Null
+            Move-Item -Path $pythonTargetPath -Destination (Join-Path $pythonCacheDir "python")
+            $pythonZipDest = Join-Path $binCachePath "${pythonCacheConfigName}.zip"
+            Compress-Archive -Path $pythonCacheDir -DestinationPath $pythonZipDest -Force
+            Remove-Item -Recurse -Force $pythonCacheDir
+        }
+
+        # Create general cache zip (include/, lib/, bin/ — no python/)
+        # Skip if it already exists (e.g., when only rebuilding for a new Python version)
+        if (-not (Test-Path $zipFile)) {
+            Compress-Archive -Path $targetPath -DestinationPath $zipFile -Force
+        }
         Remove-Item -Recurse -Force $targetPath
     }
 } finally {

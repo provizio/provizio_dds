@@ -6,7 +6,7 @@ on:
 
 jobs:
   build-cache:
-    name: Build bin cache for build speed-up
+    name: Build bin cache (C++ only)
     runs-on: ${{matrix.runner}}
     strategy:
         matrix:
@@ -16,7 +16,7 @@ jobs:
     env:
       CC: gcc
       STATIC_ANALYSIS: OFF
-      WITH_PYTHON: ON
+      WITH_PYTHON: OFF
     steps:
       - uses: actions/checkout@v4
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${WITH_PYTHON}" "${STATIC_ANALYSIS}"
@@ -28,9 +28,43 @@ jobs:
           path: cache/${{env.cache_artifact_name}}.zip
           if-no-files-found: error
           retention-days: 1
+
+  build-cache-python:
+    # One cache per ABI group: Python 3.10-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14").
+    # x86_64 only (jetson-18.04 excluded: actions/setup-python doesn't work on self-hosted ARM
+    # runners; jetson pip tests will build from source if no cache matches).
+    name: Build Python bin cache (${{matrix.runner}}, Python ${{matrix.python-version}})
+    runs-on: ${{matrix.runner}}
+    strategy:
+        matrix:
+            runner: [ubuntu-22.04]
+            build_type: [Release]
+            python-version: ['3.12', '3.14']
+        fail-fast: true
+    env:
+      CC: gcc
+      STATIC_ANALYSIS: OFF
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{matrix.python-version}}
+          allow-prereleases: true
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}"
+      - run: .github/workflows/build_cache.sh "${{matrix.build_type}}" "ON" "${STATIC_ANALYSIS}"
+      - name: Get Python cache artifact name
+        run: |
+          PYTHON_ABI_TAG=$(python3 -c 'import sys; print("3_14" if sys.version_info >= (3, 14) else "3")')
+          echo "cache_artifact_name=$(./bin_cache_config_name.sh "${{matrix.build_type}}" "" "${PYTHON_ABI_TAG}")" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{env.cache_artifact_name}}
+          path: cache/${{env.cache_artifact_name}}.zip
+          if-no-files-found: error
+          retention-days: 1
   
   build-cache-windows:
-    name: Build bin cache for build speed-up (Windows)
+    name: Build bin cache (Windows, C++ only)
     runs-on: windows-latest
     strategy:
         matrix:
@@ -42,7 +76,6 @@ jobs:
       - name: Build cache
         run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}"
       - name: Get cache artifact name
-        id: cache_name
         run: |
           $name = .\bin_cache_config_name.ps1 -BuildType "${{matrix.build_type}}"
           echo "cache_artifact_name=$name" >> $env:GITHUB_ENV
@@ -53,9 +86,41 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-cache-windows-python:
+    # One cache per ABI group: Python 3.10-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14").
+    name: Build Python bin cache (Windows, Python ${{matrix.python-version}})
+    runs-on: windows-latest
+    strategy:
+        matrix:
+            build_type: [Release]
+            python-version: ['3.12', '3.14']
+        fail-fast: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{matrix.python-version}}
+          allow-prereleases: true
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython ON
+      - name: Build cache
+        run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}" "ON"
+      - name: Get Python cache artifact name
+        run: |
+          $abiTag = python -c "import sys; print('3_14' if sys.version_info >= (3, 14) else '3')"
+          $name = .\bin_cache_config_name.ps1 -BuildType "${{matrix.build_type}}" -PythonVersionTag $abiTag
+          echo "cache_artifact_name=$name" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{env.cache_artifact_name}}
+          path: cache/${{env.cache_artifact_name}}.zip
+          if-no-files-found: error
+          retention-days: 1
+
   commit-cache:
     name: Commit bin cache
-    needs: [build-cache, build-cache-windows]
+    needs: [build-cache, build-cache-windows, build-cache-python, build-cache-windows-python]
     runs-on: ubuntu-latest
     outputs:
       cache_commit_sha: ${{steps.cache_commit_sha.outputs.cache_commit_sha}}
@@ -160,6 +225,7 @@ jobs:
 
   test-nix-pip-package-python-versions:
     name: Test pip package Python ${{matrix.python-version}} / ${{matrix.cc}} (${{matrix.runner}})
+    needs: commit-cache
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
@@ -172,6 +238,8 @@ jobs:
       STATIC_ANALYSIS: OFF
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{matrix.python-version}}
@@ -301,6 +369,7 @@ jobs:
 
   test-windows-pip-package:
     name: Test pip package Python ${{matrix.python-version}} (Windows)
+    needs: commit-cache
     runs-on: windows-latest
     strategy:
       matrix:
@@ -308,6 +377,8 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{matrix.python-version}}

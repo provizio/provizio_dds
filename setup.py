@@ -67,38 +67,76 @@ else:
     cmake_arguments = os.environ.get("CMAKE_ARGUMENTS", "")
 
     # Check if there is a prebuilt cache for our configuration (unless custom cmake_arguments are required)
+    # Determine Python ABI group tag: 3.10-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
+    import sys as _sys
+    python_abi_tag = "3_14" if _sys.version_info >= (3, 14) else "3"
+
     if platform == "linux" and cmake_arguments == "":
-        bin_cache_config_name = (
-            os.popen(source_dir + "/bin_cache_config_name.sh").read().strip()
+        python_cache_config_name = (
+            os.popen(source_dir + "/bin_cache_config_name.sh '' '' " + python_abi_tag).read().strip()
         )
-        cache_zip = source_dir + "/cache/" + bin_cache_config_name + ".zip"
-        if os.path.isfile(cache_zip):
+        python_cache_zip = source_dir + "/cache/" + python_cache_config_name + ".zip"
+        if os.path.isfile(python_cache_zip):
             if (
                 os.system(
-                    f'unzip -q "{cache_zip}" -d "{build_dir}"'
+                    f'unzip -q "{python_cache_zip}" -d "{build_dir}"'
                 )
                 != 0
             ):
-                raise Exception("Failed to extract bin cache!")
+                raise Exception("Failed to extract Python bin cache!")
 
-            with open(f"{build_dir}/{bin_cache_config_name}/kernel_version", "r") as kernel_version_file:
+            with open(f"{build_dir}/{python_cache_config_name}/kernel_version", "r") as kernel_version_file:
                 cache_kernel_version = kernel_version_file.read().strip()
             host_kernel_version = os.popen("uname -r").read().strip()
 
             if compare_versions(host_kernel_version, cache_kernel_version) >= 0:
                 if (
                     os.system(
-                        f'mv -f "{build_dir}/{bin_cache_config_name}/python" "{target_dir}" && cp -f "{target_dir}/version.txt" "{build_dir}/"'
+                        f'mv -f "{build_dir}/{python_cache_config_name}/python" "{target_dir}" && cp -f "{target_dir}/version.txt" "{build_dir}/"'
                     )
                     != 0
                 ):
-                    raise Exception("Failed to move bin cache!")
-                print(f"Bin cache located and will be used: {bin_cache_config_name}")
+                    raise Exception("Failed to move Python bin cache!")
+                print(f"Bin cache located and will be used: {python_cache_config_name}")
                 needs_building = False
             else:
                 print(f"Bin cache located but built using newer Linux kernel")
-                shutil.rmtree(f"{build_dir}/{bin_cache_config_name}")
+                shutil.rmtree(f"{build_dir}/{python_cache_config_name}")
                 needs_building = True
+
+    elif platform == "win32" and cmake_arguments == "":
+        import subprocess
+        ps_script = os.path.join(source_dir, "bin_cache_config_name.ps1")
+        try:
+            python_cache_config_name = subprocess.check_output(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_script,
+                 "-PythonVersionTag", python_abi_tag],
+                text=True, cwd=source_dir
+            ).strip()
+        except Exception:
+            python_cache_config_name = ""
+
+        if python_cache_config_name:
+            python_cache_zip = os.path.join(source_dir, "cache", python_cache_config_name + ".zip")
+            if os.path.isfile(python_cache_zip):
+                import zipfile
+                with zipfile.ZipFile(python_cache_zip, "r") as zf:
+                    zf.extractall(build_dir)
+
+                extracted_python = os.path.join(build_dir, python_cache_config_name, "python")
+                if os.path.isdir(extracted_python):
+                    if os.path.isdir(target_dir):
+                        shutil.rmtree(target_dir)
+                    shutil.move(extracted_python, target_dir)
+                    # Copy version.txt to build_dir for later use
+                    version_txt = os.path.join(target_dir, "version.txt")
+                    if os.path.isfile(version_txt):
+                        shutil.copy2(version_txt, build_dir)
+                    shutil.rmtree(os.path.join(build_dir, python_cache_config_name), ignore_errors=True)
+                    print(f"Bin cache located and will be used: {python_cache_config_name}")
+                    needs_building = False
+                else:
+                    shutil.rmtree(os.path.join(build_dir, python_cache_config_name), ignore_errors=True)
 
     if needs_building:
         print("Building C++ libraries from source...", flush=True)

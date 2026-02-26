@@ -27,6 +27,9 @@ if(WIN32 AND PROVIZIO_DDS_PYTHON_EXTRA_DLLS)
     endforeach()
 endif()
 add_dependencies(python_tests provizio_dds_python_types)
+if(FAST_DDS_DEPENDENCIES)
+    add_dependencies(python_tests ${FAST_DDS_DEPENDENCIES})
+endif(FAST_DDS_DEPENDENCIES)
 
 add_test(NAME python_pub_python_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"

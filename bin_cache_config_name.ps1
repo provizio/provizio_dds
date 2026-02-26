@@ -13,11 +13,12 @@
 # limitations under the License.
 
 # Use as:
-# bin_cache_config_name.ps1 [<BUILD_TYPE>] [<PROVIZIO_DDS_IDLS_VERSION>/WILDCARD]
+# bin_cache_config_name.ps1 [<BUILD_TYPE>] [<PROVIZIO_DDS_IDLS_VERSION>/WILDCARD] [<PYTHON_VERSION_TAG>]
 
 param(
     [string]$BuildType = "Release",
-    [string]$ProvizioIdlsVersion = ""
+    [string]$ProvizioIdlsVersion = "",
+    [string]$PythonVersionTag = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,7 +72,12 @@ try {
         $sha256.Dispose()
     }
 
-    Write-Output "windows_${cpuArch}.${contentsHash}.idls_${idlsCommitHash}.${BuildType}"
+    $suffix = ""
+    if ($PythonVersionTag) {
+        $suffix = ".python${PythonVersionTag}"
+    }
+
+    Write-Output "windows_${cpuArch}.${contentsHash}.idls_${idlsCommitHash}.${BuildType}${suffix}"
 } finally {
     Pop-Location
 }
