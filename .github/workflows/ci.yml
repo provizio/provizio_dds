@@ -160,7 +160,6 @@ jobs:
 
   test-nix-pip-package-python-versions:
     name: Test pip package Python ${{matrix.python-version}} / ${{matrix.cc}} (${{matrix.runner}})
-    needs: commit-cache
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
@@ -173,8 +172,6 @@ jobs:
       STATIC_ANALYSIS: OFF
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{matrix.python-version}}
@@ -304,7 +301,6 @@ jobs:
 
   test-windows-pip-package:
     name: Test pip package Python ${{matrix.python-version}} (Windows)
-    needs: commit-cache
     runs-on: windows-latest
     strategy:
       matrix:
@@ -312,8 +308,6 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{matrix.python-version}}
