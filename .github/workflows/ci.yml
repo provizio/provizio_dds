@@ -146,7 +146,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-22.04, jetson-20.04, macos-15-intel]
+        runner: [ubuntu-22.04, jetson-20.04]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}
@@ -159,11 +159,12 @@ jobs:
       - run: .github/workflows/test_pip_package.sh
 
   test-nix-pip-package-python-versions:
-    name: Test pip package Python ${{matrix.python-version}}
+    name: Test pip package Python ${{matrix.python-version}} (${{matrix.runner}})
     needs: commit-cache
-    runs-on: ubuntu-latest
+    runs-on: ${{matrix.runner}}
     strategy:
       matrix:
+        runner: [ubuntu-latest, macos-15-intel]
         python-version: ['3.10', '3.12', '3.13', '3.14']
       fail-fast: false
     env:
@@ -301,28 +302,6 @@ jobs:
         run: cd build && ctest --output-on-failure
 
   test-windows-pip-package:
-    name: Test pip package (Windows)
-    needs: commit-cache
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
-      - uses: ilammy/msvc-dev-cmd@v1
-      - name: Install dependencies
-        run: .\install_dependencies.ps1 -WithPython ON
-      - name: Create venv and install package
-        run: |
-          python -m venv "$env:TEMP\provizio_dds_test_pip.venv"
-          . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
-          python -m pip install -v .
-      - name: Test pip package
-        run: |
-          . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
-          python test\run_parallel.py "python test\python\python_publisher.py" "python test\python\python_subscriber.py"
-          python test\python\pointcloud2_test.py
-
-  test-windows-pip-package-python-versions:
     name: Test pip package Python ${{matrix.python-version}} (Windows)
     needs: commit-cache
     runs-on: windows-latest
