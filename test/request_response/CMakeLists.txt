@@ -25,8 +25,8 @@ add_test(NAME request_response COMMAND
 add_test(NAME request_response_reliability COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" "128"
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "$<TARGET_FILE:request_response_reliability_service> \"\" {i} 1"
-    "$<TARGET_FILE:request_response_reliability_client> \"\" {i}"
+    "$<TARGET_FILE:request_response_reliability_service> \"\" {i} 1 {i}"
+    "$<TARGET_FILE:request_response_reliability_client> \"\" {i} {i}"
 )
 set_tests_properties(request_response_reliability PROPERTIES TIMEOUT 1500) # Takes long by design
 

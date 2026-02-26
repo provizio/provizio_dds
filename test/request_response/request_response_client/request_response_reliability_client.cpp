@@ -38,18 +38,15 @@ std::string timestamp()
            "] ";
 }
 
-// Arguments: test_name_postfix value
+// Arguments: test_name_postfix value [domain_id]
 int main(int argc, char *argv[])
 try
 {
-    constexpr provizio::dds::DomainId_t domain_id = 14;
-    // DDS participant discovery over UDP multicast can be slow on Windows, especially on shared/virtualized CI
-    // runners after many rapid participant create/destroy cycles (OS socket cleanup and UDP port reuse delays)
     constexpr std::chrono::seconds timeout{30};
     constexpr int max_wait_rnd = 1999;
     constexpr int half_wait_rnd = 1000;
 
-    if (argc != 3)
+    if (argc < 3 || argc > 4)
     {
         std::cerr << "Wrong number of arguments!" << std::endl;
         return 1;
@@ -57,6 +54,10 @@ try
 
     const std::string test_name_postfix = argv[1]; // NOLINT: OK in a unit test
     auto value = std::atoi(argv[2]);               // NOLINT: OK in a unit test
+    // Use per-iteration domain IDs to avoid DDS multicast discovery state accumulation across rapid
+    // participant create/destroy cycles (root cause of flaky timeouts on Windows CI)
+    const provizio::dds::DomainId_t domain_id =
+        (argc > 3) ? static_cast<provizio::dds::DomainId_t>(std::atoi(argv[3])) : 14; // NOLINT: OK in a unit test
 
     const std::string test_log_prefix = "request_response_reliability_client" + test_name_postfix + ": ";
     const std::string service_name{"provizio_dds_test_request_response_reliability" + test_name_postfix};
