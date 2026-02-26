@@ -53,10 +53,15 @@ int main(int argc, char *argv[])
     const std::string test_name_postfix = argv[1]; // NOLINT: OK in a unit test
     auto expected_value = std::atoi(argv[2]);      // NOLINT: OK in a unit test
     auto num_iterations = std::atoi(argv[3]);      // NOLINT: OK in a unit test
-    // Use per-iteration domain IDs to avoid DDS multicast discovery state accumulation across rapid
-    // participant create/destroy cycles (root cause of flaky timeouts on Windows CI)
+    // Use per-iteration domain IDs (100-127) to avoid DDS multicast discovery state accumulation across rapid
+    // participant create/destroy cycles (root cause of flaky timeouts on Windows CI).
+    // High range avoids conflicts with other tests; wraps at 127 (max Fast-DDS domain ID).
+    constexpr provizio::dds::DomainId_t base_domain_id = 100;
+    constexpr provizio::dds::DomainId_t domain_range = 28; // 100..127
     const provizio::dds::DomainId_t domain_id =
-        (argc > 4) ? static_cast<provizio::dds::DomainId_t>(std::atoi(argv[4])) : 14; // NOLINT: OK in a unit test
+        (argc > 4)
+            ? static_cast<provizio::dds::DomainId_t>(base_domain_id + (std::atoi(argv[4]) % domain_range)) // NOLINT
+            : 14; // NOLINT: OK in a unit test
     const std::chrono::seconds wait_timeout{num_iterations * 3 + 30};
 
     const std::string log_prefix = "request_response_reliability_service" + test_name_postfix + ": ";
