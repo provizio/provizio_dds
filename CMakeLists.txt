@@ -531,12 +531,15 @@ else(HAS_BIN_CACHE)
             [=[from distutils import sysconfig; print\(sysconfig\.get_python_lib\(plat_specific=True, prefix='([^']*)' \) \)]=]
             [=[import sysconfig; print(sysconfig.get_path('platlib', vars={'base': '\1', 'platbase': '\1'}))]=]
             FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
-        # Remove cmake config/export install rules from fastdds_python (not needed at runtime)
-        string(REGEX REPLACE "install[^\n]*EXPORT[^\n]*\n" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
-        string(REGEX REPLACE "configure_package_config_file[^)]*\\)" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
-        string(REGEX REPLACE "write_basic_package_version_file[^)]*\\)" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
-        string(REGEX REPLACE "install[^\n]*cmake/[^\n]*\n" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
-        string(REGEX REPLACE "export[^\n]*TARGETS[^\n]*\n" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        # Remove cmake config/export install rules from fastdds_python (not needed at runtime, and
+        # they install cmake files under lib/cmake/ that we don't want in the package)
+        # 1. Remove "EXPORT <name>-targets" line from install(TARGETS) so it doesn't generate export sets
+        string(REGEX REPLACE "    EXPORT [^\n]*\n" "" FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        # 2. Truncate everything from "export(TARGETS" onward (cmake packaging boilerplate)
+        string(FIND "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}" "export(TARGETS" _FASTDDS_PYTHON_EXPORT_POS)
+        if(NOT _FASTDDS_PYTHON_EXPORT_POS EQUAL -1)
+            string(SUBSTRING "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}" 0 ${_FASTDDS_PYTHON_EXPORT_POS} FASTDDS_PYTHON_SWIG_CMAKE_CONTENT)
+        endif()
         file(WRITE "${FASTDDS_PYTHON_SWIG_CMAKE_FILE}" "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
 
         set(FASTDDS_PYTHON_CMAKE_DIR "${fast_dds_python_SOURCE_DIR}/fastdds_python")
