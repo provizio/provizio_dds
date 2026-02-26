@@ -30,23 +30,23 @@ add_dependencies(python_tests provizio_dds_python_types)
 
 add_test(NAME python_pub_python_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_publisher.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_subscriber.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_pub_python_sub PROPERTIES TIMEOUT 20)
 
 add_test(NAME python_pub_python_sub_type_reuse COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_publisher_type_reuse.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_subscriber_type_reuse.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher_type_reuse.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber_type_reuse.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_pub_python_sub_type_reuse PROPERTIES TIMEOUT 20)
 
 add_test(NAME python_pub_cpp_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_publisher.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher.py"
     "$<TARGET_FILE:simplest_subscriber>"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
@@ -55,23 +55,23 @@ set_tests_properties(python_pub_cpp_sub PROPERTIES TIMEOUT 20)
 add_test(NAME cpp_pub_python_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "$<TARGET_FILE:simplest_publisher>"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_subscriber.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(cpp_pub_python_sub PROPERTIES TIMEOUT 20)
 
 add_test(NAME python_request_response COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_request_response_async COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service_concurrent.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_concurrent.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_async PROPERTIES TIMEOUT 30)
@@ -79,39 +79,39 @@ set_tests_properties(python_request_response_async PROPERTIES TIMEOUT 30)
 add_test(NAME python_request_response_reliability COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" "128"
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_reliability_service.py \"\" {i} 1"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_reliability_client.py \"\" {i}"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_service.py \"\" {i} 1"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py \"\" {i}"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 1500) # Takes long by design
 
 add_test(NAME python_request_response_reliability_single_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_reliability_service.py _single_service 1 128"
-    "${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/run_times.py 128 ${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_reliability_client.py _single_service {i}"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_service.py _single_service 1 128"
+    "\"${PYTHON_EXECUTABLE}\" \"${CMAKE_SOURCE_DIR}/test/run_times.py\" 128 \"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py _single_service {i}"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_reliability_single_service PROPERTIES TIMEOUT 1500) # Takes long by design
 
 add_test(NAME python_request_response_ignore COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_ignore_service.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_ignore_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_ignore_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_ignore_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_ignore PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_request_response_ignore_async COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_ignore_service_async.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_ignore_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_ignore_service_async.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_ignore_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_ignore_async PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_request_response_dual_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_dual_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_dual_service.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_dual_service PROPERTIES TIMEOUT 30)
@@ -119,7 +119,7 @@ set_tests_properties(python_request_response_dual_service PROPERTIES TIMEOUT 30)
 add_test(NAME python_request_cpp_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "$<TARGET_FILE:request_response_service>"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_cpp_service PROPERTIES TIMEOUT 30)
@@ -127,7 +127,7 @@ set_tests_properties(python_request_cpp_service PROPERTIES TIMEOUT 30)
 add_test(NAME python_request_cpp_response_concurrent_requests_serial_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "$<TARGET_FILE:request_response_service>"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_concurrent_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_concurrent_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_cpp_response_concurrent_requests_serial_service PROPERTIES TIMEOUT 30)
@@ -135,14 +135,14 @@ set_tests_properties(python_request_cpp_response_concurrent_requests_serial_serv
 add_test(NAME python_request_cpp_service_concurrent COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "$<TARGET_FILE:request_response_concurrent_service> 5"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_concurrent_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_concurrent_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_cpp_service_concurrent PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_service_cpp_client COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
     "$<TARGET_FILE:request_response_client>"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
@@ -150,7 +150,7 @@ set_tests_properties(python_service_cpp_client PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_serial_service_cpp_concurrent_requests COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
     "$<TARGET_FILE:request_response_concurrent_requests>"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
@@ -158,7 +158,7 @@ set_tests_properties(python_serial_service_cpp_concurrent_requests PROPERTIES TI
 
 add_test(NAME python_service_cpp_requests_concurrent COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_request_response_service_concurrent.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_concurrent.py"
     "$<TARGET_FILE:request_response_concurrent_requests>"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
@@ -166,31 +166,31 @@ set_tests_properties(python_service_cpp_requests_concurrent PROPERTIES TIMEOUT 3
 
 add_test(NAME pointcloud2_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./pointcloud2_test.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./pointcloud2_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
 add_test(NAME python_publisher_no_leaks_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_publisher_no_leaks_test.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher_no_leaks_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
 add_test(NAME python_subscriber_no_leaks_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_subscriber_no_leaks_test.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber_no_leaks_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
 add_test(NAME python_stop_subscriber_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./python_stop_subscriber_test.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_stop_subscriber_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
 add_test(NAME accumulation_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "${PYTHON_EXECUTABLE} -q -X faulthandler ./accumulation_test.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./accumulation_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 

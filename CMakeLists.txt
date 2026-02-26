@@ -515,6 +515,11 @@ else(HAS_BIN_CACHE)
             message(FATAL_ERROR "SWIG 4.0 or newer is required, but ${SWIG_VERSION} found!")
         endif("${SWIG_VERSION}" VERSION_LESS "4.0")
 
+        # Python 3.14 changed PyHeapTypeObject layout (ht_token slot); SWIG 4.4+ is required
+        if("${Python3_VERSION}" VERSION_GREATER_EQUAL "3.14" AND "${SWIG_VERSION}" VERSION_LESS "4.4")
+            message(FATAL_ERROR "SWIG 4.4 or newer is required for Python ${Python3_VERSION}, but ${SWIG_VERSION} found!")
+        endif()
+
         include_directories(SYSTEM ${FAST_DDS_INCLUDE_DIRS})
 
         # Resolve Fast-DDS-python

@@ -23,9 +23,27 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ($WithPython -ne "OFF") {
-    Write-Host "Installing SWIG..."
-    choco install swig -y
-    if ($LASTEXITCODE -ne 0) { throw "Failed to install SWIG" }
+    # SWIG 4.4+ is required for Python 3.14 support (heap type / ht_token changes).
+    # Chocolatey only provides 4.3.1 as of Feb 2026, so we download directly.
+    $swigVersion = "4.4.1"
+    $swigInstallDir = "C:\swig"
+    $swigZip = Join-Path $env:TEMP "swigwin-$swigVersion.zip"
+    $swigUrl = "https://sourceforge.net/projects/swig/files/swigwin/swigwin-$swigVersion/swigwin-$swigVersion.zip/download"
+
+    Write-Host "Installing SWIG $swigVersion..."
+    Invoke-WebRequest -Uri $swigUrl -OutFile $swigZip -UseBasicParsing -MaximumRedirection 10
+    if (-not (Test-Path $swigZip)) { throw "Failed to download SWIG $swigVersion" }
+
+    Expand-Archive -Path $swigZip -DestinationPath $env:TEMP -Force
+    if (Test-Path $swigInstallDir) { Remove-Item -Recurse -Force $swigInstallDir }
+    Move-Item -Path (Join-Path $env:TEMP "swigwin-$swigVersion") -Destination $swigInstallDir
+
+    # Make SWIG available for subsequent steps
+    $env:PATH = "$swigInstallDir;$env:PATH"
+    if ($env:GITHUB_PATH) {
+        Add-Content -Path $env:GITHUB_PATH -Value $swigInstallDir
+    }
+    Write-Host "SWIG $swigVersion installed to $swigInstallDir"
 }
 
 if ($StaticAnalysis -ne "OFF") {
