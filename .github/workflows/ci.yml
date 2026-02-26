@@ -327,6 +327,7 @@ jobs:
     name: Test (Windows)
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         build_type: [Debug, Release]
         with_python: [OFF, ON]
