@@ -38,8 +38,13 @@ if os.name == "nt":
             except OSError:
                 pass
 
-from provizio_dds_python_types import *
+# Import fastdds first: on Windows, _provizio_dds_python_types.pyd has a DLL-level
+# dependency on _fastdds_python.pyd.  If provizio_dds_python_types is imported first,
+# Windows loads _fastdds_python.pyd as a regular DLL (DllMain only), without calling
+# PyInit__fastdds_python, leaving SWIG type tables uninitialised.  Importing fastdds
+# first ensures the module is properly initialised before anything depends on it.
 from fastdds import *
+from provizio_dds_python_types import *
 
 if __package__ or "." in __name__:
     from . import point_cloud2
