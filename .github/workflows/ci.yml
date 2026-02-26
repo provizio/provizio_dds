@@ -159,16 +159,17 @@ jobs:
       - run: .github/workflows/test_pip_package.sh
 
   test-nix-pip-package-python-versions:
-    name: Test pip package Python ${{matrix.python-version}} (${{matrix.runner}})
+    name: Test pip package Python ${{matrix.python-version}} / ${{matrix.cc}} (${{matrix.runner}})
     needs: commit-cache
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
         runner: [ubuntu-latest, macos-15-intel]
         python-version: ['3.10', '3.12', '3.13', '3.14']
+        cc: [gcc, clang]
       fail-fast: false
     env:
-      CC: gcc
+      CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
     steps:
       - uses: actions/checkout@v4
