@@ -31,8 +31,7 @@ jobs:
 
   build-cache-python:
     # One cache per ABI group: Python 3.10-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14").
-    # x86_64 only (jetson-18.04 excluded: actions/setup-python doesn't work on self-hosted ARM
-    # runners; jetson pip tests will build from source if no cache matches).
+    # x86_64 only (jetson excluded: actions/setup-python doesn't work on self-hosted ARM runners).
     name: Build Python bin cache (${{matrix.runner}}, Python ${{matrix.python-version}})
     runs-on: ${{matrix.runner}}
     strategy:
