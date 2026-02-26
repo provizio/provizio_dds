@@ -31,11 +31,12 @@ try {
     $targetPath = Join-Path $binCachePath $binCacheConfigName
     $pythonTargetPath = Join-Path $targetPath "python"
 
-    # Detect Python ABI group tag when building with Python.
-    # Python 3.10-3.13 share ABI compatibility (tag "3"), while 3.14+ broke ABI (tag "3_14").
+    # Detect Python version tag when building with Python.
+    # On Windows, .pyd files link against a specific pythonXY.dll, so each minor version needs
+    # its own cache (unlike Linux where 3.10-3.13 share ABI compatibility).
     $pythonVersionTag = ""
     if ($Python -eq "ON") {
-        $pythonVersionTag = python -c "import sys; print('3_14' if sys.version_info >= (3, 14) else '3')"
+        $pythonVersionTag = python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')"
     }
 
     $pythonCacheConfigName = ""

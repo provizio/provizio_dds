@@ -86,13 +86,14 @@ jobs:
           retention-days: 1
 
   build-cache-windows-python:
-    # One cache per ABI group: Python 3.10-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14").
+    # On Windows, .pyd files link against specific pythonXY.dll, so each minor version needs
+    # its own cache (unlike Linux where 3.10-3.13 share ABI compatibility).
     name: Build Python bin cache (Windows, Python ${{matrix.python-version}})
     runs-on: windows-latest
     strategy:
         matrix:
             build_type: [Release]
-            python-version: ['3.12', '3.14']
+            python-version: ['3.10', '3.12', '3.13', '3.14']
         fail-fast: true
     steps:
       - uses: actions/checkout@v4
@@ -107,8 +108,8 @@ jobs:
         run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}" "ON"
       - name: Get Python cache artifact name
         run: |
-          $abiTag = python -c "import sys; print('3_14' if sys.version_info >= (3, 14) else '3')"
-          $name = .\bin_cache_config_name.ps1 -BuildType "${{matrix.build_type}}" -PythonVersionTag $abiTag
+          $verTag = python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')"
+          $name = .\bin_cache_config_name.ps1 -BuildType "${{matrix.build_type}}" -PythonVersionTag $verTag
           echo "cache_artifact_name=$name" >> $env:GITHUB_ENV
       - uses: actions/upload-artifact@v4
         with:

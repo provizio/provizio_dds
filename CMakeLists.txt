@@ -71,17 +71,16 @@ project(provizio_dds VERSION ${PROVIZIO_DDS_VERSION})
 set(HAS_BIN_CACHE FALSE)
 
 if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BIN_CACHE}" STREQUAL "FALSE"))
-    # Determine Python ABI group cache tag when Python bindings are requested.
-    # Python 3.10-3.13 share ABI compatibility (tag "3"), while 3.14+ broke ABI (tag "3_14").
-    if(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
-        find_package(Python3 COMPONENTS Interpreter QUIET)
-        if(Python3_FOUND)
-            execute_process(COMMAND ${Python3_EXECUTABLE} -c "import sys; print('3_14' if sys.version_info >= (3, 14) else '3')"
-                OUTPUT_VARIABLE PYTHON_VERSION_TAG OUTPUT_STRIP_TRAILING_WHITESPACE)
-        endif(Python3_FOUND)
-    endif(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
-
     if(UNIX AND NOT APPLE) # Linux
+        # On Linux, 3.10-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
+        if(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
+            find_package(Python3 COMPONENTS Interpreter QUIET)
+            if(Python3_FOUND)
+                execute_process(COMMAND ${Python3_EXECUTABLE} -c "import sys; print('3_14' if sys.version_info >= (3, 14) else '3')"
+                    OUTPUT_VARIABLE PYTHON_VERSION_TAG OUTPUT_STRIP_TRAILING_WHITESPACE)
+            endif(Python3_FOUND)
+        endif(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
+
         execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/bin_cache_config_name.sh" "${CMAKE_BUILD_TYPE}" "${PROVIZIO_DDS_IDLS_VERSION}" OUTPUT_VARIABLE BIN_CACHE_CONFIG_NAME)
         string(STRIP "${BIN_CACHE_CONFIG_NAME}" BIN_CACHE_CONFIG_NAME)
         set(BIN_CACHE_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cache/${BIN_CACHE_CONFIG_NAME}.zip")
@@ -146,14 +145,23 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                 set(CACHED_PROVIZIO_DDS_TYPES_DLL "${BIN_CACHE_PATH}/bin/provizio_dds_types.dll")
                 set(CACHED_PROVIZIO_DDS_TYPES_LIB "${BIN_CACHE_PATH}/lib/provizio_dds_types.lib")
 
-                if(PYTHON_VERSION_TAG)
-                    set(PYTHON_BIN_CACHE_CONFIG_NAME "${BIN_CACHE_CONFIG_NAME}.python${PYTHON_VERSION_TAG}")
+                # On Windows, .pyd files link against specific pythonXY.dll, so each version needs its own cache
+                if(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
+                    find_package(Python3 COMPONENTS Interpreter QUIET)
+                    if(Python3_FOUND)
+                        execute_process(COMMAND ${Python3_EXECUTABLE} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')"
+                            OUTPUT_VARIABLE WIN_PYTHON_VERSION_TAG OUTPUT_STRIP_TRAILING_WHITESPACE)
+                    endif(Python3_FOUND)
+                endif(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
+
+                if(WIN_PYTHON_VERSION_TAG)
+                    set(PYTHON_BIN_CACHE_CONFIG_NAME "${BIN_CACHE_CONFIG_NAME}.python${WIN_PYTHON_VERSION_TAG}")
                     set(PYTHON_BIN_CACHE_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip")
                     set(PYTHON_BIN_CACHE_PATH "${BIN_CACHE_PARENT_PATH}/${PYTHON_BIN_CACHE_CONFIG_NAME}")
                     set(PYTHON_CACHE_PATH "${PYTHON_BIN_CACHE_PATH}/python")
                 else()
                     set(PYTHON_CACHE_PATH "${BIN_CACHE_PATH}/python")
-                endif(PYTHON_VERSION_TAG)
+                endif(WIN_PYTHON_VERSION_TAG)
                 set(CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD "${PYTHON_CACHE_PATH}/provizio_dds_python_types/_provizio_dds_python_types.pyd")
 
                 # Extract general cache if needed
@@ -164,11 +172,11 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                 endif(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
 
                 # Extract Python-versioned cache if needed
-                if(PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                if(WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
                     execute_process(
                         COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${PYTHON_BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force"
                     )
-                endif(PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                endif(WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
 
                 if(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
                     set(HAS_BIN_CACHE TRUE)
