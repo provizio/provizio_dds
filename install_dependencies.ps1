@@ -46,6 +46,11 @@ if ($WithPython -ne "OFF") {
         Add-Content -Path $env:GITHUB_PATH -Value $swigInstallDir
     }
     Write-Host "SWIG $swigVersion installed to $swigInstallDir"
+
+    # Install Python build dependencies
+    Write-Host "Installing Python build dependencies (wheel, setuptools)..."
+    python -m pip install wheel setuptools "numpy>=1.16" "transforms3d>=0.4.1"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install Python build dependencies" }
 }
 
 if ($StaticAnalysis -ne "OFF") {
