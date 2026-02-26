@@ -31,8 +31,10 @@ if ($WithPython -ne "OFF") {
     $swigUrl = "https://sourceforge.net/projects/swig/files/swigwin/swigwin-$swigVersion/swigwin-$swigVersion.zip/download"
 
     Write-Host "Installing SWIG $swigVersion..."
-    Invoke-WebRequest -Uri $swigUrl -OutFile $swigZip -UseBasicParsing -MaximumRedirection 10
-    if (-not (Test-Path $swigZip)) { throw "Failed to download SWIG $swigVersion" }
+    # Use curl.exe (available on all modern Windows) — Invoke-WebRequest chokes on
+    # SourceForge redirects in PowerShell 7 on Windows Server.
+    & curl.exe -fsSL -o $swigZip $swigUrl
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $swigZip)) { throw "Failed to download SWIG $swigVersion" }
 
     Expand-Archive -Path $swigZip -DestinationPath $env:TEMP -Force
     if (Test-Path $swigInstallDir) { Remove-Item -Recurse -Force $swigInstallDir }
