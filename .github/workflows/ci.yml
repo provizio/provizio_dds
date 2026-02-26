@@ -364,6 +364,27 @@ jobs:
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPYTHON_BINDINGS=ON -DENABLE_TESTS=ON -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON -DENABLE_ROS_TESTS=OFF -DPython3_EXECUTABLE="$pythonPath"
       - name: Build
         run: cmake --build build -- -j 16
+      - name: Verify Python test environment
+        run: |
+          python -X faulthandler -c "
+          import os, sys
+          test_dir = os.path.abspath('build/test/python')
+          print('Python:', sys.version)
+          print('Test dir:', test_dir)
+          dlls = [f for f in os.listdir(test_dir) if f.endswith('.dll') or f.endswith('.pyd')]
+          print('DLLs/PYDs:', sorted(dlls))
+          os.chdir(test_dir)
+          os.add_dll_directory(test_dir)
+          try:
+              from fastdds import DomainParticipantFactory
+              print('fastdds import OK')
+              factory = DomainParticipantFactory.get_instance()
+              print('get_instance OK:', factory)
+              factory.load_profiles()
+              print('load_profiles OK')
+          except Exception as e:
+              print('ERROR:', type(e).__name__, e)
+          "
       - name: Test
         run: cd build && ctest --output-on-failure
 
