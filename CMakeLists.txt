@@ -770,6 +770,14 @@ else(HAS_BIN_CACHE)
             if(TARGET fastcdr AND TARGET fastrtps)
                 list(APPEND PROVIZIO_DDS_PYTHON_EXTRA_DLLS fastcdr fastrtps)
             endif()
+
+            # Copy OpenSSL DLLs so they are found before any ABI-incompatible copies
+            # (e.g. MinGW-built) that may appear in PATH via os.add_dll_directory().
+            if(OPENSSL_FOUND)
+                get_filename_component(_OPENSSL_ROOT "${OPENSSL_INCLUDE_DIR}" DIRECTORY)
+                file(GLOB _OPENSSL_DLLS "${_OPENSSL_ROOT}/bin/libssl*.dll" "${_OPENSSL_ROOT}/bin/libcrypto*.dll")
+                list(APPEND PROVIZIO_DDS_ALL_PYTHON_LIBS ${_OPENSSL_DLLS})
+            endif()
         endif()
 
         # Find the installation path

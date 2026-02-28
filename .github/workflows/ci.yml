@@ -368,12 +368,18 @@ jobs:
       - name: Verify Python test environment
         run: |
           python -X faulthandler -c "
-          import os, sys
+          import os, sys, ctypes
           test_dir = os.path.abspath('build/test/python')
           print('Python:', sys.version)
           print('Test dir:', test_dir)
           dlls = [f for f in os.listdir(test_dir) if f.endswith('.dll') or f.endswith('.pyd')]
           print('DLLs/PYDs:', sorted(dlls))
+          # Check for potentially conflicting OpenSSL DLLs in PATH
+          for p in os.environ.get('PATH', '').split(os.pathsep):
+              if p and os.path.isdir(p):
+                  for f in os.listdir(p):
+                      if f.lower().startswith(('libssl', 'libcrypto')) and f.endswith('.dll'):
+                          print(f'  OpenSSL DLL: {os.path.join(p, f)}')
           os.chdir(test_dir)
           os.add_dll_directory(test_dir)
           try:
