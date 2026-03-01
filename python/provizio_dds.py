@@ -27,16 +27,14 @@ import time
 from queue import Queue
 
 # On Windows, Python 3.8+ restricts DLL search paths (https://bugs.python.org/issue46276).
-# Add the directory containing this module and all PATH entries so dependent DLLs
-# (provizio_dds, Fast-DDS, OpenSSL, etc.) can be found.
+# Add the directory containing this module so dependent DLLs (provizio_dds, Fast-DDS,
+# OpenSSL, etc.) can be found.  All required DLLs must be co-located with this module
+# (pip install does this automatically; ctest copies them in test/python/CMakeLists.txt).
+# Scanning PATH is intentionally avoided: CI runners carry ABI-incompatible copies of
+# common libraries (e.g. MinGW/MySQL/PHP OpenSSL) that cause access violations when
+# loaded instead of the MSVC-built copies we ship.
 if os.name == "nt":
     os.add_dll_directory(os.path.dirname(os.path.abspath(__file__)))
-    for _p in os.environ.get("PATH", "").split(os.pathsep):
-        if _p and os.path.isdir(_p):
-            try:
-                os.add_dll_directory(_p)
-            except OSError:
-                pass
 
 # Import fastdds first: on Windows, _provizio_dds_python_types.pyd has a DLL-level
 # dependency on _fastdds_python.pyd.  If provizio_dds_python_types is imported first,

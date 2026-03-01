@@ -842,6 +842,16 @@ else(HAS_BIN_CACHE)
             endif(WIN32)
         endif(FAST_DDS_INSTALL_DIR)
 
+        # On Windows, Fast-DDS links against OpenSSL when SECURITY=ON.  Bundle the
+        # correct MSVC-built OpenSSL DLLs so they are found before any ABI-incompatible
+        # copies (MinGW, MySQL, PHP, etc.) that may exist elsewhere on the system.
+        if(WIN32 AND OPENSSL_FOUND)
+            get_filename_component(_OPENSSL_ROOT "${OPENSSL_INCLUDE_DIR}" DIRECTORY)
+            install(DIRECTORY "${_OPENSSL_ROOT}/bin/"
+                DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
+                FILES_MATCHING PATTERN "libssl*.dll" PATTERN "libcrypto*.dll")
+        endif()
+
         # provizio_dds DLL is needed by the Python extension modules at runtime
         install(TARGETS provizio_dds
             LIBRARY DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
