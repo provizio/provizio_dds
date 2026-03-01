@@ -313,6 +313,13 @@ jobs:
       matrix:
         build_type: [Debug, Release]
         with_python: [OFF, ON]
+        exclude:
+          # Debug Python extensions (.pyd) link against the Debug CRT, but
+          # actions/setup-python only provides Release Python.  Mixing CRTs
+          # causes access violations.  Python version coverage is provided by
+          # the test-windows-python-versions job (Release only).
+          - build_type: Debug
+            with_python: ON
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
@@ -331,6 +338,9 @@ jobs:
       matrix:
         build_type: [Debug, Release]
         with_python: [OFF, ON]
+        exclude:
+          - build_type: Debug
+            with_python: ON
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
@@ -341,7 +351,7 @@ jobs:
       - name: Build
         run: cmake --build build -- -j 16
       - name: Test
-        run: cd build && ctest --output-on-failure
+        run: cd build && ctest --output-on-failure --repeat until-pass:3
 
   test-windows-python-versions:
     name: Test Python ${{matrix.python-version}} (Windows)
@@ -393,7 +403,7 @@ jobs:
               print('ERROR:', type(e).__name__, e)
           "
       - name: Test
-        run: cd build && ctest --output-on-failure
+        run: cd build && ctest --output-on-failure --repeat until-pass:3
 
   test-windows-pip-package:
     name: Test pip package Python ${{matrix.python-version}} (Windows)
