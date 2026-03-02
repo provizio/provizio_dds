@@ -18,6 +18,7 @@ internal Provizio software components. Built using eProsima Fast-DDS DDS
 implementation (Apache License 2.0).
 """
 import asyncio
+import atexit
 import inspect
 import os
 import threading
@@ -147,6 +148,36 @@ class RequestPublishError(RuntimeError):
     """Raised when the request DataWriter fails to publish."""
 
 
+# ---------------------------------------------------------------------------
+# DDS participant lifecycle
+#
+# During Python interpreter shutdown, the garbage collector may destroy SWIG
+# wrapper objects in an unpredictable order.  If a DomainParticipant is
+# collected before its child entities (Publisher, Subscriber, …) the C++
+# destructors access already-freed memory → access violation.  On Windows
+# this also corrupts DDS shared-memory segments, crashing subsequent tests.
+#
+# To prevent this we:
+#   1. Track every live _DomainParticipant via weak refs.
+#   2. Register an atexit handler that calls _cleanup() on each participant
+#      *before* the interpreter starts tearing down modules.
+#   3. _cleanup() calls delete_contained_entities() + delete_participant()
+#      and sets a flag so that child __del__ methods become safe no-ops.
+# ---------------------------------------------------------------------------
+_live_participants = []
+
+
+@atexit.register
+def _cleanup_all_participants():
+    """Explicitly destroy every DomainParticipant before interpreter shutdown
+    so that SWIG C++ destructors run in the correct order."""
+    for ref in reversed(_live_participants):
+        p = ref()
+        if p is not None:
+            p._cleanup()
+    _live_participants.clear()
+
+
 def make_domain_participant(domain_id: int = 0):
     """Creates a new DDS Domain Participant that automatically cleans up internal objects on deletion
 
@@ -159,6 +190,8 @@ def make_domain_participant(domain_id: int = 0):
         xml_profiles_env_variable = "FASTRTPS_DEFAULT_PROFILES_FILE"
 
         def __init__(self, domain_id):
+            self._cleaned_up = False
+
             factory = DomainParticipantFactory.get_instance()
             # It's required so consequent get_default_participant_qos() respects XML profiles
             factory.load_profiles()
@@ -192,11 +225,19 @@ def make_domain_participant(domain_id: int = 0):
             self._register_topic_mutex = threading.Lock()
             self._registered_topics = dict()
 
-        def __del__(self):
+            _live_participants.append(weakref.ref(self))
+
+        def _cleanup(self):
+            """Deterministic cleanup: delete all C++ entities then the participant."""
+            if self._cleaned_up:
+                return
+            self._cleaned_up = True
             factory = DomainParticipantFactory.get_instance()
             self._participant.delete_contained_entities()
             factory.delete_participant(self._participant)
-            del self._participant
+
+        def __del__(self):
+            self._cleanup()
 
         def fastdds_participant(self):
             return self._participant
@@ -253,7 +294,8 @@ def make_domain_participant(domain_id: int = 0):
                 if topic_info:
                     topic_info["ref_count"] -= 1
                     if topic_info["ref_count"] <= 0:
-                        self.fastdds_participant().delete_topic(topic_info["topic"])
+                        if not self._cleaned_up:
+                            self.fastdds_participant().delete_topic(topic_info["topic"])
                         del self._registered_topics[topic_name]
 
     return _DomainParticipant(domain_id)
@@ -384,16 +426,11 @@ class Publisher(_TopicHandle):
         )
 
     def __del__(self):
-        self._publisher.delete_datawriter(self._writer)
-        del self._writer
-
-        self._participant.fastdds_participant().delete_publisher(self._publisher)
-        del self._publisher
-
-        del self._listener
-        del self._writer_qos
-        del self._publisher_qos
-
+        # If the participant was already cleaned up (atexit / early GC),
+        # delete_contained_entities() already freed the C++ objects.
+        if not self._participant._cleaned_up:
+            self._publisher.delete_datawriter(self._writer)
+            self._participant.fastdds_participant().delete_publisher(self._publisher)
         super().__del__()
 
     def publish(self, data: object, params: WriteParams = None):
@@ -536,16 +573,11 @@ class Subscriber(_TopicHandle):
         )
 
     def __del__(self):
-        self._subscriber.delete_datareader(self._reader)
-        del self._reader
-
-        self._participant.fastdds_participant().delete_subscriber(self._subscriber)
-        del self._subscriber
-
-        del self._listener
-        del self._reader_qos
-        del self._subscriber_qos
-
+        # If the participant was already cleaned up (atexit / early GC),
+        # delete_contained_entities() already freed the C++ objects.
+        if not self._participant._cleaned_up:
+            self._subscriber.delete_datareader(self._reader)
+            self._participant.fastdds_participant().delete_subscriber(self._subscriber)
         super().__del__()
 
     def get_guid(self):
@@ -916,11 +948,14 @@ class Service:
             if not self._stop:
                 self._stop = True
 
-                self._request_handler.stop()
+                if hasattr(self, '_request_handler'):
+                    self._request_handler.stop()
 
-                del self._publisher
-                del self._subscriber
-                del self._request_handler
+                # Delete in child-before-parent order; their __del__ methods
+                # are guarded against participant-already-cleaned-up.
+                for attr in ('_subscriber', '_publisher', '_request_handler'):
+                    if hasattr(self, attr):
+                        delattr(self, attr)
 
                 self._service_cv.notify_all()
                 join = True
