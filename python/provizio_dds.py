@@ -225,7 +225,8 @@ def make_domain_participant(domain_id: int = 0):
             self._register_topic_mutex = threading.Lock()
             self._registered_topics = dict()
 
-            _live_participants.append(weakref.ref(self))
+            ref = weakref.ref(self, lambda r: _live_participants.remove(r))
+            _live_participants.append(ref)
 
         def _cleanup(self):
             """Deterministic cleanup: delete all C++ entities then the participant."""
