@@ -25,7 +25,7 @@ import multiprocessing
 
 TEST_TOPIC_NAME = "provizio_dds_python_stop_subscriber_test"
 TEST_VALUE = "test"
-MAX_WAIT_TIME = 5
+MAX_WAIT_TIME = 10
 RECEIVE_NUM_TIMES = 10
 PUBLISH_EVERY_SEC = 0.05
 

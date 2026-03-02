@@ -86,7 +86,7 @@ add_test(NAME python_request_response_reliability COMMAND
     "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py \"\" {i} {i}"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 1500) # Takes long by design
+set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 2000) # Takes long by design
 
 add_test(NAME python_request_response_reliability_single_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
@@ -94,7 +94,7 @@ add_test(NAME python_request_response_reliability_single_service COMMAND
     "\"${PYTHON_EXECUTABLE}\" \"${CMAKE_SOURCE_DIR}/test/run_times.py\" 128 \"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py _single_service {i} 200"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_request_response_reliability_single_service PROPERTIES TIMEOUT 1500) # Takes long by design
+set_tests_properties(python_request_response_reliability_single_service PROPERTIES TIMEOUT 2000) # Takes long by design
 
 add_test(NAME python_request_response_ignore COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"

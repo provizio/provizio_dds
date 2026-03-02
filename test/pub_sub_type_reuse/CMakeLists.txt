@@ -20,6 +20,7 @@ add_test(NAME pub_sub_type_reuse COMMAND
     "$<TARGET_FILE:simplest_publisher_type_reuse>"
     "$<TARGET_FILE:simplest_subscriber_type_reuse>"
 )
+set_tests_properties(pub_sub_type_reuse PROPERTIES TIMEOUT 30)
 if(WIN32)
     set_tests_properties(pub_sub_type_reuse PROPERTIES ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
 endif(WIN32)

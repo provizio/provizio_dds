@@ -20,6 +20,7 @@ add_test(NAME simplest_pub_sub COMMAND
     "$<TARGET_FILE:simplest_publisher>"
     "$<TARGET_FILE:simplest_subscriber>"
 )
+set_tests_properties(simplest_pub_sub PROPERTIES TIMEOUT 20)
 if(WIN32)
     set_tests_properties(simplest_pub_sub PROPERTIES ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
 endif(WIN32)

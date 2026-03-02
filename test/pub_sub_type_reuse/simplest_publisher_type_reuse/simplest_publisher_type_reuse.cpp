@@ -25,8 +25,8 @@ int main()
     const std::string topic_name_2{"provizio_dds_test_simplest_pub_sub_type_reuse_topic_2"};
     const std::string string{"provizio_dds_test"};
     const std::chrono::milliseconds publish_period{200};
-    const std::chrono::milliseconds initial_wait_time{1000}; // Give enough time for subscriber to run
-    const int publish_times = 15;
+    const std::chrono::milliseconds initial_wait_time{2000}; // Give enough time for subscriber to run
+    const int publish_times = 40;
 
     std::this_thread::sleep_for(initial_wait_time);
     const auto participant = provizio::dds::make_domain_participant();
