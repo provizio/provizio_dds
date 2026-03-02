@@ -39,7 +39,16 @@ async def main() -> int:
 
     test_name_postfix = sys.argv[1]
     value = int(sys.argv[2])
-    domain_id = int(sys.argv[3]) if len(sys.argv) > 3 else 14
+    # Remap to domain IDs 100-127 to avoid exceeding Fast-DDS max (127) and
+    # to prevent multicast discovery state accumulation across rapid
+    # participant create/destroy cycles.
+    _BASE_DOMAIN_ID = 100
+    _DOMAIN_RANGE = 28  # 100..127
+    domain_id = (
+        (_BASE_DOMAIN_ID + int(sys.argv[3]) % _DOMAIN_RANGE)
+        if len(sys.argv) > 3
+        else 14
+    )
 
     log_prefix = f"python_request_response_reliability_client{test_name_postfix}: "
     service_name = f"provizio_dds_test_request_response_reliability{test_name_postfix}"

@@ -313,13 +313,6 @@ jobs:
       matrix:
         build_type: [Debug, Release]
         with_python: [OFF, ON]
-        exclude:
-          # Debug Python extensions (.pyd) link against the Debug CRT, but
-          # actions/setup-python only provides Release Python.  Mixing CRTs
-          # causes access violations.  Python version coverage is provided by
-          # the test-windows-python-versions job (Release only).
-          - build_type: Debug
-            with_python: ON
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
@@ -338,9 +331,6 @@ jobs:
       matrix:
         build_type: [Debug, Release]
         with_python: [OFF, ON]
-        exclude:
-          - build_type: Debug
-            with_python: ON
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1

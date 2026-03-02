@@ -34,6 +34,21 @@ set(IGNORE_BIN_CACHE OFF CACHE BOOL "Enable to force build from sources instead 
 set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binaries, skip standard C++ libraries")
 set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
 
+# Force Release CRT when building Python bindings in Debug mode on Windows.
+# Python interpreters (actions/setup-python, system installs) are Release-built
+# and use /MD. Debug builds use /MDd, creating a CRT mismatch that causes access
+# violations when loading .pyd modules. Force /MD for all targets so the entire
+# DLL chain is CRT-compatible with the Release Python interpreter.
+set(PROVIZIO_DDS_FORCE_RELEASE_CRT OFF)
+if(WIN32 AND PYTHON_BINDINGS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    if(POLICY CMP0091)
+        cmake_policy(SET CMP0091 NEW)
+    endif()
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    set(PROVIZIO_DDS_FORCE_RELEASE_CRT ON)
+    message(STATUS "Debug+Python on Windows: using Release CRT (/MD) for Python compatibility")
+endif()
+
 # Detect the version of provizio_dds from git tag if present, otherwise use yy.mm.dd
 find_package(Git REQUIRED)
 execute_process(
@@ -370,8 +385,16 @@ else(HAS_BIN_CACHE)
         # foonathan_memory_vendor (Required for Fast-DDS)
         set(FOONATHAN_MEMORY_DIR "${CMAKE_CURRENT_BINARY_DIR}/foonathan_memory")
         file(MAKE_DIRECTORY "${FOONATHAN_MEMORY_DIR}")
+        # When forcing Release CRT for Python compatibility, build foonathan_memory
+        # in Release so its static .lib uses /MD. The Findfoonathan_memory.cmake
+        # glob matches regardless of debug suffix.
+        set(_FOONATHAN_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+        if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
+            set(_FOONATHAN_BUILD_TYPE "Release")
+        endif()
+        set(_FOONATHAN_CMAKE_ARGS -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}" "-DCMAKE_BUILD_TYPE=${_FOONATHAN_BUILD_TYPE}")
         execute_process(
-            COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}" "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+            COMMAND "${CMAKE_COMMAND}" ${_FOONATHAN_CMAKE_ARGS}
             WORKING_DIRECTORY "${FOONATHAN_MEMORY_DIR}"
         )
         execute_process(
@@ -388,7 +411,13 @@ else(HAS_BIN_CACHE)
         set(FAST_DDS_PREFIX "${CMAKE_CURRENT_BINARY_DIR}")
         set(FAST_DDS_GITHUB_PROJECT "provizio/Fast-DDS")
         set(FAST_DDS_INSTALL_DIR "${FAST_DDS_BINARY_DIR}/install")
-        set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules" "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
+        # When forcing Release CRT for Python compatibility, build Fast-DDS in
+        # Release to ensure the entire DLL chain uses /MD consistently.
+        set(_FAST_DDS_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+        if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
+            set(_FAST_DDS_BUILD_TYPE "Release")
+        endif()
+        set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules" "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
         if(NOT OPENSSL_FOUND)
             list(APPEND FAST_DDS_CMAKE_ARGS "-DSECURITY=OFF")
         endif(NOT OPENSSL_FOUND)
@@ -397,7 +426,7 @@ else(HAS_BIN_CACHE)
         if(WIN32)
             string(REGEX REPLACE "^v" "" _FD_VER_STRIPPED "${FAST_DDS_VERSION}")
             string(REGEX MATCH "^[0-9]+\\.[0-9]+" _FD_MAJOR_MINOR "${_FD_VER_STRIPPED}")
-            if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+            if(_FAST_DDS_BUILD_TYPE STREQUAL "Debug")
                 set(_FD_DBG_SUFFIX "d")
             else()
                 set(_FD_DBG_SUFFIX "")
@@ -430,7 +459,7 @@ else(HAS_BIN_CACHE)
         if(WIN32)
             string(REGEX REPLACE "^v" "" FAST_DDS_VERSION_STRIPPED "${FAST_DDS_VERSION}")
             string(REGEX MATCH "^[0-9]+\\.[0-9]+" FAST_DDS_MAJOR_MINOR "${FAST_DDS_VERSION_STRIPPED}")
-            if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+            if(_FAST_DDS_BUILD_TYPE STREQUAL "Debug")
                 set(FAST_DDS_DEBUG_SUFFIX "d")
             else()
                 set(FAST_DDS_DEBUG_SUFFIX "")
