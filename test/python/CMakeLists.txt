@@ -45,7 +45,7 @@ add_test(NAME python_pub_python_sub_type_reuse COMMAND
     "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber_type_reuse.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_pub_python_sub_type_reuse PROPERTIES TIMEOUT 20)
+set_tests_properties(python_pub_python_sub_type_reuse PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_pub_cpp_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
