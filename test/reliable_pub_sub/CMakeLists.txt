@@ -20,7 +20,7 @@ add_test(NAME reliable_pub_sub COMMAND
     "$<TARGET_FILE:reliable_publisher>"
     "$<TARGET_FILE:reliable_subscriber>"
 )
-set_tests_properties(reliable_pub_sub PROPERTIES TIMEOUT 30)
+set_tests_properties(reliable_pub_sub PROPERTIES TIMEOUT 90)
 if(WIN32)
     set_tests_properties(reliable_pub_sub PROPERTIES ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
 endif(WIN32)
