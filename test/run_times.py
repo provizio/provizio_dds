@@ -20,8 +20,9 @@
 # when nesting with run_parallel.py
 # Also handles ROS environment cleanup (equivalent of unset_ros.sh)
 #
-# Usage: run_times.py [--retries R] N command...
+# Usage: run_times.py [--retries R] [--delay D] N command...
 #   --retries R: retry each failed iteration up to R times (default 0)
+#   --delay D: sleep D seconds between iterations to let OS release DDS resources (default 0)
 
 import os
 import sys
@@ -41,13 +42,19 @@ if ament:
 
 args = sys.argv[1:]
 retries = 0
+delay = 0
 if args and args[0] == "--retries":
     retries = int(args[1])
+    args = args[2:]
+if args and args[0] == "--delay":
+    delay = float(args[1])
     args = args[2:]
 
 n = int(args[0])
 cmd_parts = args[1:]
 for i in range(1, n + 1):
+    if i > 1 and delay > 0:
+        time.sleep(delay)
     parts = [part.replace("{i}", str(i)) for part in cmd_parts]
     for attempt in range(1 + retries):
         if attempt > 0:

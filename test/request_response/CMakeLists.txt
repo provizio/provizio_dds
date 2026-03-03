@@ -22,8 +22,15 @@ add_test(NAME request_response COMMAND
     "$<TARGET_FILE:request_response_client>"
 )
 
+# On Windows, add inter-iteration delay to let the OS release DDS shared memory resources
+# between rapid participant create/destroy cycles (prevents discovery failures on Debug builds)
+set(RELIABILITY_DELAY_ARGS "")
+if(WIN32)
+    set(RELIABILITY_DELAY_ARGS "--delay" "1")
+endif()
+
 add_test(NAME request_response_reliability COMMAND
-    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" "--retries" "2" "128"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" "--retries" "2" ${RELIABILITY_DELAY_ARGS} "128"
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "$<TARGET_FILE:request_response_reliability_service> \"\" {i} 1 {i}"
     "$<TARGET_FILE:request_response_reliability_client> \"\" {i} {i}"

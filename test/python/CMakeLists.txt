@@ -79,14 +79,20 @@ add_test(NAME python_request_response_async COMMAND
 )
 set_tests_properties(python_request_response_async PROPERTIES TIMEOUT 30)
 
+# On Windows, add inter-iteration delay to let the OS release DDS shared memory resources
+set(PYTHON_RELIABILITY_DELAY_ARGS "")
+if(WIN32)
+    set(PYTHON_RELIABILITY_DELAY_ARGS "--delay" "1")
+endif()
+
 add_test(NAME python_request_response_reliability COMMAND
-    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" "--retries" "2" "128"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" "--retries" "2" ${PYTHON_RELIABILITY_DELAY_ARGS} "128"
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_service.py \"\" {i} 1 {i}"
     "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py \"\" {i} {i}"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 2000) # Takes long by design
+set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 3500) # Takes long by design
 
 add_test(NAME python_request_response_reliability_single_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
@@ -94,7 +100,7 @@ add_test(NAME python_request_response_reliability_single_service COMMAND
     "\"${PYTHON_EXECUTABLE}\" \"${CMAKE_SOURCE_DIR}/test/run_times.py\" 128 \"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py _single_service {i} 200"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_request_response_reliability_single_service PROPERTIES TIMEOUT 2000) # Takes long by design
+set_tests_properties(python_request_response_reliability_single_service PROPERTIES TIMEOUT 3500) # Takes long by design
 
 add_test(NAME python_request_response_ignore COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
