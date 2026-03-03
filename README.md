@@ -221,7 +221,7 @@ subscriber = provizio_dds.Subscriber(
     "rt/chatter",                           # DDS Topic Name
     provizio_dds.StringPubSubType,          # DDS Pub/Sub Type
     provizio_dds.String,                    # DDS Data Type
-    lambda message: print(message.data())   # Message handler (takes a DDS Data Type object), prints the received message
+    lambda message: print(message.data()))  # Message handler (takes a DDS Data Type object), prints the received message
 input("Press Enter to continue...") # Wait for any user input
 ```
 

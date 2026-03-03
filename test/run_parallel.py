@@ -82,13 +82,21 @@ for cmd in sys.argv[1:]:
     else:
         procs.append(subprocess.Popen(cmd, shell=True, env=clean_env, **popen_kwargs))
 
-try:
-    codes = [p.wait() for p in procs]
-except KeyboardInterrupt:
-    kill_all(procs)
-    sys.exit(1)
+import time
 
-if not all(c == 0 for c in codes):
-    # One or more processes failed — kill any that are still running
+try:
+    # Poll instead of sequential wait: if any process fails, kill the rest
+    # immediately rather than blocking on p.wait() for a process that may
+    # never exit (e.g. a publisher in an infinite publish loop).
+    while True:
+        for p in procs:
+            ret = p.poll()
+            if ret is not None and ret != 0:
+                kill_all(procs)
+                sys.exit(1)
+        if all(p.poll() is not None for p in procs):
+            break
+        time.sleep(0.1)
+except KeyboardInterrupt:
     kill_all(procs)
     sys.exit(1)
