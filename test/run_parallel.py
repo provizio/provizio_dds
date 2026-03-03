@@ -28,6 +28,7 @@ import os
 import signal
 import sys
 import subprocess
+import time
 
 ROS_CMD_PREFIX = "--ros:"
 
@@ -81,8 +82,6 @@ for cmd in sys.argv[1:]:
         procs.append(subprocess.Popen(cmd[len(ROS_CMD_PREFIX):], shell=True, env=original_env, **popen_kwargs))
     else:
         procs.append(subprocess.Popen(cmd, shell=True, env=clean_env, **popen_kwargs))
-
-import time
 
 try:
     # Poll instead of sequential wait: if any process fails, kill the rest
