@@ -44,16 +44,7 @@ namespace provizio::dds
     class PROVIZIO_DDS_API data_reader_listener : public DataReaderListener
     {
       public:
-        void on_subscription_matched(DataReader *reader, const SubscriptionMatchedStatus &info) override
-        {
-            (void)reader;
-
-            {
-                std::lock_guard<std::mutex> lock{num_matched_publishers_mutex};
-                num_matched_publishers = info.current_count;
-            }
-            num_matched_publishers_cv.notify_all();
-        }
+        void on_subscription_matched(DataReader *reader, const SubscriptionMatchedStatus &info) override;
 
       private:
         mutable std::mutex num_matched_publishers_mutex;

@@ -38,6 +38,9 @@ if(NOT foonathan_memory_FOUND)
         endif(WIN32)
 
         # Use the first file found by the glob
+        if(NOT foonathan_memory_LIB_FILE)
+            message(FATAL_ERROR "foonathan_memory library directory found at ${foonathan_memory_LIB_DIR} but no library file matched")
+        endif()
         list(GET foonathan_memory_LIB_FILE 0 foonathan_memory_LIB_FILE)
 
         # Create an imported target so that target_link_libraries(... foonathan_memory)

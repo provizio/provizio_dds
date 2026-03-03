@@ -43,13 +43,26 @@ args = sys.argv[1:]
 retries = 0
 delay = 0
 if args and args[0] == "--retries":
+    if len(args) < 2:
+        print("Error: --retries requires a value", file=sys.stderr)
+        sys.exit(2)
     retries = int(args[1])
     args = args[2:]
 if args and args[0] == "--delay":
+    if len(args) < 2:
+        print("Error: --delay requires a value", file=sys.stderr)
+        sys.exit(2)
     delay = float(args[1])
     args = args[2:]
 
+if len(args) < 2:
+    print("Usage: run_times.py [--retries R] [--delay D] N command...", file=sys.stderr)
+    sys.exit(2)
+
 n = int(args[0])
+if n < 1:
+    print(f"Error: N must be >= 1, got {n}", file=sys.stderr)
+    sys.exit(2)
 cmd_parts = args[1:]
 for i in range(1, n + 1):
     if i > 1 and delay > 0:

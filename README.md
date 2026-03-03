@@ -18,26 +18,48 @@ built-in data types.
 
 ## Build dependencies
 
-**C++:**
+**C++ (Linux / macOS):**
 
-- Linux or macOS
-- CMake
+- CMake (>= 3.15)
 - Git
-- C++ 17 compiler
-- libssl-dev
+- C++ 17 compiler (gcc, clang, or MSVC)
+- libssl-dev (OpenSSL development headers)
 - When Fast-DDS installation is present it will be used, otherwise downloaded and built automatically
 
-**Python:**
+**C++ (Windows):**
 
-- Linux or macOS
+- Visual Studio 2019+ (MSVC) with C++ 17 support
+- CMake (>= 3.15)
+- Git
+- Ninja build system
+- OpenSSL (install via `install_dependencies.ps1` or manually provide headers/libs)
+- SWIG 4.0+ (only if building Python bindings)
+
+**Python (Linux / macOS):**
+
 - Git
 - Python 3
 - Pip 3
 - unzip
 
+**Python (Windows):**
+
+- Git
+- Python 3
+- Pip 3
+- All C++ (Windows) dependencies above (pip install builds from source)
+
 When using non-binary-prebuilt configurations (i.e. any macOS, Linux Debug, non-x64/non-aarch64, non-master provizio_dds_idls) all the C++ dependencies will also be required.
 
 There is a convenience Bash script to install all dependencies in *apt*-featuring Linux and macOS. In Linux it's to be executed with root privileges, f.e. using `sudo`.
+
+**Windows:** Use the PowerShell script from an elevated (Administrator) prompt:
+
+```PowerShell
+.\install_dependencies.ps1 [-WithPython ON|OFF]
+```
+
+This installs OpenSSL, Ninja, SWIG (when Python is enabled), and other required tools.
 
 Use as:
 
@@ -76,12 +98,14 @@ ExternalProject_Add(libprovizio_dds
     PREFIX "${PROVIZIO_DDS_PREFIX}"
     SOURCE_DIR "${PROVIZIO_DDS_SOURCE_DIR}"
     BINARY_DIR "${PROVIZIO_DDS_BINARY_DIR}"
-    CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${PROVIZIO_DDS_INSTALL_DIR}" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON"
+    CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${PROVIZIO_DDS_INSTALL_DIR}" "-DENABLE_TESTS=OFF" "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON"
 )
 add_dependencies(<YOUR_CMAKE_TARGET> libprovizio_dds)
 target_include_directories(<YOUR_CMAKE_TARGET> SYSTEM PUBLIC "${PROVIZIO_DDS_INSTALL_DIR}/include")
 target_link_directories(<YOUR_CMAKE_TARGET> PUBLIC "${PROVIZIO_DDS_INSTALL_DIR}/lib")
 target_link_libraries(<YOUR_CMAKE_TARGET> PUBLIC provizio_dds provizio_dds_types fastrtps fastcdr)
+# Note: on Windows/MSVC, Fast-DDS uses versioned library names (e.g. fastrtps-2.14, fastcdr-2.2).
+# The ExternalProject above creates unversioned imported targets that resolve automatically.
 ```
 
 **Python (pip):**
@@ -94,6 +118,12 @@ or
 
 ```Bash
 python3 -m pip install -v git+https://github.com/provizio/provizio_dds.git@TAG_or_BRANCH
+```
+
+On Windows, use `python` instead of `python3`:
+
+```PowerShell
+python -m pip install -v git+https://github.com/provizio/provizio_dds.git
 ```
 
 ## Publishing Data

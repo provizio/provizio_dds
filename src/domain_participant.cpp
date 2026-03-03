@@ -94,6 +94,10 @@ namespace provizio::dds
             }
         }
 
+        // Safe even after individual RAII deletions: shared_ptr ownership ensures all
+        // publishers/subscribers are destroyed (and have deleted their entities) before
+        // this destructor runs. This call cleans up any residual entities (e.g. topics
+        // that were not individually freed) and is a harmless no-op otherwise.
         participant->delete_contained_entities();
         DomainParticipantFactory::get_instance()->delete_participant(participant);
     }

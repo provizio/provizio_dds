@@ -103,6 +103,9 @@ if __name__ == "__main__":
 
         print("Success!")
     finally:
+        # On Windows, terminate() calls TerminateProcess which skips Python atexit
+        # handlers. The DDS participant is not gracefully cleaned up, but the OS
+        # reclaims SHM resources when the process exits.
         proc.terminate()
         proc.join(timeout=5)
         if proc.is_alive():

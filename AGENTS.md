@@ -118,11 +118,15 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
 |--------|---------|-------------|
 | `ENABLE_TESTS` | OFF | Build and enable CTest tests |
 | `PYTHON_BINDINGS` | OFF | Generate SWIG Python bindings |
+| `PYTHON_PACKAGES_INSTALL_DIR` | "" | Install directory for Python artifacts (empty uses default sysconfig path) |
 | `LOOK_FOR_FAST_DDS` | FALSE | Try system Fast-DDS before building from source |
 | `IGNORE_BIN_CACHE` | OFF | Force build from source (skip prebuilt cache) |
 | `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS` | OFF | Disable Provizio coding standards (clang-tidy, formatting) |
-| `STATIC_ANALYSIS` | OFF | Enable clang-tidy static analysis |
+| `STATIC_ANALYSIS` | OFF | Enable clang-tidy static analysis (requires coding standards checks enabled; not supported on macOS+clang) |
 | `INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS` | OFF | Linux: use versioned .so names to avoid runtime conflicts |
+| `FAST_DDS_VERSION` | "v2.14.2" | Fast-DDS Git tag to build from source |
+| `FAST_CDR_VERSION` | "2.2" | Fast-CDR major.minor version for Windows versioned library naming (must match FAST_DDS_VERSION bundle) |
+| `DONT_INSTALL_STDCPP_LIBS` | ON | When installing from prebuilt binaries, skip standard C++ libraries |
 
 ## Git Workflow
 

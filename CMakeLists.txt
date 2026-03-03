@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-cmake_minimum_required(VERSION 3.11.0)
+cmake_minimum_required(VERSION 3.15.0)
 
 include(ExternalProject)
 include(FetchContent)
@@ -20,7 +20,7 @@ include(FetchContent)
 # Configuration
 set(PROVIZIO_DDS_IDLS_VERSION "1.6.1" CACHE STRING "provizio_dds_idls version")
 set(FAST_DDS_VERSION "v2.14.2" CACHE STRING "Fast-DDS version, when not already present in the system")
-set(FAST_CDR_VERSION "2.2" CACHE STRING "Fast-CDR major.minor version (for Windows versioned library naming)")
+set(FAST_CDR_VERSION "2.2" CACHE STRING "Fast-CDR major.minor version (for Windows versioned library naming). Must match the Fast-CDR bundled with FAST_DDS_VERSION")
 set(LOOK_FOR_FAST_DDS FALSE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
 set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.1" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
 set(FAST_DDS_PYTHON_VERSION "1.3.2" CACHE STRING "Fast-DDS-python version, without v prefix")
@@ -40,6 +40,8 @@ set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link 
 # violations when loading .pyd modules. Force /MD for all targets so the entire
 # DLL chain is CRT-compatible with the Release Python interpreter.
 set(PROVIZIO_DDS_FORCE_RELEASE_CRT OFF)
+# Note: CMAKE_BUILD_TYPE check works because the project uses Ninja (single-config).
+# Multi-config generators (Visual Studio) would need generator expressions instead.
 if(WIN32 AND PYTHON_BINDINGS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     if(POLICY CMP0091)
         cmake_policy(SET CMP0091 NEW)
@@ -234,6 +236,9 @@ if(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
 else(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
     set(CMAKE_CXX_STANDARD 17)
     if(MSVC)
+        # Applied globally because Fast-DDS headers trigger these in all consuming targets:
+        # /wd4068: unknown pragma (Fast-DDS uses GCC pragmas)
+        # /wd4996: deprecated API (Fast-DDS uses deprecated POSIX functions)
         add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/EHsc>" /wd4068 /wd4996)
     endif(MSVC)
     if(STATIC_ANALYSIS)
@@ -417,23 +422,27 @@ else(HAS_BIN_CACHE)
         if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
             set(_FAST_DDS_BUILD_TYPE "Release")
         endif()
-        set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules" "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
-        if(NOT OPENSSL_FOUND)
-            list(APPEND FAST_DDS_CMAKE_ARGS "-DSECURITY=OFF")
-        endif(NOT OPENSSL_FOUND)
+        set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules")
+        if(NOT WIN32)
+            list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
+        endif()
+        # OpenSSL is always available here (find_package REQUIRED above)
+
+        # Parse Fast-DDS version once for byproducts and library naming below
+        string(REGEX REPLACE "^v" "" FAST_DDS_VERSION_STRIPPED "${FAST_DDS_VERSION}")
+        string(REGEX MATCH "^[0-9]+\\.[0-9]+" FAST_DDS_MAJOR_MINOR "${FAST_DDS_VERSION_STRIPPED}")
+        if(_FAST_DDS_BUILD_TYPE STREQUAL "Debug")
+            set(FAST_DDS_DEBUG_SUFFIX "d")
+        else()
+            set(FAST_DDS_DEBUG_SUFFIX "")
+        endif()
+
         # Declare library byproducts so the Ninja generator knows which build
         # rule produces them (required for imported-target file-level deps).
         if(WIN32)
-            string(REGEX REPLACE "^v" "" _FD_VER_STRIPPED "${FAST_DDS_VERSION}")
-            string(REGEX MATCH "^[0-9]+\\.[0-9]+" _FD_MAJOR_MINOR "${_FD_VER_STRIPPED}")
-            if(_FAST_DDS_BUILD_TYPE STREQUAL "Debug")
-                set(_FD_DBG_SUFFIX "d")
-            else()
-                set(_FD_DBG_SUFFIX "")
-            endif()
             set(_FAST_DDS_BYPRODUCTS
-                "${FAST_DDS_INSTALL_DIR}/lib/fastcdr${_FD_DBG_SUFFIX}-${FAST_CDR_VERSION}.lib"
-                "${FAST_DDS_INSTALL_DIR}/lib/fastrtps${_FD_DBG_SUFFIX}-${_FD_MAJOR_MINOR}.lib"
+                "${FAST_DDS_INSTALL_DIR}/lib/fastcdr${FAST_DDS_DEBUG_SUFFIX}-${FAST_CDR_VERSION}.lib"
+                "${FAST_DDS_INSTALL_DIR}/lib/fastrtps${FAST_DDS_DEBUG_SUFFIX}-${FAST_DDS_MAJOR_MINOR}.lib"
             )
         else()
             set(_FAST_DDS_BYPRODUCTS
@@ -455,15 +464,9 @@ else(HAS_BIN_CACHE)
 
         # On Windows, installed libraries have versioned names (e.g. fastrtps-2.14.lib).
         # Debug builds add a 'd' suffix (e.g. fastrtpsd-2.14.lib).
-        # Derive the versioned library names from FAST_DDS_VERSION (e.g. "v2.14.2" -> "2.14").
+        # Version variables (FAST_DDS_VERSION_STRIPPED, FAST_DDS_MAJOR_MINOR, FAST_DDS_DEBUG_SUFFIX)
+        # are parsed above, shared with the byproducts block.
         if(WIN32)
-            string(REGEX REPLACE "^v" "" FAST_DDS_VERSION_STRIPPED "${FAST_DDS_VERSION}")
-            string(REGEX MATCH "^[0-9]+\\.[0-9]+" FAST_DDS_MAJOR_MINOR "${FAST_DDS_VERSION_STRIPPED}")
-            if(_FAST_DDS_BUILD_TYPE STREQUAL "Debug")
-                set(FAST_DDS_DEBUG_SUFFIX "d")
-            else()
-                set(FAST_DDS_DEBUG_SUFFIX "")
-            endif()
             set(FASTRTPS_LIB "fastrtps${FAST_DDS_DEBUG_SUFFIX}-${FAST_DDS_MAJOR_MINOR}")
             set(FASTCDR_LIB "fastcdr${FAST_DDS_DEBUG_SUFFIX}-${FAST_CDR_VERSION}")
 
@@ -522,12 +525,16 @@ else(HAS_BIN_CACHE)
 
     target_include_directories(provizio_dds_types SYSTEM PUBLIC include ${PROVIZIO_DDS_IDLS_SRC_DIR} ${FAST_DDS_INCLUDE_DIRS})
     target_link_libraries(provizio_dds_types PUBLIC ${FASTRTPS_LIB} ${FASTCDR_LIB})
+    # PROVIZIO_DDS_TYPES_EXPORTS is not currently consumed by any header macro
+    # (generated IDL code uses EPROSIMA_USER_DLL_EXPORT instead), but is set for
+    # forward compatibility if a PROVIZIO_DDS_TYPES_API macro is added later.
     set_target_properties(provizio_dds_types PROPERTIES DEFINE_SYMBOL "PROVIZIO_DDS_TYPES_EXPORTS")
 
     # provizio_dds library
     set(PROVIZIO_DDS_SOURCES
         src/domain_participant.cpp
         src/request_response.cpp
+        src/subscriber.cpp
         src/topic.cpp
     )
     add_library(provizio_dds SHARED ${PROVIZIO_DDS_SOURCES})
@@ -805,6 +812,9 @@ else(HAS_BIN_CACHE)
             if(OPENSSL_FOUND)
                 get_filename_component(_OPENSSL_ROOT "${OPENSSL_INCLUDE_DIR}" DIRECTORY)
                 file(GLOB _OPENSSL_DLLS "${_OPENSSL_ROOT}/bin/libssl*.dll" "${_OPENSSL_ROOT}/bin/libcrypto*.dll")
+                if(NOT _OPENSSL_DLLS)
+                    message(WARNING "OpenSSL DLLs not found under ${_OPENSSL_ROOT}/bin/ (expected libssl*.dll, libcrypto*.dll)")
+                endif()
                 list(APPEND PROVIZIO_DDS_ALL_PYTHON_LIBS ${_OPENSSL_DLLS})
             endif()
         endif()
@@ -905,9 +915,16 @@ else(HAS_BIN_CACHE)
         install(CODE "execute_process(COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/fully_qualified_fastdds_libs.sh\" \"${CMAKE_INSTALL_PREFIX}/lib\")")
     endif(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS AND NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
 
-    # Remove cmake config dirs installed by third-party targets (e.g. fastdds_python).
+    # Remove cmake config dirs installed by third-party targets.
     # These are not needed at runtime and should not be included in packages or caches.
-    install(CODE "file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake\")")
+    # Scoped to specific subdirectories to avoid destroying unrelated cmake configs
+    # when installed to a shared prefix.
+    install(CODE "
+        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastrtps\")
+        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastcdr\")
+        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastdds_python\")
+        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/foonathan_memory\")
+    ")
 
     if(ENABLE_TESTS)
         message(STATUS "ENABLE_TESTS is ON: tests will be built and enabled.")

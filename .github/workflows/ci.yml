@@ -306,6 +306,8 @@ jobs:
       - run: bash -c "source /opt/ros/${{matrix.ros}}/setup.bash && .github/workflows/build.sh -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DSTATIC_ANALYSIS=${STATIC_ANALYSIS} -DPYTHON_BINDINGS=${PYTHON_BINDINGS} -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}"
       - run: bash -c "source /opt/ros/${{matrix.ros}}/setup.bash && .github/workflows/test.sh"
 
+  # Build-only check: catches compile errors early without waiting for the full
+  # test suite. test-windows runs independently and also builds from scratch.
   build-windows-cpp:
     name: Build (Windows)
     runs-on: windows-latest
@@ -341,7 +343,9 @@ jobs:
       - name: Build
         run: cmake --build build -- -j 16
       - name: Test
-        run: cd build && ctest --output-on-failure --repeat until-pass:3
+        # until-pass:2 retries transient DDS discovery failures at the test level;
+        # reliability tests also have internal --retries for per-iteration recovery.
+        run: cd build && ctest --output-on-failure --repeat until-pass:2
 
   test-windows-python-versions:
     name: Test Python ${{matrix.python-version}} (Windows)
@@ -393,7 +397,7 @@ jobs:
               print('ERROR:', type(e).__name__, e)
           "
       - name: Test
-        run: cd build && ctest --output-on-failure --repeat until-pass:3
+        run: cd build && ctest --output-on-failure --repeat until-pass:2
 
   test-windows-pip-package:
     name: Test pip package Python ${{matrix.python-version}} (Windows)

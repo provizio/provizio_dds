@@ -40,8 +40,8 @@ set_tests_properties(request_response_reliability PROPERTIES TIMEOUT 2000) # Tak
 
 add_test(NAME request_response_reliability_single_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "$<TARGET_FILE:request_response_reliability_service> _single_service 1 128"
-    "\"${PYTHON_EXECUTABLE}\" \"${CMAKE_SOURCE_DIR}/test/run_times.py\" 128 $<TARGET_FILE:request_response_reliability_client> _single_service {i}"
+    "$<TARGET_FILE:request_response_reliability_service> _single_service 1 128 200"
+    "\"${PYTHON_EXECUTABLE}\" \"${CMAKE_SOURCE_DIR}/test/run_times.py\" 128 $<TARGET_FILE:request_response_reliability_client> _single_service {i} 200"
 )
 set_tests_properties(request_response_reliability_single_service PROPERTIES TIMEOUT 2000) # Takes long by design
 

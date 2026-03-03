@@ -385,8 +385,9 @@ class Publisher(_TopicHandle):
         :param domain_participant: A DDS Domain Participant wrapper object, as created by provizio_dds.make_domain_participant
         :param str topic_name: A string DDS Topic name
         :param pub_sub_type: The DDS PubSub Type to be published, f.e. provizio_dds.StringPubSubType
-        :param on_has_subscriber_changed_function: Optional, a function to to be invoked on matching first / unmatching last subscriber, takes two arguments: a Publisher and a bool: True when the first subscriber is matched, False when the last subscriber is unmatched; Note: called from a background Thread
+        :param on_has_subscriber_changed_function: Optional, a function to be invoked on matching first / unmatching last subscriber, takes two arguments: a Publisher and a bool: True when the first subscriber is matched, False when the last subscriber is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data writer reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
+        :param int history_depth: Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history), positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth
         """
 
         super().__init__(domain_participant, topic_name, pub_sub_type)
@@ -534,6 +535,7 @@ class Subscriber(_TopicHandle):
         :param on_data_function: A function to be invoked on receiving published data. It can take one argument (the data) or two arguments (data and a SampleInfo object). Note: called from a background Thread
         :param on_has_publisher_changed_function: Optional, a function to be invoked on matching first / unmatching last publisher, takes a single bool argument: True when the first publisher is matched, False when the last publisher is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data reader reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
+        :param int max_history_depth: Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history), positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth
         """
         super().__init__(domain_participant, topic_name, pub_sub_type)
         self._num_matched_cv = threading.Condition()
@@ -620,24 +622,19 @@ async def request(
     Before publishing the first request, discovery readiness is awaited using a graph-based stable match check
     to avoid races right after endpoint matching.
 
-    Args:
-        domain_participant: Domain participant wrapper created by `make_domain_participant`.
-        request_pub_sub_type: PubSub type for the request.
-        response_pub_sub_type: PubSub type for the response.
-        response_data_type: Concrete data type of the response.
-        request_data: Concrete data instance to publish as the request.
-        request_topic_name: Optional explicit request topic name.
-        response_topic_name: Optional explicit response topic name.
-        service_name: Optional base name to derive request/response topics.
-        stable_matches_period_sec: Optional settling window (seconds) that match counts must remain stable before
-            sending the first request (defaults to 1.0s). Set to 0 to skip the extra wait.
-        service_match_timeout_sec: Optional deadline (seconds) to complete endpoint matching. Set to 0 to wait indefinitely.
-    Returns:
-        The response data instance.
-
-    Raises:
-        ServiceMatchingTimeoutError: If endpoints fail to match within the timeout.
-        RequestPublishError: If publishing the request fails.
+    :param domain_participant: Domain participant wrapper created by ``make_domain_participant``
+    :param request_pub_sub_type: PubSub type for the request
+    :param response_pub_sub_type: PubSub type for the response
+    :param response_data_type: Concrete data type of the response
+    :param request_data: Concrete data instance to publish as the request
+    :param request_topic_name: Optional explicit request topic name
+    :param response_topic_name: Optional explicit response topic name
+    :param service_name: Optional base name to derive request/response topics
+    :param float stable_matches_period_sec: Settling window (seconds) that match counts must remain stable before sending the first request (defaults to 1.0). Set to 0 to skip the extra wait
+    :param float service_match_timeout_sec: Deadline (seconds) to complete endpoint matching. Set to 0 to wait indefinitely
+    :returns: The response data instance
+    :raises ServiceMatchingTimeoutError: If endpoints fail to match within the timeout
+    :raises RequestPublishError: If publishing the request fails
     """
     if request_topic_name is None:
         assert (
@@ -866,16 +863,15 @@ class Service:
     ):
         """Construct a request/response service.
 
-        Args:
-            domain_participant: Domain participant wrapper created by `make_domain_participant`.
-            request_pub_sub_type: PubSub type for requests.
-            request_data_type: Concrete request data type.
-            response_pub_sub_type: PubSub type for responses.
-            handle_request_function: Callable or coroutine to process a request and return response data.
-            request_topic_name: Optional explicit request topic name, or use `service_name`.
-            response_topic_name: Optional explicit response topic name, or use `service_name`.
-            service_name: If provided, request topic is rq/<service_name>Request and response is rr/<service_name>Reply.
-            max_history_depth: Reader history depth for transient local durability; 0 for no history (volatile durability), USE_DEFAULT_QOS_DURABILITY for default.
+        :param domain_participant: Domain participant wrapper created by ``make_domain_participant``
+        :param request_pub_sub_type: PubSub type for requests
+        :param request_data_type: Concrete request data type
+        :param response_pub_sub_type: PubSub type for responses
+        :param handle_request_function: Callable or coroutine to process a request and return response data
+        :param request_topic_name: Optional explicit request topic name, or use ``service_name``
+        :param response_topic_name: Optional explicit response topic name, or use ``service_name``
+        :param service_name: If provided, request topic is rq/<service_name>Request and response is rr/<service_name>Reply
+        :param int max_history_depth: Reader history depth for transient local durability; 0 for no history (volatile durability), USE_DEFAULT_QOS_DURABILITY for default
         """
         default_max_queue_size = 10
         minimal_max_queue_size = 1

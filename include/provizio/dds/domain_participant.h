@@ -47,6 +47,10 @@ namespace provizio::dds
          * @param domain_id DDS domain_id, 0 by default
          */
         domain_participant(DomainId_t domain_id = 0);
+
+        /**
+         * @brief Destroys the domain participant, cleaning up all remaining DDS entities.
+         */
         ~domain_participant();
 
         /**

@@ -58,8 +58,14 @@ namespace provizio::dds
         static constexpr auto memory_policy = eprosima::fastrtps::rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
     };
 
-    // Common QoS constants used across publishers/subscribers
+    /**
+     * @brief Sentinel value for history_depth / max_history_depth parameters: keep default QoS durability.
+     */
     constexpr std::int32_t use_default_qos_durability = -1;
+
+    /**
+     * @brief Sentinel value for history_depth / max_history_depth parameters: force VOLATILE durability (no history).
+     */
     constexpr std::int32_t no_history = 0;
 } // namespace provizio::dds
 

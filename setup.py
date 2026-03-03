@@ -115,7 +115,8 @@ else:
                  "-PythonVersionTag", python_ver_tag],
                 text=True, cwd=source_dir
             ).strip()
-        except Exception:
+        except Exception as e:
+            print(f"Warning: failed to resolve Windows cache name: {e}", flush=True)
             python_cache_config_name = ""
 
         if python_cache_config_name:
