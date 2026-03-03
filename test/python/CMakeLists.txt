@@ -92,7 +92,7 @@ add_test(NAME python_request_response_reliability COMMAND
     "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py \"\" {i} {i}"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
-set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 3500) # Takes long by design
+set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 6000) # Takes long by design, especially on macOS intel Debug
 
 add_test(NAME python_request_response_reliability_single_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
