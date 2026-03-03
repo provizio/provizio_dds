@@ -34,6 +34,7 @@
 
 #include <fastdds/rtps/common/SampleIdentity.h>
 
+#include "provizio/dds/common.h"
 #include "provizio/dds/function_traits.h"
 #include "provizio/dds/ignore_request.h"
 #include "provizio/dds/publisher.h"
@@ -49,23 +50,23 @@ namespace provizio::dds::detail
      * API in `request_response.h`, including request queueing, response dispatching
      * and client-side correlation handling.
      */
-    extern const std::string request_prefix;
-    extern const std::string response_prefix;
-    extern const std::string request_suffix;
-    extern const std::string response_suffix;
-    extern const std::string requests_queue_full_error_message;
+    extern PROVIZIO_DDS_API const std::string request_prefix;
+    extern PROVIZIO_DDS_API const std::string response_prefix;
+    extern PROVIZIO_DDS_API const std::string request_suffix;
+    extern PROVIZIO_DDS_API const std::string response_suffix;
+    extern PROVIZIO_DDS_API const std::string requests_queue_full_error_message;
 
     /**
      * @brief Converts history depth QoS into a bounded request queue size.
      * @param max_history_depth Use negative value to keep default, 0 for minimal, positive for specific max queue size.
      * @return Maximum number of requests to buffer.
      */
-    std::size_t to_max_queue_size(const std::int32_t max_history_depth);
+    PROVIZIO_DDS_API std::size_t to_max_queue_size(const std::int32_t max_history_depth);
 
     /**
      * @brief Checks whether a GUID refers to a DataReader endpoint (subscriber GUID).
      */
-    bool is_subscriber(const guid &guid_to_check);
+    PROVIZIO_DDS_API bool is_subscriber(const guid &guid_to_check);
 
     template <typename function_type, typename = void> struct returns_future : std::false_type
     {
@@ -102,7 +103,7 @@ namespace provizio::dds::detail
     /**
      * @brief Hash functor for `guid` to be used in unordered containers.
      */
-    struct guid_hash
+    struct PROVIZIO_DDS_API guid_hash
     {
         std::size_t operator()(const guid &the_guid) const;
     };

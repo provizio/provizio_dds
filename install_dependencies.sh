@@ -28,7 +28,7 @@ CC=${CC:-"gcc"}
 
 FAST_DDS_VERSION=${FAST_DDS_VERSION:-v2.14.2}
 FAST_CDR_VERSION=${FAST_CDR_VERSION:-v2.2.2}
-SWIG_VERSION=${SWIG_VERSION:-4.2.1}
+SWIG_VERSION=${SWIG_VERSION:-4.4.1}
 
 if [[ "${OSTYPE}" == "darwin"* ]]; then
   # macOS
@@ -67,7 +67,7 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
     # Make a virtual environment to avoid "error: externally-managed-environment"
     python3 -m venv /tmp/provizio_dds.venv
     source /tmp/provizio_dds.venv/bin/activate
-    python3 -m pip install wheel setuptools
+    python3 -m pip install wheel setuptools "numpy>=1.16" "transforms3d>=0.4.1"
     deactivate
   fi
 
@@ -276,11 +276,11 @@ else
     # Install Python and related dependencies
     apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev python3-setuptools
 
-    # Install SWIG (ubuntu 18 has too old swig in apt, ubuntu 24 has a broken version of swig in apt, see https://github.com/swig/swig/issues/2794)
-    if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_24}" = true ]; then
-      echo "Installing SWIG v${SWIG_VERSION} from source..."
-      apt remove -y swig # But first, make sure to delete any version that may already be installed
-      if ! swig -version; then
+    # Install SWIG >= 4.4 from source (apt versions are too old or broken across Ubuntu releases)
+    CURRENT_SWIG_VERSION=$(swig -version 2>/dev/null | grep -oP 'SWIG Version \K[0-9.]+' || echo "0.0.0")
+    if [ "$(printf '%s\n' "4.4.0" "${CURRENT_SWIG_VERSION}" | sort -V | head -n1)" != "4.4.0" ]; then
+      echo "Installing SWIG v${SWIG_VERSION} from source (current: ${CURRENT_SWIG_VERSION})..."
+      apt remove -y swig 2>/dev/null || true
       (
         set -eu
 
@@ -293,18 +293,18 @@ else
         make -j8
         make install
       )
-      fi
     else
-      echo "Installing SWIG from apt..."
-      apt install -y --no-install-recommends swig
+      echo "SWIG ${CURRENT_SWIG_VERSION} already installed, skipping..."
     fi
 
     # Install specific Cython in older versions of Python (see https://github.com/numpy/numpy/issues/24377)
     python_version=$(python3 -c 'import sys; print("".join(map(str, sys.version_info[:2])))')
     if [[ "${python_version}" -lt "39" ]]; then
         python3 -m pip install "Cython<3"
-        python3 -m pip install "numpy>=1.16"
     fi
+
+    # Install Python runtime dependencies
+    python3 -m pip install "numpy>=1.16" "transforms3d>=0.4.1" --break-system-packages || python3 -m pip install "numpy>=1.16" "transforms3d>=0.4.1"
   fi
 fi
 

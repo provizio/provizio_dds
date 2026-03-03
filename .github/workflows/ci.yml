@@ -6,7 +6,7 @@ on:
 
 jobs:
   build-cache:
-    name: Build bin cache for build speed-up
+    name: Build bin cache (C++ only)
     runs-on: ${{matrix.runner}}
     strategy:
         matrix:
@@ -16,7 +16,7 @@ jobs:
     env:
       CC: gcc
       STATIC_ANALYSIS: OFF
-      WITH_PYTHON: ON
+      WITH_PYTHON: OFF
     steps:
       - uses: actions/checkout@v4
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${WITH_PYTHON}" "${STATIC_ANALYSIS}"
@@ -28,10 +28,99 @@ jobs:
           path: cache/${{env.cache_artifact_name}}.zip
           if-no-files-found: error
           retention-days: 1
+
+  build-cache-python:
+    # One cache per ABI group: Python 3.10-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14").
+    # x86_64 only (jetson excluded: actions/setup-python doesn't work on self-hosted ARM runners).
+    name: Build Python bin cache (${{matrix.runner}}, Python ${{matrix.python-version}})
+    runs-on: ${{matrix.runner}}
+    strategy:
+        matrix:
+            runner: [ubuntu-22.04]
+            build_type: [Release]
+            python-version: ['3.12', '3.14']
+        fail-fast: true
+    env:
+      CC: gcc
+      STATIC_ANALYSIS: OFF
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{matrix.python-version}}
+          allow-prereleases: true
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}"
+      - run: .github/workflows/build_cache.sh "${{matrix.build_type}}" "ON" "${STATIC_ANALYSIS}"
+      - name: Get Python cache artifact name
+        run: |
+          PYTHON_ABI_TAG=$(python3 -c 'import sys; print("3_14" if sys.version_info >= (3, 14) else "3")')
+          echo "cache_artifact_name=$(./bin_cache_config_name.sh "${{matrix.build_type}}" "" "${PYTHON_ABI_TAG}")" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{env.cache_artifact_name}}
+          path: cache/${{env.cache_artifact_name}}.zip
+          if-no-files-found: error
+          retention-days: 1
   
+  build-cache-windows:
+    name: Build bin cache (Windows, C++ only)
+    runs-on: windows-latest
+    strategy:
+        matrix:
+            build_type: [Release]
+        fail-fast: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build cache
+        run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}"
+      - name: Get cache artifact name
+        run: |
+          $name = .\bin_cache_config_name.ps1 -BuildType "${{matrix.build_type}}"
+          echo "cache_artifact_name=$name" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{env.cache_artifact_name}}
+          path: cache/${{env.cache_artifact_name}}.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  build-cache-windows-python:
+    # On Windows, .pyd files link against specific pythonXY.dll, so each minor version needs
+    # its own cache (unlike Linux where 3.10-3.13 share ABI compatibility).
+    name: Build Python bin cache (Windows, Python ${{matrix.python-version}})
+    runs-on: windows-latest
+    strategy:
+        matrix:
+            build_type: [Release]
+            python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        fail-fast: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{matrix.python-version}}
+          allow-prereleases: true
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython ON
+      - name: Build cache
+        run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}" "ON"
+      - name: Get Python cache artifact name
+        run: |
+          $verTag = python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')"
+          $name = .\bin_cache_config_name.ps1 -BuildType "${{matrix.build_type}}" -PythonVersionTag $verTag
+          echo "cache_artifact_name=$name" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{env.cache_artifact_name}}
+          path: cache/${{env.cache_artifact_name}}.zip
+          if-no-files-found: error
+          retention-days: 1
+
   commit-cache:
     name: Commit bin cache
-    needs: build-cache
+    needs: [build-cache, build-cache-windows, build-cache-python, build-cache-windows-python]
     runs-on: ubuntu-latest
     outputs:
       cache_commit_sha: ${{steps.cache_commit_sha.outputs.cache_commit_sha}}
@@ -95,13 +184,34 @@ jobs:
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
 
+  test-nix-python-versions:
+    name: Test Python ${{matrix.python-version}}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+      fail-fast: false
+    env:
+      CC: gcc
+      STATIC_ANALYSIS: OFF
+      ENABLE_ROS_TESTS: OFF
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{matrix.python-version}}
+          allow-prereleases: true
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE=Release -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS=ON -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS} -DPython3_EXECUTABLE="$(which python3)"
+      - run: .github/workflows/test.sh
+
   test-nix-pip-package:
     name: Test pip package
     needs: commit-cache
     runs-on: ${{matrix.runner}}
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-22.04, jetson-20.04, macos-15-intel]
+        runner: [ubuntu-22.04, jetson-20.04]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}
@@ -110,6 +220,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}"
+      - run: .github/workflows/test_pip_package.sh
+
+  test-nix-pip-package-python-versions:
+    name: Test pip package Python ${{matrix.python-version}} / ${{matrix.cc}} (${{matrix.runner}})
+    needs: commit-cache
+    runs-on: ${{matrix.runner}}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, macos-15-intel]
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        cc: [gcc, clang]
+      fail-fast: false
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: OFF
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{matrix.python-version}}
+          allow-prereleases: true
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}"
       - run: .github/workflows/test_pip_package.sh
 
@@ -169,9 +303,131 @@ jobs:
       - run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${PYTHON_BINDINGS}" "${STATIC_ANALYSIS}"
       - run: .github/workflows/sudo.sh apt install -y ros-${{matrix.ros}}-demo-nodes-cpp
-      - run: python3 -m pip install 'numpy>=1.16' 'transforms3d>=0.4.1' --break-system-packages || python3 -m pip install 'numpy>=1.16' 'transforms3d>=0.4.1'
       - run: bash -c "source /opt/ros/${{matrix.ros}}/setup.bash && .github/workflows/build.sh -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DSTATIC_ANALYSIS=${STATIC_ANALYSIS} -DPYTHON_BINDINGS=${PYTHON_BINDINGS} -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}"
       - run: bash -c "source /opt/ros/${{matrix.ros}}/setup.bash && .github/workflows/test.sh"
+
+  # Build-only check: catches compile errors early without waiting for the full
+  # test suite. test-windows runs independently and also builds from scratch.
+  build-windows-cpp:
+    name: Build (Windows)
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        build_type: [Debug, Release]
+        with_python: [OFF, ON]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython "${{matrix.with_python}}"
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DPYTHON_BINDINGS=${{matrix.with_python}} -DENABLE_TESTS=ON -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON
+      - name: Build
+        run: cmake --build build -- -j 16
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+        with_python: [OFF, ON]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython "${{matrix.with_python}}"
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DPYTHON_BINDINGS=${{matrix.with_python}} -DENABLE_TESTS=ON -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON -DENABLE_ROS_TESTS=OFF
+      - name: Build
+        run: cmake --build build -- -j 16
+      - name: Test
+        # until-pass:2 retries transient DDS discovery failures at the test level;
+        # reliability tests also have internal --retries for per-iteration recovery.
+        run: cd build && ctest --output-on-failure --repeat until-pass:2
+
+  test-windows-python-versions:
+    name: Test Python ${{matrix.python-version}} (Windows)
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{matrix.python-version}}
+          allow-prereleases: true
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython ON
+      - name: Configure
+        run: |
+          $pythonPath = (Get-Command python).Source
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPYTHON_BINDINGS=ON -DENABLE_TESTS=ON -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON -DENABLE_ROS_TESTS=OFF -DPython3_EXECUTABLE="$pythonPath"
+      - name: Build
+        run: cmake --build build -- -j 16
+      - name: Verify Python test environment
+        run: |
+          python -X faulthandler -c "
+          import os, sys, ctypes
+          test_dir = os.path.abspath('build/test/python')
+          print('Python:', sys.version)
+          print('Test dir:', test_dir)
+          dlls = [f for f in os.listdir(test_dir) if f.endswith('.dll') or f.endswith('.pyd')]
+          print('DLLs/PYDs:', sorted(dlls))
+          # Check for potentially conflicting OpenSSL DLLs in PATH
+          for p in os.environ.get('PATH', '').split(os.pathsep):
+              if p and os.path.isdir(p):
+                  for f in os.listdir(p):
+                      if f.lower().startswith(('libssl', 'libcrypto')) and f.endswith('.dll'):
+                          print(f'  OpenSSL DLL: {os.path.join(p, f)}')
+          os.chdir(test_dir)
+          os.add_dll_directory(test_dir)
+          try:
+              from fastdds import DomainParticipantFactory
+              print('fastdds import OK')
+              factory = DomainParticipantFactory.get_instance()
+              print('get_instance OK:', factory)
+              factory.load_profiles()
+              print('load_profiles OK')
+          except Exception as e:
+              print('ERROR:', type(e).__name__, e)
+          "
+      - name: Test
+        run: cd build && ctest --output-on-failure --repeat until-pass:2
+
+  test-windows-pip-package:
+    name: Test pip package Python ${{matrix.python-version}} (Windows)
+    needs: commit-cache
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{matrix.python-version}}
+          allow-prereleases: true
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython ON
+      - name: Create venv and install package
+        run: |
+          python -m venv "$env:TEMP\provizio_dds_test_pip.venv"
+          . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
+          python -m pip install -v .
+      - name: Test pip package
+        run: |
+          . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
+          python test\run_parallel.py "python test\python\python_publisher.py" "python test\python\python_subscriber.py"
+          python test\python\pointcloud2_test.py
 
   test-congested-networks-simple-discovery:
     name: Test working in congested networks (Simple Discovery)

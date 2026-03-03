@@ -30,22 +30,31 @@ def _timestamp() -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
+    if len(sys.argv) not in (4, 5):
         print(
             "Usage: python_request_response_reliability_service.py "
-            "<test_name_postfix> <first_iteration_value> <num_iterations>"
+            "<test_name_postfix> <first_iteration_value> <num_iterations> [<domain_id>]"
         )
         return 1
 
     test_name_postfix = sys.argv[1]
     expected_value = int(sys.argv[2])
     num_iterations = int(sys.argv[3])
+    # Remap to domain IDs 100-127 to avoid exceeding Fast-DDS max (127) and
+    # to prevent multicast discovery state accumulation across rapid
+    # participant create/destroy cycles.
+    _BASE_DOMAIN_ID = 100
+    _DOMAIN_RANGE = 28  # 100..127
+    domain_id = (
+        (_BASE_DOMAIN_ID + int(sys.argv[4]) % _DOMAIN_RANGE)
+        if len(sys.argv) > 4
+        else 14
+    )
     initial_iterations = max(1, num_iterations)
     wait_timeout = num_iterations * 3.0 + 5
 
     log_prefix = f"python_request_response_reliability_service{test_name_postfix}: "
     service_name = f"provizio_dds_test_request_response_reliability{test_name_postfix}"
-    domain_id = 14
 
     max_wait_both_sides_ms = 1999
     wait_in_server_over_ms = 1000  # In every iteration we either postpone the client or the server, never both

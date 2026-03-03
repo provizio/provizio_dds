@@ -21,6 +21,7 @@
 #include <mutex>
 #include <string>
 
+#include "provizio/dds/topic.h"
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
@@ -28,9 +29,6 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 #include <fastdds/dds/topic/qos/TopicQos.hpp>
 #include <fastrtps/types/TypesBase.h>
-#include <fastrtps/xmlparser/XMLParserCommon.h>
-
-#include "provizio/dds/topic.h"
 
 namespace provizio::dds
 {
@@ -45,10 +43,10 @@ namespace provizio::dds
         // In Fast-DDS 3 it's now DEFAULT_FASTDDS_ENV_VARIABLE and its value has changed from
         // FASTRTPS_DEFAULT_PROFILES_FILE to FASTDDS_DEFAULT_PROFILES_FILE. When upgrading, make sure to update it
         // in provizio_dds.py too.
-        inline const char *xml_profiles_env_variable()
-        {
-            return eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE;
-        }
+        // Note: hardcoded instead of using eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE
+        // because that extern const lacks __declspec(dllimport) in Fast-DDS headers, causing LNK2019 on MSVC.
+        // NOLINTNEXTLINE: follows eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE
+        constexpr char default_fastrtps_env_variable[] = "FASTRTPS_DEFAULT_PROFILES_FILE";
     } // namespace
 
     domain_participant::domain_participant(const DomainId_t domain_id)
@@ -57,7 +55,7 @@ namespace provizio::dds
         DomainParticipantQos customized_qos;
 
         bool xml_profile = false;
-        if (auto *const file_path = std::getenv(xml_profiles_env_variable())) // NOLINT: getenv required
+        if (auto *const file_path = std::getenv(default_fastrtps_env_variable)) // NOLINT: getenv required
         {
             xml_profile = std::filesystem::exists(file_path) && !std::filesystem::is_directory(file_path);
         }
@@ -96,6 +94,11 @@ namespace provizio::dds
             }
         }
 
+        // Safe even after individual RAII deletions: shared_ptr ownership ensures all
+        // publishers/subscribers are destroyed (and have deleted their entities) before
+        // this destructor runs. This call cleans up any residual entities (e.g. topics
+        // that were not individually freed) and is a harmless no-op otherwise.
+        participant->delete_contained_entities();
         DomainParticipantFactory::get_instance()->delete_participant(participant);
     }
 

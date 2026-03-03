@@ -24,7 +24,7 @@ TEST_TOPIC_NAME_1 = "provizio_dds_test_simplest_pub_sub_topic_1"
 TEST_TOPIC_NAME_2 = "provizio_dds_test_simplest_pub_sub_topic_2"
 TEST_VALUE = "provizio_dds_test"
 WAIT_TIME = 0.2
-PUBLISH_TIMES = 25
+PUBLISH_TIMES = 50
 
 participant = provizio_dds.make_domain_participant()
 
