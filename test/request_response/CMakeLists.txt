@@ -21,6 +21,7 @@ add_test(NAME request_response COMMAND
     "$<TARGET_FILE:request_response_service> serial_requests"
     "$<TARGET_FILE:request_response_client>"
 )
+set_tests_properties(request_response PROPERTIES TIMEOUT 60)
 
 # On Windows, add inter-iteration delay to let the OS release DDS shared memory resources
 # between rapid participant create/destroy cycles (prevents discovery failures on Debug builds)
@@ -49,23 +50,27 @@ add_test(NAME request_response_concurrent_requests_serial_service COMMAND
     "$<TARGET_FILE:request_response_service>"
     "$<TARGET_FILE:request_response_concurrent_requests>"
 )
+set_tests_properties(request_response_concurrent_requests_serial_service PROPERTIES TIMEOUT 60)
 
 add_test(NAME request_response_dual_service_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "$<TARGET_FILE:request_response_dual_service>"
 )
+set_tests_properties(request_response_dual_service_test PROPERTIES TIMEOUT 60)
 
 add_test(NAME request_response_ignore COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "$<TARGET_FILE:request_response_ignore_service>"
     "$<TARGET_FILE:request_response_ignore_client>"
 )
+set_tests_properties(request_response_ignore PROPERTIES TIMEOUT 90)
 
 add_test(NAME request_response_ignore_async COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "$<TARGET_FILE:request_response_ignore_service_async>"
     "$<TARGET_FILE:request_response_ignore_client>"
 )
+set_tests_properties(request_response_ignore_async PROPERTIES TIMEOUT 90)
 
 if(WIN32)
     set_tests_properties(

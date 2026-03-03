@@ -68,11 +68,10 @@ else:
     cmake_arguments = os.environ.get("CMAKE_ARGUMENTS", "")
 
     # Check if there is a prebuilt cache for our configuration (unless custom cmake_arguments are required)
-    import sys as _sys
 
     if platform == "linux" and cmake_arguments == "":
         # On Linux, 3.10-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
-        python_abi_tag = "3_14" if _sys.version_info >= (3, 14) else "3"
+        python_abi_tag = "3_14" if sys.version_info >= (3, 14) else "3"
         python_cache_config_name = (
             os.popen(source_dir + "/bin_cache_config_name.sh '' '' " + python_abi_tag).read().strip()
         )
@@ -107,7 +106,7 @@ else:
 
     elif platform == "win32" and cmake_arguments == "":
         # On Windows, .pyd files link against specific pythonXY.dll, so each version needs its own cache
-        python_ver_tag = f"{_sys.version_info.major}{_sys.version_info.minor}"
+        python_ver_tag = f"{sys.version_info.major}{sys.version_info.minor}"
         import subprocess
         ps_script = os.path.join(source_dir, "bin_cache_config_name.ps1")
         try:
@@ -168,7 +167,7 @@ setup(
     license="License :: OSI Approved :: Apache Software License",
     platforms=[
         "Operating System :: POSIX :: Linux",
-        "OPERATING SYSTEM :: MACOS :: MACOS X",
+        "Operating System :: MacOS :: MacOS X",
         "Operating System :: Microsoft :: Windows",
     ],
     url="https://github.com/provizio/provizio_dds",

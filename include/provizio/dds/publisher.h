@@ -299,12 +299,12 @@ namespace provizio::dds
                     {
                         if (info.current_count > 0 && info.current_count_change == info.current_count)
                         {
-                            // Just matched the first publisher
+                            // Just matched the first subscriber
                             publisher.on_matched_function(publisher, true);
                         }
                         else if (info.current_count == 0 && info.current_count_change < 0)
                         {
-                            // Just unmatched the last publisher
+                            // Just unmatched the last subscriber
                             publisher.on_matched_function(publisher, false);
                         }
                     }

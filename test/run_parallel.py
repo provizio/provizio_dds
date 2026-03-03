@@ -16,7 +16,7 @@
 
 # Cross-platform replacement for run_multiple.sh
 # Launches all arguments as parallel subprocesses, waits for all, exits non-zero if any fails
-# Also handles ROS environment cleanup (equivalent of unset_ros.sh)
+# Also handles ROS environment cleanup
 #
 # Per-command ROS environment:
 #   By default, ROS environment variables are cleaned to avoid conflicts with
@@ -25,6 +25,7 @@
 #   inherit the original ROS-sourced environment.
 
 import os
+import signal
 import sys
 import subprocess
 
@@ -48,13 +49,46 @@ if ament:
 else:
     clean_env = original_env
 
+
+def kill_all(procs):
+    """Kill all processes that are still alive."""
+    for p in procs:
+        if p.poll() is None:
+            try:
+                if sys.platform == "win32":
+                    # On Windows, shell=True spawns cmd.exe; killing just the
+                    # shell may orphan the child. Use taskkill /T to kill the
+                    # entire process tree.
+                    subprocess.call(
+                        ["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                pass
+
+
 # Launch each command with the appropriate environment
 procs = []
+popen_kwargs = {}
+if sys.platform != "win32":
+    popen_kwargs["preexec_fn"] = os.setsid  # New process group for clean killpg
+
 for cmd in sys.argv[1:]:
     if cmd.startswith(ROS_CMD_PREFIX):
-        procs.append(subprocess.Popen(cmd[len(ROS_CMD_PREFIX):], shell=True, env=original_env))
+        procs.append(subprocess.Popen(cmd[len(ROS_CMD_PREFIX):], shell=True, env=original_env, **popen_kwargs))
     else:
-        procs.append(subprocess.Popen(cmd, shell=True, env=clean_env))
+        procs.append(subprocess.Popen(cmd, shell=True, env=clean_env, **popen_kwargs))
 
-codes = [p.wait() for p in procs]
-sys.exit(0 if all(c == 0 for c in codes) else 1)
+try:
+    codes = [p.wait() for p in procs]
+except KeyboardInterrupt:
+    kill_all(procs)
+    sys.exit(1)
+
+if not all(c == 0 for c in codes):
+    # One or more processes failed — kill any that are still running
+    kill_all(procs)
+    sys.exit(1)

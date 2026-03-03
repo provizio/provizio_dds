@@ -236,6 +236,7 @@ def make_domain_participant(domain_id: int = 0):
             factory = DomainParticipantFactory.get_instance()
             self._participant.delete_contained_entities()
             factory.delete_participant(self._participant)
+            self._participant = None
 
         def __del__(self):
             self._cleanup()

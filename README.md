@@ -23,7 +23,7 @@ built-in data types.
 - Linux or macOS
 - CMake
 - Git
-- C++ 14 compiler
+- C++ 17 compiler
 - libssl-dev
 - When Fast-DDS installation is present it will be used, otherwise downloaded and built automatically
 
@@ -191,7 +191,7 @@ subscriber = provizio_dds.Subscriber(
     "rt/chatter",                           # DDS Topic Name
     provizio_dds.StringPubSubType,          # DDS Pub/Sub Type
     provizio_dds.String,                    # DDS Data Type
-    lambda message: print(message.data()))  # Message handler (takes a DDS Data Type object), prints the received message
+    lambda message: print(message.data())   # Message handler (takes a DDS Data Type object), prints the received message
 input("Press Enter to continue...") # Wait for any user input
 ```
 

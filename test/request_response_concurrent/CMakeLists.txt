@@ -20,6 +20,7 @@ add_test(NAME request_response_concurrent COMMAND
     "$<TARGET_FILE:request_response_concurrent_service>"
     "$<TARGET_FILE:request_response_concurrent_client>"
 )
+set_tests_properties(request_response_concurrent PROPERTIES TIMEOUT 90)
 if(WIN32)
     set_tests_properties(request_response_concurrent PROPERTIES ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
 endif(WIN32)

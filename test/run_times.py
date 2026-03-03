@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Cross-platform replacement for run_times.sh
 # Runs command N times, replacing {i} with iteration number
 # Arguments are preserved as separate entries to maintain proper quoting
 # when nesting with run_parallel.py
-# Also handles ROS environment cleanup (equivalent of unset_ros.sh)
+# Also handles ROS environment cleanup
 #
 # Usage: run_times.py [--retries R] [--delay D] N command...
 #   --retries R: retry each failed iteration up to R times (default 0)
