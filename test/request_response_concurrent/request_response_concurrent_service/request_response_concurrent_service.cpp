@@ -30,7 +30,8 @@ int main(int argc, char *argv[])
     const std::string service_name{"provizio_dds_test_request_response"};
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr int requests_expected_default = 7;
-    constexpr std::chrono::seconds total_timeout{12};
+    constexpr std::chrono::seconds total_timeout{
+        60}; // DDS entity matching can be slow on some platforms (e.g. Windows)
     constexpr std::chrono::seconds end_sleep{4};
 
     int requests_expected = requests_expected_default;
@@ -59,9 +60,14 @@ int main(int argc, char *argv[])
     auto service = provizio::dds::make_service<std_msgs::msg::Int32PubSubType, std_msgs::msg::Int64PubSubType>(
         domain_participant, service_name,
         [&](const std_msgs::msg::Int32 &request) {
-            // returns std::future for a delayed response
+    // returns std::future for a delayed response
+    // log_prefix capture is required by MSVC but clang considers it unnecessary for constexpr
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-lambda-capture"
+#endif
             return std::async(std::launch::async, [request, &mutex, &got_requests, &condition_variable,
-                                                   requests_expected]() {
+                                                   requests_expected, log_prefix]() {
                 std_msgs::msg::Int64 response;
 
                 const std::int64_t value = static_cast<std::int64_t>(request.data()) * request.data();
@@ -81,6 +87,9 @@ int main(int argc, char *argv[])
                 std::cout << log_prefix << "Response sent (" << request.data() << " => " << value << ")" << std::endl;
                 return response;
             });
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
         },
         max_history_depth);
 

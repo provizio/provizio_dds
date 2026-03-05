@@ -25,7 +25,7 @@ int main()
     const auto reliability_kind = provizio::dds::RELIABLE_RELIABILITY_QOS;
     const std::string topic_name{"provizio_dds_test_reliable_pub_sub_topic"};
     const std::string expected_value{"provizio_dds_test"};
-    const std::chrono::seconds wait_time{3};
+    const std::chrono::seconds wait_time{20};
 
     std::mutex mutex;
     std::condition_variable condition_variable;

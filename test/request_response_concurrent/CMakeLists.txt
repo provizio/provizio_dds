@@ -15,7 +15,13 @@
 add_subdirectory(request_response_concurrent_service)
 add_subdirectory(request_response_concurrent_client)
 
-# TODO: Windows version
 add_test(NAME request_response_concurrent COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { ${CMAKE_SOURCE_DIR}/test/run_multiple.sh \"$<TARGET_FILE:request_response_concurrent_service>\" \"$<TARGET_FILE:request_response_concurrent_client>\"; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"$<TARGET_FILE:request_response_concurrent_service>\""
+    "\"$<TARGET_FILE:request_response_concurrent_client>\""
 )
+if(WIN32)
+    set_tests_properties(request_response_concurrent PROPERTIES TIMEOUT 90 ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
+else()
+    set_tests_properties(request_response_concurrent PROPERTIES TIMEOUT 30)
+endif()

@@ -15,7 +15,13 @@
 add_subdirectory(simplest_publisher_type_reuse)
 add_subdirectory(simplest_subscriber_type_reuse)
 
-# TODO: Windows version
 add_test(NAME pub_sub_type_reuse COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { $<TARGET_FILE:simplest_publisher_type_reuse> & $<TARGET_FILE:simplest_subscriber_type_reuse>; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"$<TARGET_FILE:simplest_publisher_type_reuse>\""
+    "\"$<TARGET_FILE:simplest_subscriber_type_reuse>\""
 )
+if(WIN32)
+    set_tests_properties(pub_sub_type_reuse PROPERTIES TIMEOUT 30 ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
+else()
+    set_tests_properties(pub_sub_type_reuse PROPERTIES TIMEOUT 20)
+endif()

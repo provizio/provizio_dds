@@ -27,7 +27,7 @@ class Timeout:
 async def main():
     service_name = "provizio_dds_test_request_response_ignore"
     domain_id = 14
-    timeout = 5
+    timeout = 8
 
     domain_participant = provizio_dds.make_domain_participant(domain_id)
 
@@ -35,8 +35,8 @@ async def main():
     values = [1, 2, 3, 4, 5]
     received = 0
 
-    # Allow some time for matching
-    await asyncio.sleep(2)
+    # Allow some time for DDS discovery matching (Windows CI can be slow)
+    await asyncio.sleep(3)
 
     for value in values:
         req = provizio_dds.Int32()
