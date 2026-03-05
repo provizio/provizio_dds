@@ -318,6 +318,17 @@ namespace provizio::dds
         }
         cv.notify_all();
         dispatch_responses_thread.join();
+
+        // Explicit shutdown order: stop the subscriber first so no more DDS
+        // callbacks can fire on_data (which pushes to request_handler). Then
+        // destroy the request_handler (joins its processing thread). Finally
+        // destroy the publisher. Without this, implicit member destruction
+        // order (reverse of declaration) destroys subscriber before
+        // request_handler, causing use-after-free SEGFAULTs on Windows where
+        // DDS internal threads may still deliver callbacks during destruction.
+        subscriber.reset();
+        request_handler.stop_and_join();
+        publisher.reset();
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>

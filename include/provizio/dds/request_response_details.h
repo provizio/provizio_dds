@@ -24,6 +24,7 @@
 #include <exception>
 #include <functional>
 #include <future>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <queue>
@@ -34,6 +35,7 @@
 
 #include <fastdds/rtps/common/SampleIdentity.h>
 
+#include "provizio/dds/common.h"
 #include "provizio/dds/function_traits.h"
 #include "provizio/dds/ignore_request.h"
 #include "provizio/dds/publisher.h"
@@ -49,23 +51,26 @@ namespace provizio::dds::detail
      * API in `request_response.h`, including request queueing, response dispatching
      * and client-side correlation handling.
      */
-    extern const std::string request_prefix;
-    extern const std::string response_prefix;
-    extern const std::string request_suffix;
-    extern const std::string response_suffix;
-    extern const std::string requests_queue_full_error_message;
+    // Header-only constants avoid exporting std::string objects across the DLL
+    // boundary (fragile due to allocator/CRT coupling).
+    inline constexpr const char request_prefix[] = "rq/";
+    inline constexpr const char response_prefix[] = "rr/";
+    inline constexpr const char request_suffix[] = "Request";
+    inline constexpr const char response_suffix[] = "Reply";
+    inline constexpr const char requests_queue_full_error_message[] =
+        "provizio_dds: The service requests queue is full! A request will be dropped.";
 
     /**
      * @brief Converts history depth QoS into a bounded request queue size.
      * @param max_history_depth Use negative value to keep default, 0 for minimal, positive for specific max queue size.
      * @return Maximum number of requests to buffer.
      */
-    std::size_t to_max_queue_size(const std::int32_t max_history_depth);
+    PROVIZIO_DDS_API std::size_t to_max_queue_size(const std::int32_t max_history_depth);
 
     /**
      * @brief Checks whether a GUID refers to a DataReader endpoint (subscriber GUID).
      */
-    bool is_subscriber(const guid &guid_to_check);
+    PROVIZIO_DDS_API bool is_subscriber(const guid &guid_to_check);
 
     template <typename function_type, typename = void> struct returns_future : std::false_type
     {
@@ -102,7 +107,7 @@ namespace provizio::dds::detail
     /**
      * @brief Hash functor for `guid` to be used in unordered containers.
      */
-    struct guid_hash
+    struct PROVIZIO_DDS_API guid_hash
     {
         std::size_t operator()(const guid &the_guid) const;
     };
@@ -130,6 +135,11 @@ namespace provizio::dds::detail
                         on_response_function_type<response_pub_sub_type> on_response_function,
                         const std::size_t max_queue_size);
         ~request_handler();
+
+        /**
+         * @brief Stops the processing thread and joins it. Idempotent.
+         */
+        void stop_and_join();
 
         /**
          * @brief Enqueue a new request for processing.
@@ -173,6 +183,11 @@ namespace provizio::dds::detail
                         on_response_function_type<response_pub_sub_type> on_response_function,
                         const std::size_t max_queue_size);
         ~request_handler();
+
+        /**
+         * @brief Stops the processing thread and joins it. Idempotent.
+         */
+        void stop_and_join();
 
         /**
          * @brief Submits a request whose response is produced asynchronously.
@@ -381,12 +396,23 @@ namespace provizio::dds::detail
     request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
                     sfinae_placeholder>::~request_handler()
     {
+        stop_and_join();
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type,
+              typename sfinae_placeholder>
+    void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                         sfinae_placeholder>::stop_and_join()
+    {
         {
             const std::lock_guard<std::mutex> lock{requests_queue_mutex};
             stop = true;
         }
         cv.notify_all();
-        thread.join();
+        if (thread.joinable())
+        {
+            thread.join();
+        }
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type,
@@ -451,12 +477,22 @@ namespace provizio::dds::detail
     request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
                     std::enable_if_t<returns_future<handle_request_function_type>::value>>::~request_handler()
     {
+        stop_and_join();
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
+    void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
+                         std::enable_if_t<returns_future<handle_request_function_type>::value>>::stop_and_join()
+    {
         {
             const std::lock_guard<std::mutex> lock{mutex};
             stop = true;
         }
         cv.notify_one();
-        handler_thread.join();
+        if (handler_thread.joinable())
+        {
+            handler_thread.join();
+        }
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>

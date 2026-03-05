@@ -18,6 +18,26 @@
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/rtps/common/Guid.h>
 
+/**
+ * @brief DLL export/import macro for the provizio_dds shared library.
+ *
+ * On Windows, this resolves to `__declspec(dllexport)` when building the library
+ * and `__declspec(dllimport)` when consuming it. On other platforms it is empty.
+ *
+ * Apply to non-template public classes and free functions that cross the DLL boundary.
+ * Template-only code does not need this macro. Do not define PROVIZIO_DDS_EXPORTS
+ * yourself — it is set automatically by the CMake build system.
+ */
+#ifdef _WIN32
+#ifdef PROVIZIO_DDS_EXPORTS
+#define PROVIZIO_DDS_API __declspec(dllexport)
+#else
+#define PROVIZIO_DDS_API __declspec(dllimport)
+#endif
+#else
+#define PROVIZIO_DDS_API
+#endif
+
 namespace provizio::dds
 {
     /**

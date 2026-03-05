@@ -31,7 +31,7 @@ namespace provizio::dds
      * @brief RAII wrapper for a Topic, automatically unregistering it from the DomainParticipant on destruction.
      * @see provizio::dds::domain_participant::register_topic
      */
-    class topic
+    class PROVIZIO_DDS_API topic
     {
       public:
         /**

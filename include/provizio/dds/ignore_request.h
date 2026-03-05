@@ -17,6 +17,8 @@
 
 #include <exception>
 
+#include "provizio/dds/common.h"
+
 namespace provizio::dds
 {
     /**
@@ -25,7 +27,7 @@ namespace provizio::dds
      *
      * Throw this from a request handler (sync or async) to drop the request silently.
      */
-    class ignore_request : public std::exception
+    class PROVIZIO_DDS_API ignore_request : public std::exception
     {
       public:
         const char *what() const noexcept override
