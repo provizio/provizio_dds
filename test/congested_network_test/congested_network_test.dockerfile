@@ -8,6 +8,7 @@ RUN /opt/install_dependencies.sh ON
 RUN apt install -y iproute2 iputils-ping net-tools socat
 
 COPY . /opt/provizio_dds
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 RUN python3 -m pip install -v /opt/provizio_dds 2>&1 | tee /tmp/pip_install.log && \
     grep -q "Bin cache located and will be used" /tmp/pip_install.log && \
     rm -f /tmp/pip_install.log
