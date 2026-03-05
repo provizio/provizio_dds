@@ -17,6 +17,7 @@ import os
 import os.path
 import re
 import shutil
+import sys
 from sys import platform
 
 
@@ -54,63 +55,108 @@ build_dir = source_dir + "/build/python_packaging"
 install_dir = build_dir + "/install"
 target_dir = build_dir + "/packages"
 os.makedirs(build_dir, exist_ok=True)
-# TODO: Windows support
-if os.path.isfile(f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types.so"):
+# Check for already-built libraries (platform-specific extension)
+_lib_names = (
+    f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types.so",
+    f"{target_dir}/provizio_dds_python_types/provizio_dds_types.dll",
+    f"{target_dir}/provizio_dds_python_types/libprovizio_dds_types.dylib",
+)
+if any(os.path.isfile(lib) for lib in _lib_names):
     print(f"Already built in {build_dir}, only packaging...", flush=True)
 else:
     needs_building = True
     cmake_arguments = os.environ.get("CMAKE_ARGUMENTS", "")
 
     # Check if there is a prebuilt cache for our configuration (unless custom cmake_arguments are required)
+
     if platform == "linux" and cmake_arguments == "":
-        bin_cache_config_name = (
-            os.popen(source_dir + "/bin_cache_config_name.sh").read().strip()
+        # On Linux, 3.8-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
+        python_abi_tag = "3_14" if sys.version_info >= (3, 14) else "3"
+        python_cache_config_name = (
+            os.popen(source_dir + "/bin_cache_config_name.sh '' '' " + python_abi_tag).read().strip()
         )
-        cache_zip = source_dir + "/cache/" + bin_cache_config_name + ".zip"
-        if os.path.isfile(cache_zip):
+        python_cache_zip = source_dir + "/cache/" + python_cache_config_name + ".zip"
+        if os.path.isfile(python_cache_zip):
             if (
                 os.system(
-                    f'unzip -q "{cache_zip}" -d "{build_dir}"'
+                    f'unzip -q "{python_cache_zip}" -d "{build_dir}"'
                 )
                 != 0
             ):
-                raise Exception("Failed to extract bin cache!")
+                raise Exception("Failed to extract Python bin cache!")
 
-            with open(f"{build_dir}/{bin_cache_config_name}/kernel_version", "r") as kernel_version_file:
+            with open(f"{build_dir}/{python_cache_config_name}/kernel_version", "r") as kernel_version_file:
                 cache_kernel_version = kernel_version_file.read().strip()
             host_kernel_version = os.popen("uname -r").read().strip()
 
             if compare_versions(host_kernel_version, cache_kernel_version) >= 0:
                 if (
                     os.system(
-                        f'mv -f "{build_dir}/{bin_cache_config_name}/python" "{target_dir}" && cp -f "{target_dir}/version.txt" "{build_dir}/"'
+                        f'mv -f "{build_dir}/{python_cache_config_name}/python" "{target_dir}" && cp -f "{target_dir}/version.txt" "{build_dir}/"'
                     )
                     != 0
                 ):
-                    raise Exception("Failed to move bin cache!")
-                print(f"Bin cache located and will be used: {bin_cache_config_name}")
+                    raise Exception("Failed to move Python bin cache!")
+                print(f"Bin cache located and will be used: {python_cache_config_name}")
                 needs_building = False
             else:
                 print(f"Bin cache located but built using newer Linux kernel")
-                shutil.rmtree(f"{build_dir}/{bin_cache_config_name}")
+                shutil.rmtree(f"{build_dir}/{python_cache_config_name}")
                 needs_building = True
+
+    elif platform == "win32" and cmake_arguments == "":
+        # On Windows, .pyd files link against specific pythonXY.dll, so each version needs its own cache
+        python_ver_tag = f"{sys.version_info.major}{sys.version_info.minor}"
+        import subprocess
+        ps_script = os.path.join(source_dir, "bin_cache_config_name.ps1")
+        try:
+            python_cache_config_name = subprocess.check_output(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_script,
+                 "-PythonVersionTag", python_ver_tag],
+                text=True, cwd=source_dir
+            ).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"Warning: failed to resolve Windows cache name: {e}", flush=True)
+            python_cache_config_name = ""
+
+        if python_cache_config_name:
+            python_cache_zip = os.path.join(source_dir, "cache", python_cache_config_name + ".zip")
+            if os.path.isfile(python_cache_zip):
+                import zipfile
+                with zipfile.ZipFile(python_cache_zip, "r") as zf:
+                    zf.extractall(build_dir)
+
+                extracted_python = os.path.join(build_dir, python_cache_config_name, "python")
+                if os.path.isdir(extracted_python):
+                    if os.path.isdir(target_dir):
+                        shutil.rmtree(target_dir)
+                    shutil.move(extracted_python, target_dir)
+                    # Copy version.txt to build_dir for later use
+                    version_txt = os.path.join(target_dir, "version.txt")
+                    if os.path.isfile(version_txt):
+                        shutil.copy2(version_txt, build_dir)
+                    shutil.rmtree(os.path.join(build_dir, python_cache_config_name), ignore_errors=True)
+                    print(f"Bin cache located and will be used: {python_cache_config_name}")
+                    needs_building = False
+                else:
+                    shutil.rmtree(os.path.join(build_dir, python_cache_config_name), ignore_errors=True)
 
     if needs_building:
         print("Building C++ libraries from source...", flush=True)
         if (
             os.system(
-                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" {cmake_arguments} "{source_dir}" && cmake --build . --target install -- -j8'
+                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON" "-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" "-DPython3_EXECUTABLE={sys.executable}" {cmake_arguments} "{source_dir}" && cmake --build . --target install -- -j8'
             )
             != 0
         ):
             raise CMakeBuildError()
 
 # Read README.md text
-with open(source_dir + "/README.md", "r") as readme_file:
+with open(source_dir + "/README.md", "r", encoding="utf-8") as readme_file:
     readme = readme_file.read()
 
 # Read Version
-with open(build_dir + "/version.txt", "r") as version_file:
+with open(build_dir + "/version.txt", "r", encoding="utf-8") as version_file:
     version = version_file.read().rstrip()
 
 setup(
@@ -122,7 +168,8 @@ setup(
     license="License :: OSI Approved :: Apache Software License",
     platforms=[
         "Operating System :: POSIX :: Linux",
-        "OPERATING SYSTEM :: MACOS :: MACOS X",
+        "Operating System :: MacOS :: MacOS X",
+        "Operating System :: Microsoft :: Windows",
     ],
     url="https://github.com/provizio/provizio_dds",
     long_description=readme,
@@ -134,5 +181,5 @@ setup(
         "provizio_dds_python_types": f"{target_dir}/provizio_dds_python_types",
         "provizio_dds": f"{target_dir}/provizio_dds",
     },
-    package_data={"": ["*.so*", "*.dll", "*.dylib"]},
+    package_data={"": ["*.so*", "*.dll", "*.pyd", "*.dylib"]},
 )
