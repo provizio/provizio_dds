@@ -41,23 +41,55 @@ BIN_CACHE_PATH="$(realpath ./cache)"
 TARGET_PATH="${BIN_CACHE_PATH}/${BIN_CACHE_CONFIG_NAME}"
 PYTHON_TARGET_PATH="${TARGET_PATH}/python"
 
+# Detect Python ABI group tag when building with Python.
+# Python 3.8-3.13 share ABI compatibility (tag "3"), while 3.14+ broke ABI (tag "3_14").
+PYTHON_VERSION_TAG=""
+if [ "${PYTHON}" == "ON" ]; then
+    PYTHON_VERSION_TAG="$(python3 -c 'import sys; print("3_14" if sys.version_info >= (3, 14) else "3")')"
+fi
+
+PYTHON_CACHE_CONFIG_NAME=""
+if [ -n "${PYTHON_VERSION_TAG}" ]; then
+    PYTHON_CACHE_CONFIG_NAME="$(./bin_cache_config_name.sh "${BUILD_TYPE}" "" "${PYTHON_VERSION_TAG}")"
+fi
+
 PROVIZIO_DDS_CHECK_FILE="${TARGET_PATH}/lib/libprovizio_dds.so"
 CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO="${PYTHON_TARGET_PATH}/provizio_dds_python_types/_provizio_dds_python_types.so"
 
 # Check if it's already built
 ALREADY_BUILT="FALSE"
-if [ -f "${TARGET_PATH}.zip" ]; then
-    ALREADY_BUILT="TRUE"
-    unzip -q "${TARGET_PATH}.zip" -d "${BIN_CACHE_PATH}"
+if [ "${PYTHON}" == "ON" ]; then
+    # When building with Python, both general and python caches must exist
+    if [ -f "${BIN_CACHE_PATH}/${BIN_CACHE_CONFIG_NAME}.zip" ] && [ -f "${BIN_CACHE_PATH}/${PYTHON_CACHE_CONFIG_NAME}.zip" ]; then
+        ALREADY_BUILT="TRUE"
 
-    if [ ! -f "${PROVIZIO_DDS_CHECK_FILE}" ]; then
-        ALREADY_BUILT="FALSE"
-    fi
-    if [ "${PYTHON}" == "ON" ] && [ ! -f "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}" ]; then
-        ALREADY_BUILT="FALSE"
-    fi
+        # Verify the general cache contains expected files
+        unzip -q "${BIN_CACHE_PATH}/${BIN_CACHE_CONFIG_NAME}.zip" -d "${BIN_CACHE_PATH}"
+        if [ ! -f "${PROVIZIO_DDS_CHECK_FILE}" ]; then
+            ALREADY_BUILT="FALSE"
+        fi
+        rm -rf "${TARGET_PATH}"
 
-    rm -rf "${TARGET_PATH}"
+        # Verify the python cache contains expected files
+        if [ "${ALREADY_BUILT}" == "TRUE" ]; then
+            unzip -q "${BIN_CACHE_PATH}/${PYTHON_CACHE_CONFIG_NAME}.zip" -d "${BIN_CACHE_PATH}"
+            PYTHON_CACHE_EXTRACTED="${BIN_CACHE_PATH}/${PYTHON_CACHE_CONFIG_NAME}"
+            if [ ! -f "${PYTHON_CACHE_EXTRACTED}/python/provizio_dds_python_types/_provizio_dds_python_types.so" ]; then
+                ALREADY_BUILT="FALSE"
+            fi
+            rm -rf "${PYTHON_CACHE_EXTRACTED}"
+        fi
+    fi
+else
+    # When building without Python, only the general cache must exist
+    if [ -f "${BIN_CACHE_PATH}/${BIN_CACHE_CONFIG_NAME}.zip" ]; then
+        ALREADY_BUILT="TRUE"
+        unzip -q "${BIN_CACHE_PATH}/${BIN_CACHE_CONFIG_NAME}.zip" -d "${BIN_CACHE_PATH}"
+        if [ ! -f "${PROVIZIO_DDS_CHECK_FILE}" ]; then
+            ALREADY_BUILT="FALSE"
+        fi
+        rm -rf "${TARGET_PATH}"
+    fi
 fi
 
 if [ "${ALREADY_BUILT}" == "TRUE" ]; then
@@ -65,9 +97,16 @@ if [ "${ALREADY_BUILT}" == "TRUE" ]; then
 else
     echo "Building bin cache for ${BIN_CACHE_CONFIG_NAME}..."
 
-    # But first, let's delete any obsolete version there may be
-    # shellcheck disable=SC2046
-    rm -rf "${BIN_CACHE_PATH:?}"/$(./bin_cache_config_name.sh "${BUILD_TYPE}" WILDCARD)*
+    # But first, let's delete any obsolete version there may be (targeted to avoid removing
+    # Python caches for other Python versions that share the same base cache name)
+    WILDCARD_NAME="$(./bin_cache_config_name.sh "${BUILD_TYPE}" WILDCARD)"
+    # shellcheck disable=SC2086
+    rm -rf "${BIN_CACHE_PATH:?}"/${WILDCARD_NAME} "${BIN_CACHE_PATH:?}"/${WILDCARD_NAME}.zip
+    if [ -n "${PYTHON_VERSION_TAG}" ]; then
+        WILDCARD_PYTHON_NAME="$(./bin_cache_config_name.sh "${BUILD_TYPE}" WILDCARD "${PYTHON_VERSION_TAG}")"
+        # shellcheck disable=SC2086
+        rm -rf "${BIN_CACHE_PATH:?}"/${WILDCARD_PYTHON_NAME} "${BIN_CACHE_PATH:?}"/${WILDCARD_PYTHON_NAME}.zip
+    fi
 
     IGNORE_BIN_CACHE=TRUE .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${PYTHON}" -DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS="ON" -DENABLE_TESTS="OFF" -DENABLE_CHECK_FORMAT="OFF" -DCMAKE_INSTALL_PREFIX="${TARGET_PATH}" -DPYTHON_PACKAGES_INSTALL_DIR="${PYTHON_TARGET_PATH}"
     cd ./build
@@ -75,8 +114,6 @@ else
 
     # Delete extra copy of python-specific libs produced by Fast-DDS Python wrapper (as it's already included in dedicated Python subfolder)
     rm -rf "${TARGET_PATH}"/lib/python*
-    # Delete extra cmake files
-    rm -rf "${TARGET_PATH}/lib/cmake"
 
     # Collect all the dependencies as well
     collect_libs() {
@@ -125,15 +162,31 @@ else
     }
 
     collect_all_libs "${TARGET_PATH}/lib"
-    collect_all_libs "${TARGET_PATH}/python/fastdds"
-    collect_all_libs "${TARGET_PATH}/python/provizio_dds"
-    collect_all_libs "${TARGET_PATH}/python/provizio_dds_python_types"
+    if [ "${PYTHON}" == "ON" ]; then
+        collect_all_libs "${TARGET_PATH}/python/fastdds"
+        collect_all_libs "${TARGET_PATH}/python/provizio_dds"
+        collect_all_libs "${TARGET_PATH}/python/provizio_dds_python_types"
+    fi
 
     # Store the build machine's kernel version in the cache
     uname -r > "${TARGET_PATH}/kernel_version"
 
-    # zip it now!
     cd "${BIN_CACHE_PATH}"
-    zip -r -y "${BIN_CACHE_CONFIG_NAME}.zip" "${BIN_CACHE_CONFIG_NAME}"
+
+    if [ "${PYTHON}" == "ON" ]; then
+        # Create python-versioned cache zip (python/ + kernel_version only)
+        PYTHON_CACHE_DIR="${BIN_CACHE_PATH}/${PYTHON_CACHE_CONFIG_NAME}"
+        mkdir -p "${PYTHON_CACHE_DIR}"
+        mv "${TARGET_PATH}/python" "${PYTHON_CACHE_DIR}/python"
+        cp "${TARGET_PATH}/kernel_version" "${PYTHON_CACHE_DIR}/kernel_version"
+        zip -r -y "${PYTHON_CACHE_CONFIG_NAME}.zip" "${PYTHON_CACHE_CONFIG_NAME}"
+        rm -rf "${PYTHON_CACHE_DIR}"
+    fi
+
+    # Create general cache zip (include/, lib/, kernel_version — no python/)
+    # Skip if it already exists (e.g., when only rebuilding for a new Python version)
+    if [ ! -f "${BIN_CACHE_CONFIG_NAME}.zip" ]; then
+        zip -r -y "${BIN_CACHE_CONFIG_NAME}.zip" "${BIN_CACHE_CONFIG_NAME}"
+    fi
     rm -rf "${TARGET_PATH}"
 fi

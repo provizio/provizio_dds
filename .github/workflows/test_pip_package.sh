@@ -47,8 +47,21 @@ fi
 
 cd ../../
 
-# Build and install the package
-python3 -m pip install -v .
+# Build and install the package, capturing output to verify binary cache usage
+PIP_LOG=/tmp/pip_install_provizio_dds.log
+python3 -m pip install -v . 2>&1 | tee "${PIP_LOG}"
+
+# Verify the binary cache was used (unless IGNORE_BIN_CACHE is set, e.g. for
+# preinstalled-fastdds tests that intentionally build from source).
+IGNORE_BIN_CACHE_UPPER="$(echo "${IGNORE_BIN_CACHE:-}" | tr '[:lower:]' '[:upper:]')"
+if [ "${IGNORE_BIN_CACHE_UPPER}" != "TRUE" ] && [ "$(uname -s)" != "Darwin" ]; then
+    if ! grep -q "Bin cache located and will be used" "${PIP_LOG}"; then
+        echo "::error::Binary cache was NOT used during pip install — check cache artifacts and CMake config"
+        exit 1
+    fi
+    echo "Verified: binary cache was used"
+fi
+rm -f "${PIP_LOG}"
 
 # Test it works fine by executing Python tests directly (without copying provizio_dds.py and other beside the tests)
 python3 test/python/python_publisher.py & python3 test/python/python_subscriber.py
