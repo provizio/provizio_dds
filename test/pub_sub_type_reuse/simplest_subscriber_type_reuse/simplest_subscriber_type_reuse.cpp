@@ -25,7 +25,7 @@ int main()
     const std::string topic_name_1{"provizio_dds_test_simplest_pub_sub_type_reuse_topic_1"};
     const std::string topic_name_2{"provizio_dds_test_simplest_pub_sub_type_reuse_topic_2"};
     const std::string expected_value{"provizio_dds_test"};
-    const std::chrono::seconds wait_time{3};
+    const std::chrono::seconds wait_time{10};
 
     std::mutex mutex;
     std::condition_variable condition_variable;

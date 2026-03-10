@@ -18,23 +18,34 @@ internal Provizio software components. Built using eProsima Fast-DDS DDS
 implementation (Apache License 2.0).
 """
 import asyncio
+import atexit
 import inspect
 import os
+import sys
 import threading
 import weakref
 from typing import Any, Callable, Optional
 import time
 from queue import Queue
 
-# until https://bugs.python.org/issue46276 is fixed we can apply this workaround
-# on windows
+# On Windows, Python 3.8+ restricts DLL search paths (https://bugs.python.org/issue46276).
+# Add the directory containing this module so dependent DLLs (provizio_dds, Fast-DDS,
+# OpenSSL, etc.) can be found.  All required DLLs must be co-located with this module
+# (pip install does this automatically; ctest copies them in test/python/CMakeLists.txt).
+# Scanning PATH is intentionally avoided: there can be ABI-incompatible copies of
+# common libraries (e.g. MinGW/MySQL/PHP OpenSSL) that cause access violations when
+# loaded instead of the MSVC-built copies we ship.
 if os.name == "nt":
-    import win32api
+    # Keep the handle alive: closing it removes the directory from the search path.
+    _dll_directory_handle = os.add_dll_directory(os.path.dirname(os.path.abspath(__file__)))
 
-    win32api.LoadLibrary("provizio_dds_python_types")
-
-from provizio_dds_python_types import *
+# Import fastdds first: on Windows, _provizio_dds_python_types.pyd has a DLL-level
+# dependency on _fastdds_python.pyd.  If provizio_dds_python_types is imported first,
+# Windows loads _fastdds_python.pyd as a regular DLL (DllMain only), without calling
+# PyInit__fastdds_python, leaving SWIG type tables uninitialised.  Importing fastdds
+# first ensures the module is properly initialised before anything depends on it.
 from fastdds import *
+from provizio_dds_python_types import *
 
 if __package__ or "." in __name__:
     from . import point_cloud2
@@ -139,6 +150,37 @@ class RequestPublishError(RuntimeError):
     """Raised when the request DataWriter fails to publish."""
 
 
+# ---------------------------------------------------------------------------
+# DDS participant lifecycle
+#
+# During Python interpreter shutdown, the garbage collector may destroy SWIG
+# wrapper objects in an unpredictable order.  If a DomainParticipant is
+# collected before its child entities (Publisher, Subscriber, …) the C++
+# destructors access already-freed memory → access violation.
+#
+# To prevent this we:
+#   1. Track every live _DomainParticipant via weak refs.
+#   2. Register an atexit handler that calls _cleanup() on each participant
+#      *before* the interpreter starts tearing down modules.
+#   3. _cleanup() calls delete_contained_entities() + delete_participant()
+#      and sets a flag so that child __del__ methods become safe no-ops.
+# ---------------------------------------------------------------------------
+_live_participants = []
+_live_participants_lock = threading.Lock()
+
+
+@atexit.register
+def _cleanup_all_participants():
+    """Explicitly destroy every DomainParticipant before interpreter shutdown
+    so that SWIG C++ destructors run in the correct order."""
+    with _live_participants_lock:
+        for ref in reversed(_live_participants):
+            p = ref()
+            if p is not None:
+                p._cleanup()
+        _live_participants.clear()
+
+
 def make_domain_participant(domain_id: int = 0):
     """Creates a new DDS Domain Participant that automatically cleans up internal objects on deletion
 
@@ -147,10 +189,29 @@ def make_domain_participant(domain_id: int = 0):
     """
 
     class _DomainParticipant:
-        # It's FASTDDS_DEFAULT_PROFILES_FILE in Fast-DDS 3, so needs change when upgrading
+        # Hardcoded — must match the C++ constant in domain_participant.cpp, which has a
+        # runtime assertion on Linux/macOS CI verifying it against the Fast-DDS extern.
+        # In Fast-DDS 3 it becomes "FASTDDS_DEFAULT_PROFILES_FILE".
         xml_profiles_env_variable = "FASTRTPS_DEFAULT_PROFILES_FILE"
 
+        # Disable shared memory transport on Windows and macOS via environment
+        # variable (the SWIG bindings do not expose setup_transports()).
+        # Fast-DDS's bundled Boost.Interprocess has a known bug where shared
+        # memory segments and named semaphores from a previous DDS participant
+        # are not cleaned up promptly.  On Windows this causes assertion
+        # failures; on macOS the default system-wide shared memory limits
+        # (kern.sysv.shmmni=32) are quickly exhausted when creating
+        # participants across multiple domain IDs, causing participant
+        # creation to hang indefinitely.
+        _disable_shm = sys.platform in ("win32", "darwin")
+
         def __init__(self, domain_id):
+            self._cleaned_up = False
+
+            # Set before create_participant so Fast-DDS picks it up
+            if _DomainParticipant._disable_shm:
+                os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4")
+
             factory = DomainParticipantFactory.get_instance()
             # It's required so consequent get_default_participant_qos() respects XML profiles
             factory.load_profiles()
@@ -184,11 +245,29 @@ def make_domain_participant(domain_id: int = 0):
             self._register_topic_mutex = threading.Lock()
             self._registered_topics = dict()
 
-        def __del__(self):
+            def _remove_ref(r):
+                with _live_participants_lock:
+                    try:
+                        _live_participants.remove(r)
+                    except ValueError:
+                        pass  # Already removed by _cleanup_all_participants
+
+            ref = weakref.ref(self, _remove_ref)
+            with _live_participants_lock:
+                _live_participants.append(ref)
+
+        def _cleanup(self):
+            """Deterministic cleanup: delete all C++ entities then the participant."""
+            if self._cleaned_up:
+                return
+            self._cleaned_up = True
             factory = DomainParticipantFactory.get_instance()
             self._participant.delete_contained_entities()
             factory.delete_participant(self._participant)
-            del self._participant
+            self._participant = None
+
+        def __del__(self):
+            self._cleanup()
 
         def fastdds_participant(self):
             return self._participant
@@ -245,7 +324,8 @@ def make_domain_participant(domain_id: int = 0):
                 if topic_info:
                     topic_info["ref_count"] -= 1
                     if topic_info["ref_count"] <= 0:
-                        self.fastdds_participant().delete_topic(topic_info["topic"])
+                        if not self._cleaned_up:
+                            self.fastdds_participant().delete_topic(topic_info["topic"])
                         del self._registered_topics[topic_name]
 
     return _DomainParticipant(domain_id)
@@ -333,8 +413,9 @@ class Publisher(_TopicHandle):
         :param domain_participant: A DDS Domain Participant wrapper object, as created by provizio_dds.make_domain_participant
         :param str topic_name: A string DDS Topic name
         :param pub_sub_type: The DDS PubSub Type to be published, f.e. provizio_dds.StringPubSubType
-        :param on_has_subscriber_changed_function: Optional, a function to to be invoked on matching first / unmatching last subscriber, takes two arguments: a Publisher and a bool: True when the first subscriber is matched, False when the last subscriber is unmatched; Note: called from a background Thread
+        :param on_has_subscriber_changed_function: Optional, a function to be invoked on matching first / unmatching last subscriber, takes two arguments: a Publisher and a bool: True when the first subscriber is matched, False when the last subscriber is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data writer reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
+        :param int history_depth: Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history), positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth
         """
 
         super().__init__(domain_participant, topic_name, pub_sub_type)
@@ -363,6 +444,12 @@ class Publisher(_TopicHandle):
         self._publisher.get_default_datawriter_qos(self._writer_qos)
         self._writer_qos.reliability().kind = reliability_kind
         self._writer_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
+        if sys.platform in ("win32", "darwin"):
+            # Disable data sharing on Windows and macOS: it uses shared memory
+            # segments that may be unavailable or leak resources.  On Windows
+            # the interprocess directory may not exist; on macOS the system-wide
+            # SHM limits are low.  Mirrors the C++ fix in publisher.h / subscriber.h.
+            self._writer_qos.data_sharing().off()
         if history_depth == USE_DEFAULT_QOS_DURABILITY:
             pass
         elif history_depth == NO_HISTORY:
@@ -376,16 +463,12 @@ class Publisher(_TopicHandle):
         )
 
     def __del__(self):
-        self._publisher.delete_datawriter(self._writer)
-        del self._writer
-
-        self._participant.fastdds_participant().delete_publisher(self._publisher)
-        del self._publisher
-
-        del self._listener
-        del self._writer_qos
-        del self._publisher_qos
-
+        # If the participant was already cleaned up (atexit / early GC),
+        # delete_contained_entities() already freed the C++ objects.
+        # Use getattr to guard against _participant being None or already GC'd.
+        if not getattr(self._participant, '_cleaned_up', True):
+            self._publisher.delete_datawriter(self._writer)
+            self._participant.fastdds_participant().delete_publisher(self._publisher)
         super().__del__()
 
     def publish(self, data: object, params: WriteParams = None):
@@ -487,6 +570,7 @@ class Subscriber(_TopicHandle):
         :param on_data_function: A function to be invoked on receiving published data. It can take one argument (the data) or two arguments (data and a SampleInfo object). Note: called from a background Thread
         :param on_has_publisher_changed_function: Optional, a function to be invoked on matching first / unmatching last publisher, takes a single bool argument: True when the first publisher is matched, False when the last publisher is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data reader reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
+        :param int max_history_depth: Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history), positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth
         """
         super().__init__(domain_participant, topic_name, pub_sub_type)
         self._num_matched_cv = threading.Condition()
@@ -514,6 +598,9 @@ class Subscriber(_TopicHandle):
         self._subscriber.get_default_datareader_qos(self._reader_qos)
         self._reader_qos.reliability().kind = reliability_kind
         self._reader_qos.endpoint().history_memory_policy = qos_defaults.memory_policy
+        if sys.platform in ("win32", "darwin"):
+            # Disable data sharing on Windows and macOS — see Publisher comment for rationale.
+            self._reader_qos.data_sharing().off()
         if max_history_depth == USE_DEFAULT_QOS_DURABILITY:
             pass
         elif max_history_depth == NO_HISTORY:
@@ -528,16 +615,12 @@ class Subscriber(_TopicHandle):
         )
 
     def __del__(self):
-        self._subscriber.delete_datareader(self._reader)
-        del self._reader
-
-        self._participant.fastdds_participant().delete_subscriber(self._subscriber)
-        del self._subscriber
-
-        del self._listener
-        del self._reader_qos
-        del self._subscriber_qos
-
+        # If the participant was already cleaned up (atexit / early GC),
+        # delete_contained_entities() already freed the C++ objects.
+        # Use getattr to guard against _participant being None or already GC'd.
+        if not getattr(self._participant, '_cleaned_up', True):
+            self._subscriber.delete_datareader(self._reader)
+            self._participant.fastdds_participant().delete_subscriber(self._subscriber)
         super().__del__()
 
     def get_guid(self):
@@ -578,24 +661,19 @@ async def request(
     Before publishing the first request, discovery readiness is awaited using a graph-based stable match check
     to avoid races right after endpoint matching.
 
-    Args:
-        domain_participant: Domain participant wrapper created by `make_domain_participant`.
-        request_pub_sub_type: PubSub type for the request.
-        response_pub_sub_type: PubSub type for the response.
-        response_data_type: Concrete data type of the response.
-        request_data: Concrete data instance to publish as the request.
-        request_topic_name: Optional explicit request topic name.
-        response_topic_name: Optional explicit response topic name.
-        service_name: Optional base name to derive request/response topics.
-        stable_matches_period_sec: Optional settling window (seconds) that match counts must remain stable before
-            sending the first request (defaults to 1.0s). Set to 0 to skip the extra wait.
-        service_match_timeout_sec: Optional deadline (seconds) to complete endpoint matching. Set to 0 to wait indefinitely.
-    Returns:
-        The response data instance.
-
-    Raises:
-        ServiceMatchingTimeoutError: If endpoints fail to match within the timeout.
-        RequestPublishError: If publishing the request fails.
+    :param domain_participant: Domain participant wrapper created by ``make_domain_participant``
+    :param request_pub_sub_type: PubSub type for the request
+    :param response_pub_sub_type: PubSub type for the response
+    :param response_data_type: Concrete data type of the response
+    :param request_data: Concrete data instance to publish as the request
+    :param request_topic_name: Optional explicit request topic name
+    :param response_topic_name: Optional explicit response topic name
+    :param service_name: Optional base name to derive request/response topics
+    :param float stable_matches_period_sec: Settling window (seconds) that match counts must remain stable before sending the first request (defaults to 1.0). Set to 0 to skip the extra wait
+    :param float service_match_timeout_sec: Deadline (seconds) to complete endpoint matching. Set to 0 to wait indefinitely
+    :returns: The response data instance
+    :raises ServiceMatchingTimeoutError: If endpoints fail to match within the timeout
+    :raises RequestPublishError: If publishing the request fails
     """
     if request_topic_name is None:
         assert (
@@ -824,16 +902,15 @@ class Service:
     ):
         """Construct a request/response service.
 
-        Args:
-            domain_participant: Domain participant wrapper created by `make_domain_participant`.
-            request_pub_sub_type: PubSub type for requests.
-            request_data_type: Concrete request data type.
-            response_pub_sub_type: PubSub type for responses.
-            handle_request_function: Callable or coroutine to process a request and return response data.
-            request_topic_name: Optional explicit request topic name, or use `service_name`.
-            response_topic_name: Optional explicit response topic name, or use `service_name`.
-            service_name: If provided, request topic is rq/<service_name>Request and response is rr/<service_name>Reply.
-            max_history_depth: Reader history depth for transient local durability; 0 for no history (volatile durability), USE_DEFAULT_QOS_DURABILITY for default.
+        :param domain_participant: Domain participant wrapper created by ``make_domain_participant``
+        :param request_pub_sub_type: PubSub type for requests
+        :param request_data_type: Concrete request data type
+        :param response_pub_sub_type: PubSub type for responses
+        :param handle_request_function: Callable or coroutine to process a request and return response data
+        :param request_topic_name: Optional explicit request topic name, or use ``service_name``
+        :param response_topic_name: Optional explicit response topic name, or use ``service_name``
+        :param service_name: If provided, request topic is rq/<service_name>Request and response is rr/<service_name>Reply
+        :param int max_history_depth: Reader history depth for transient local durability; 0 for no history (volatile durability), USE_DEFAULT_QOS_DURABILITY for default
         """
         default_max_queue_size = 10
         minimal_max_queue_size = 1
@@ -908,11 +985,14 @@ class Service:
             if not self._stop:
                 self._stop = True
 
-                self._request_handler.stop()
+                if hasattr(self, '_request_handler'):
+                    self._request_handler.stop()
 
-                del self._publisher
-                del self._subscriber
-                del self._request_handler
+                # Delete in child-before-parent order; their __del__ methods
+                # are guarded against participant-already-cleaned-up.
+                for attr in ('_subscriber', '_publisher', '_request_handler'):
+                    if hasattr(self, attr):
+                        delattr(self, attr)
 
                 self._service_cv.notify_all()
                 join = True

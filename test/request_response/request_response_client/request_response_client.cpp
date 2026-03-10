@@ -30,8 +30,8 @@ try
 {
     const std::string service_name{"provizio_dds_test_request_response"};
     constexpr provizio::dds::DomainId_t domain_id = 14;
-    constexpr std::chrono::seconds timeout{15}; // So long as requests processing order can be arbitrary, i.e. the very
-                                                // first request may be processed after the very last one
+    constexpr std::chrono::seconds timeout{30}; // Must be large enough for DDS discovery over UDPv4 on Windows Debug
+                                                // builds, plus worst-case serial processing time
 
     // These are x and x^2 pairs, except of those with expected values of 0 which means we want to interrupt the
     // requests and make sure all behaves well

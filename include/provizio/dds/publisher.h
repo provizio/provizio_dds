@@ -133,6 +133,8 @@ namespace provizio::dds
          * @param topic_name A DDS Topic Name
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
          * DataWriter, which makes publishing slower but more reliable
+         * @param history_depth Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history),
+         * positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth.
          * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
          * @see provizio::dds::make_publisher
          * @see provizio::dds::make_domain_participant
@@ -155,6 +157,8 @@ namespace provizio::dds
          * (or any) subscriber. See on_matched_function_type documentation for details on accepted arguments.
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
          * DataWriter, which makes publishing slower but more reliable
+         * @param history_depth Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history),
+         * positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth.
          * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
          * @see provizio::dds::make_publisher
          * @see provizio::dds::make_domain_participant
@@ -222,6 +226,8 @@ namespace provizio::dds
      * @param topic_name A DDS Topic Name
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataWriter,
      * which makes publishing slower but more reliable
+     * @param history_depth Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history),
+     * positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth.
      * @return std::shared_ptr to the created publisher_handle
      * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
      * @see provizio::dds::publisher_handle
@@ -253,6 +259,8 @@ namespace provizio::dds
      * @param on_matched_function The on_has_subscriber_changed function
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataWriter,
      * which makes publishing slower but more reliable
+     * @param history_depth Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history),
+     * positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth.
      * @return std::shared_ptr to the created publisher_handle
      * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
      * @see provizio::dds::publisher_handle
@@ -299,12 +307,12 @@ namespace provizio::dds
                     {
                         if (info.current_count > 0 && info.current_count_change == info.current_count)
                         {
-                            // Just matched the first publisher
+                            // Just matched the first subscriber
                             publisher.on_matched_function(publisher, true);
                         }
                         else if (info.current_count == 0 && info.current_count_change < 0)
                         {
-                            // Just unmatched the last publisher
+                            // Just unmatched the last subscriber
                             publisher.on_matched_function(publisher, false);
                         }
                     }
@@ -377,6 +385,14 @@ namespace provizio::dds
         }
         datawriter_qos.reliability().kind = reliability_kind;
         datawriter_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
+
+#if defined(_MSC_VER) || defined(__APPLE__)
+        // Disable data sharing on Windows and macOS: it uses shared memory segments
+        // that may be unavailable or leak resources.  On Windows the interprocess
+        // directory may not exist; on macOS the system-wide SHM limits are low.
+        // This mirrors the SHM transport disable in domain_participant.cpp.
+        datawriter_qos.data_sharing().off();
+#endif
 
         data_writer = publisher->create_datawriter(the_topic->get(), datawriter_qos, this->listener.get());
     }

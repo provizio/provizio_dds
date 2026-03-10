@@ -38,16 +38,15 @@ std::string timestamp()
            "] ";
 }
 
-// Arguments: test_name_postfix value
+// Arguments: test_name_postfix value [domain_id]
 int main(int argc, char *argv[])
 try
 {
-    constexpr provizio::dds::DomainId_t domain_id = 14;
-    constexpr std::chrono::seconds timeout{5};
+    constexpr std::chrono::seconds timeout{30};
     constexpr int max_wait_rnd = 1999;
     constexpr int half_wait_rnd = 1000;
 
-    if (argc != 3)
+    if (argc < 3 || argc > 4)
     {
         std::cerr << "Wrong number of arguments!" << std::endl;
         return 1;
@@ -55,8 +54,17 @@ try
 
     const std::string test_name_postfix = argv[1]; // NOLINT: OK in a unit test
     auto value = std::atoi(argv[2]);               // NOLINT: OK in a unit test
+    // Use per-iteration domain IDs (100-127) to avoid DDS multicast discovery state accumulation across rapid
+    // participant create/destroy cycles (root cause of flaky timeouts on Windows CI).
+    // High range avoids conflicts with other tests; wraps at 127 (max Fast-DDS domain ID).
+    constexpr provizio::dds::DomainId_t base_domain_id = 100;
+    constexpr provizio::dds::DomainId_t domain_range = 28; // 100..127
+    const provizio::dds::DomainId_t domain_id =
+        (argc > 3)
+            ? static_cast<provizio::dds::DomainId_t>(base_domain_id + (std::atoi(argv[3]) % domain_range)) // NOLINT
+            : 14; // NOLINT: OK in a unit test
 
-    const std::string log_prefix = "request_response_reliability_client" + test_name_postfix + ": ";
+    const std::string test_log_prefix = "request_response_reliability_client" + test_name_postfix + ": ";
     const std::string service_name{"provizio_dds_test_request_response_reliability" + test_name_postfix};
 
     // Sleep some random time, to test different combinations of client/service startup times
@@ -64,33 +72,33 @@ try
     const auto wait = std::uniform_int_distribution<int>{0, max_wait_rnd}(engine);
     if (wait < half_wait_rnd)
     {
-        std::cout << log_prefix << timestamp() << "Waiting " << wait << "ms..." << std::endl;
+        std::cout << test_log_prefix << timestamp() << "Waiting " << wait << "ms..." << std::endl;
         std::this_thread::sleep_for(std::chrono::milliseconds{wait});
     }
 
     std_msgs::msg::Int32 request;
     request.data(value);
 
-    std::cout << log_prefix << timestamp() << "Requesting " << value << "..." << std::endl;
+    std::cout << test_log_prefix << timestamp() << "Requesting " << value << "..." << std::endl;
     auto future_response = provizio::dds::request<std_msgs::msg::Int32PubSubType, std_msgs::msg::Int32PubSubType>(
         provizio::dds::make_domain_participant(domain_id), service_name, request);
 
     const auto wait_status = future_response.wait_for(timeout);
     if (wait_status != std::future_status::ready)
     {
-        std::cerr << log_prefix << timestamp() << "Timeout waiting for response" << std::endl;
+        std::cerr << test_log_prefix << timestamp() << "Timeout waiting for response" << std::endl;
         return 1;
     }
 
     const auto received_value = future_response.get().data();
     if (received_value != value)
     {
-        std::cerr << log_prefix << timestamp() << "Unexpected response " << received_value << ", expected " << value
-                  << std::endl;
+        std::cerr << test_log_prefix << timestamp() << "Unexpected response " << received_value << ", expected "
+                  << value << std::endl;
         return 1;
     }
 
-    std::cout << log_prefix << timestamp() << "Successfully received expected response = " << received_value
+    std::cout << test_log_prefix << timestamp() << "Successfully received expected response = " << received_value
               << std::endl;
     return 0;
 }

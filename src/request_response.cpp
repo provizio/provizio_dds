@@ -23,15 +23,6 @@
 
 namespace provizio::dds::detail
 {
-    // NOLINTBEGIN: Can't throw
-    const std::string request_prefix{"rq/"};
-    const std::string response_prefix{"rr/"};
-    const std::string request_suffix{"Request"};
-    const std::string response_suffix{"Reply"};
-    const std::string requests_queue_full_error_message{
-        "provizio_dds: The service requests queue is full! A request will be dropped."};
-    // NOLINTEND
-
     std::size_t to_max_queue_size(const std::int32_t max_history_depth)
     {
         constexpr std::size_t default_queue_size = 10;

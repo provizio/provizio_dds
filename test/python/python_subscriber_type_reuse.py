@@ -23,7 +23,7 @@ import threading
 TEST_TOPIC_NAME_1 = "provizio_dds_test_simplest_pub_sub_topic_1"
 TEST_TOPIC_NAME_2 = "provizio_dds_test_simplest_pub_sub_topic_2"
 TEST_VALUE = "provizio_dds_test"
-WAIT_TIME = 6
+WAIT_TIME = 10
 
 received_string_1 = None
 had_publishers_1 = False

@@ -19,18 +19,21 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 
+#include "provizio/dds/topic.h"
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
 #include <fastdds/dds/topic/Topic.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
 #include <fastdds/dds/topic/qos/TopicQos.hpp>
+#include <fastdds/rtps/attributes/BuiltinTransports.hpp>
 #include <fastrtps/types/TypesBase.h>
+#ifndef _MSC_VER
 #include <fastrtps/xmlparser/XMLParserCommon.h>
-
-#include "provizio/dds/topic.h"
+#endif
 
 namespace provizio::dds
 {
@@ -42,22 +45,37 @@ namespace provizio::dds
         const eprosima::fastrtps::Duration_t lease_duration_announcement_period{1, 0}; // NOLINT: Doesn't throw
         constexpr std::uint32_t num_initial_discovery_announcements = 200;
 
-        // In Fast-DDS 3 it's now DEFAULT_FASTDDS_ENV_VARIABLE and its value has changed from
-        // FASTRTPS_DEFAULT_PROFILES_FILE to FASTDDS_DEFAULT_PROFILES_FILE. When upgrading, make sure to update it
-        // in provizio_dds.py too.
-        inline const char *xml_profiles_env_variable()
-        {
-            return eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE;
-        }
+        // Hardcoded instead of using eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE
+        // because that extern const lacks __declspec(dllimport) in Fast-DDS headers, causing
+        // LNK2019 on MSVC. On non-MSVC platforms a runtime check (below) verifies the value
+        // still matches the Fast-DDS extern so CI catches mismatches on upgrade.
+        // In Fast-DDS 3 it becomes DEFAULT_FASTDDS_ENV_VARIABLE with value
+        // "FASTDDS_DEFAULT_PROFILES_FILE" — update provizio_dds.py accordingly.
+        // NOLINTNEXTLINE: follows eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE
+        constexpr char default_fastrtps_env_variable[] = "FASTRTPS_DEFAULT_PROFILES_FILE";
     } // namespace
 
     domain_participant::domain_participant(const DomainId_t domain_id)
         : registered_topics_mutex(std::make_shared<std::mutex>())
     {
+#ifndef _MSC_VER
+        // Verify at runtime that the hardcoded env variable name still matches the Fast-DDS extern.
+        // On MSVC the extern can't be linked (missing dllimport), so this check is non-Windows only.
+        const char *const env_var = default_fastrtps_env_variable; // NOLINT: intentional array-to-pointer
+        if (std::string(env_var) != eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE)
+        {
+            // If this fires, update default_fastrtps_env_variable above AND
+            // _DomainParticipant.xml_profiles_env_variable in provizio_dds.py.
+            throw std::runtime_error("provizio_dds: hardcoded env variable '" + std::string(env_var) +
+                                     "' does not match Fast-DDS DEFAULT_FASTRTPS_ENV_VARIABLE ('" +
+                                     std::string(eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE) + "')");
+        }
+#endif
+
         DomainParticipantQos customized_qos;
 
         bool xml_profile = false;
-        if (auto *const file_path = std::getenv(xml_profiles_env_variable())) // NOLINT: getenv required
+        if (auto *const file_path = std::getenv(default_fastrtps_env_variable)) // NOLINT: getenv required
         {
             xml_profile = std::filesystem::exists(file_path) && !std::filesystem::is_directory(file_path);
         }
@@ -74,6 +92,25 @@ namespace provizio::dds
                 initial_announcements_period;
             customized_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod =
                 lease_duration_announcement_period;
+
+#if defined(_MSC_VER) || defined(__APPLE__)
+            // Disable shared memory transport on Windows and macOS unless the user
+            // has explicitly configured transports via FASTDDS_BUILTIN_TRANSPORTS.
+            // Fast-DDS's bundled Boost.Interprocess has a known bug where shared
+            // memory segments and named semaphores from a previous DDS participant
+            // are not cleaned up promptly.  On Windows this causes assertion failures
+            // in boost/interprocess/sync/windows/semaphore.hpp when a new participant
+            // is created.  On macOS, the default system-wide shared memory limits
+            // (kern.sysv.shmmni=32) are quickly exhausted when creating participants
+            // across multiple domain IDs, causing participant creation to hang
+            // indefinitely.  UDPv4-only transport avoids this issue with no practical
+            // performance impact for the typical single-host or cross-network DDS use
+            // cases this library targets.
+            if (!std::getenv("FASTDDS_BUILTIN_TRANSPORTS")) // NOLINT: getenv required
+            {
+                customized_qos.setup_transports(eprosima::fastdds::rtps::BuiltinTransports::UDPv4);
+            }
+#endif
         }
 
         participant = participant_factory->create_participant(
@@ -96,6 +133,13 @@ namespace provizio::dds
             }
         }
 
+        // Ownership model: domain_participant is always held by shared_ptr. All
+        // publishers/subscribers store a shared_ptr to their participant, so this
+        // destructor only runs after every publisher/subscriber has been destroyed
+        // (and has individually deleted its own Fast-DDS entities). This call cleans
+        // up any residual entities (e.g. topics not individually freed) and is a
+        // harmless no-op otherwise.
+        participant->delete_contained_entities();
         DomainParticipantFactory::get_instance()->delete_participant(participant);
     }
 

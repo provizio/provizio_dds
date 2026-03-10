@@ -17,6 +17,7 @@
 
 #include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -40,6 +41,9 @@ namespace provizio::dds
     template <typename data_pub_sub_type> class subscriber_handle;
     /**
      * @brief Internal DataReaderListener that tracks publisher match counts for readiness helpers.
+     *
+     * Kept header-only (no PROVIZIO_DDS_API) to avoid exporting std::mutex /
+     * std::condition_variable across the DLL boundary.
      */
     class data_reader_listener : public DataReaderListener
     {
@@ -47,9 +51,8 @@ namespace provizio::dds
         void on_subscription_matched(DataReader *reader, const SubscriptionMatchedStatus &info) override
         {
             (void)reader;
-
             {
-                std::lock_guard<std::mutex> lock{num_matched_publishers_mutex};
+                const std::lock_guard<std::mutex> lock{num_matched_publishers_mutex};
                 num_matched_publishers = info.current_count;
             }
             num_matched_publishers_cv.notify_all();
@@ -218,6 +221,12 @@ namespace provizio::dds
             datareader_qos.history().kind = HistoryQosPolicyKind::KEEP_LAST_HISTORY_QOS;
             datareader_qos.history().depth = max_history_depth;
         }
+
+#if defined(_MSC_VER) || defined(__APPLE__)
+        // Disable data sharing on Windows and macOS: mirrors the DataWriter-side
+        // disable in publisher.h — see the comment there for the full rationale.
+        datareader_qos.data_sharing().off();
+#endif
 
         data_reader = subscriber->create_datareader(the_topic->get(), datareader_qos, this->data_listener.get());
     }

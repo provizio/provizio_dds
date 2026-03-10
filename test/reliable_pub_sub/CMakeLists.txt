@@ -15,7 +15,13 @@
 add_subdirectory(reliable_publisher)
 add_subdirectory(reliable_subscriber)
 
-# TODO: Windows version
 add_test(NAME reliable_pub_sub COMMAND
-    bash -c "source ${CMAKE_SOURCE_DIR}/test/unset_ros.sh && { $<TARGET_FILE:reliable_publisher> & $<TARGET_FILE:reliable_subscriber>; }"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"$<TARGET_FILE:reliable_publisher>\""
+    "\"$<TARGET_FILE:reliable_subscriber>\""
 )
+if(WIN32)
+    set_tests_properties(reliable_pub_sub PROPERTIES TIMEOUT 90 ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
+else()
+    set_tests_properties(reliable_pub_sub PROPERTIES TIMEOUT 30)
+endif()

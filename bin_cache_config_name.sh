@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Use as:
-# bin_cache_config_name.sh [<BUILD_TYPE>] [<PROVIZIO_DDS_IDLS_VERSION>/WILDCARD]
+# bin_cache_config_name.sh [<BUILD_TYPE>] [<PROVIZIO_DDS_IDLS_VERSION>/WILDCARD] [<PYTHON_VERSION_TAG>]
 
 set -eu
 set -o pipefail
@@ -29,6 +29,7 @@ cd "$(cd "$(dirname "$0")" && pwd -P)"
 
 BUILD_TYPE="${1:-Release}"
 PROVIZIO_DDS_IDLS_VERSION="${2:-"$(grep "set(PROVIZIO_DDS_IDLS_VERSION" ./CMakeLists.txt | awk '{print $2}' | tr -d '"')"}"
+PYTHON_VERSION_TAG="${3:-""}"
 
 CPU_ARCH="$(uname -i)"
 
@@ -39,8 +40,13 @@ if [ "${PROVIZIO_DDS_IDLS_VERSION}" == "WILDCARD" ]; then
 else
   IDLS_COMMIT_HASH="$(git ls-remote https://github.com/provizio/provizio_dds_idls.git | grep -w "${PROVIZIO_DDS_IDLS_VERSION}" | awk '{print $1}')"
 
-  # sha256 has of all non-ignored files in this repo except "media" and "cache" directories 
+  # sha256 hash of all non-ignored files in this repo except "media" and "cache" directories
   PROVIZIO_DDS_CONTENTS_HASH="$(git ls-files | grep -wv media | grep -wv cache | xargs -d '\n' cat 2>/dev/null | sha256sum | awk '{print $1}')"
 fi
 
-echo "linux_${CPU_ARCH}.${PROVIZIO_DDS_CONTENTS_HASH}.idls_${IDLS_COMMIT_HASH}.${BUILD_TYPE}"
+SUFFIX=""
+if [ -n "${PYTHON_VERSION_TAG}" ]; then
+  SUFFIX=".python${PYTHON_VERSION_TAG}"
+fi
+
+echo "linux_${CPU_ARCH}.${PROVIZIO_DDS_CONTENTS_HASH}.idls_${IDLS_COMMIT_HASH}.${BUILD_TYPE}${SUFFIX}"

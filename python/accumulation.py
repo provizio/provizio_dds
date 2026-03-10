@@ -22,6 +22,7 @@ from provizio_dds_python_types import *
 from typing import Callable, List
 import numpy as np
 from threading import Lock
+import weakref
 from transforms3d.euler import quat2euler
 from transforms3d._gohlketransforms import (
     compose_matrix,
@@ -462,6 +463,34 @@ class DDSPointCloudsAccumulator:
 
         self.localization_extrinsics_topic = localization_extrinsics_topic
         self.localization_frame_id = localization_frame_id
+
+        # Use weak references in subscriber callbacks to break reference cycles
+        # (Subscriber -> callback -> self -> Subscriber) that would prevent
+        # deterministic cleanup of DDS objects before process exit.
+        weak_self = weakref.ref(self)
+
+        def _on_odometry_cb(odometry):
+            obj = weak_self()
+            if obj is not None:
+                obj._on_odometry(odometry)
+
+        def _on_nav_sat_fix_cb(nav_sat_fix):
+            obj = weak_self()
+            if obj is not None:
+                obj._on_nav_sat_fix(nav_sat_fix)
+
+        def _make_extrinsics_cb(topic):
+            def _on_extrinsics_cb(transform_stamped):
+                obj = weak_self()
+                if obj is not None:
+                    obj._on_extrinsics(topic, transform_stamped)
+            return _on_extrinsics_cb
+
+        def _on_point_cloud_cb(point_cloud):
+            obj = weak_self()
+            if obj is not None:
+                obj._on_point_cloud(point_cloud)
+
         if self.no_localization:
             self._localization_subscriber = None
         else:
@@ -471,7 +500,7 @@ class DDSPointCloudsAccumulator:
                     localization_topic,
                     OdometryPubSubType,
                     Odometry,
-                    lambda odometry: self._on_odometry(odometry),
+                    _on_odometry_cb,
                 )
             else:
                 assert localization_type == NavSatFix
@@ -484,7 +513,7 @@ class DDSPointCloudsAccumulator:
                     localization_topic,
                     NavSatFixPubSubType,
                     NavSatFix,
-                    lambda nav_sat_fix: self._on_nav_sat_fix(nav_sat_fix),
+                    _on_nav_sat_fix_cb,
                 )
 
         if extrinsics_topics is None:
@@ -503,9 +532,7 @@ class DDSPointCloudsAccumulator:
                     topic,
                     TransformStampedPubSubType,
                     TransformStamped,
-                    lambda transform_stamped, topic=topic: self._on_extrinsics(
-                        topic, transform_stamped
-                    ),
+                    _make_extrinsics_cb(topic),
                 )
             )
 
@@ -514,7 +541,7 @@ class DDSPointCloudsAccumulator:
             pointcloud2_topic,
             PointCloud2PubSubType,
             PointCloud2,
-            lambda point_cloud: self._on_point_cloud(point_cloud),
+            _on_point_cloud_cb,
         )
 
     def __del__(self):
