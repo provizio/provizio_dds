@@ -166,17 +166,19 @@ class RequestPublishError(RuntimeError):
 #      and sets a flag so that child __del__ methods become safe no-ops.
 # ---------------------------------------------------------------------------
 _live_participants = []
+_live_participants_lock = threading.Lock()
 
 
 @atexit.register
 def _cleanup_all_participants():
     """Explicitly destroy every DomainParticipant before interpreter shutdown
     so that SWIG C++ destructors run in the correct order."""
-    for ref in reversed(_live_participants):
-        p = ref()
-        if p is not None:
-            p._cleanup()
-    _live_participants.clear()
+    with _live_participants_lock:
+        for ref in reversed(_live_participants):
+            p = ref()
+            if p is not None:
+                p._cleanup()
+        _live_participants.clear()
 
 
 def make_domain_participant(domain_id: int = 0):
@@ -244,13 +246,15 @@ def make_domain_participant(domain_id: int = 0):
             self._registered_topics = dict()
 
             def _remove_ref(r):
-                try:
-                    _live_participants.remove(r)
-                except ValueError:
-                    pass  # Already removed by _cleanup_all_participants
+                with _live_participants_lock:
+                    try:
+                        _live_participants.remove(r)
+                    except ValueError:
+                        pass  # Already removed by _cleanup_all_participants
 
             ref = weakref.ref(self, _remove_ref)
-            _live_participants.append(ref)
+            with _live_participants_lock:
+                _live_participants.append(ref)
 
         def _cleanup(self):
             """Deterministic cleanup: delete all C++ entities then the participant."""

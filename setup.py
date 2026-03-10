@@ -17,6 +17,7 @@ import os
 import os.path
 import re
 import shutil
+import subprocess
 import sys
 from sys import platform
 
@@ -72,31 +73,27 @@ else:
     if platform == "linux" and cmake_arguments == "":
         # On Linux, 3.8-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
         python_abi_tag = "3_14" if sys.version_info >= (3, 14) else "3"
-        python_cache_config_name = (
-            os.popen(source_dir + "/bin_cache_config_name.sh '' '' " + python_abi_tag).read().strip()
-        )
+        python_cache_config_name = subprocess.check_output(
+            [source_dir + "/bin_cache_config_name.sh", "", "", python_abi_tag],
+            text=True
+        ).strip()
         python_cache_zip = source_dir + "/cache/" + python_cache_config_name + ".zip"
         if os.path.isfile(python_cache_zip):
-            if (
-                os.system(
-                    f'unzip -q "{python_cache_zip}" -d "{build_dir}"'
-                )
-                != 0
-            ):
+            if subprocess.call(["unzip", "-q", python_cache_zip, "-d", build_dir]) != 0:
                 raise Exception("Failed to extract Python bin cache!")
 
             with open(f"{build_dir}/{python_cache_config_name}/kernel_version", "r") as kernel_version_file:
                 cache_kernel_version = kernel_version_file.read().strip()
-            host_kernel_version = os.popen("uname -r").read().strip()
+            host_kernel_version = subprocess.check_output(["uname", "-r"], text=True).strip()
 
             if compare_versions(host_kernel_version, cache_kernel_version) >= 0:
-                if (
-                    os.system(
-                        f'mv -f "{build_dir}/{python_cache_config_name}/python" "{target_dir}" && cp -f "{target_dir}/version.txt" "{build_dir}/"'
-                    )
-                    != 0
-                ):
-                    raise Exception("Failed to move Python bin cache!")
+                extracted_python = os.path.join(build_dir, python_cache_config_name, "python")
+                if os.path.isdir(target_dir):
+                    shutil.rmtree(target_dir)
+                shutil.move(extracted_python, target_dir)
+                version_txt = os.path.join(target_dir, "version.txt")
+                if os.path.isfile(version_txt):
+                    shutil.copy2(version_txt, build_dir)
                 print(f"Bin cache located and will be used: {python_cache_config_name}")
                 needs_building = False
             else:
@@ -107,7 +104,6 @@ else:
     elif platform == "win32" and cmake_arguments == "":
         # On Windows, .pyd files link against specific pythonXY.dll, so each version needs its own cache
         python_ver_tag = f"{sys.version_info.major}{sys.version_info.minor}"
-        import subprocess
         ps_script = os.path.join(source_dir, "bin_cache_config_name.ps1")
         try:
             python_cache_config_name = subprocess.check_output(
@@ -143,11 +139,29 @@ else:
 
     if needs_building:
         print("Building C++ libraries from source...", flush=True)
+        cmake_configure = [
+            "cmake", "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DPYTHON_BINDINGS=ON",
+            "-DENABLE_CHECK_FORMAT=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON",
+            "-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=OFF",
+            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+            f"-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}",
+            f"-DPython3_EXECUTABLE={sys.executable}",
+        ]
+        if cmake_arguments:
+            # cmake_arguments is a user-provided string — split into args
+            import shlex
+            cmake_configure.extend(shlex.split(cmake_arguments))
+        cmake_configure.append(source_dir)
+
+        cmake_build = ["cmake", "--build", ".", "--target", "install", "--", "-j8"]
+
         if (
-            os.system(
-                f'cd "{build_dir}" && cmake -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DPYTHON_BINDINGS=ON" "-DENABLE_CHECK_FORMAT=OFF" "-DENABLE_TESTS=OFF" "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON" "-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=OFF" "-DCMAKE_INSTALL_PREFIX={install_dir}" "-DPYTHON_PACKAGES_INSTALL_DIR={target_dir}" "-DPython3_EXECUTABLE={sys.executable}" {cmake_arguments} "{source_dir}" && cmake --build . --target install -- -j8'
-            )
-            != 0
+            subprocess.call(cmake_configure, cwd=build_dir) != 0
+            or subprocess.call(cmake_build, cwd=build_dir) != 0
         ):
             raise CMakeBuildError()
 
