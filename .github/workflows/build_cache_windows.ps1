@@ -22,6 +22,143 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Collect transitive DLL dependencies for a single binary (mirrors Linux collect_libs in build_cache.sh).
+# Uses dumpbin /dependents to resolve the PE import table, then recursively copies non-system DLLs.
+function Collect-DllDependencies {
+    param(
+        [string]$Binary,
+        [string]$OutputDir,
+        [hashtable]$DllIndex = @{},
+        [string]$AdditionalSearchDir = ""
+    )
+
+    # Parse dumpbin output to get dependency DLL names.
+    # Only collect regular dependencies, not delay-load dependencies (which are optional).
+    $dumpbinOutput = & dumpbin /dependents $Binary 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "dumpbin failed for ${Binary}: $dumpbinOutput"
+    }
+
+    $inDelayLoad = $false
+    $dependencies = @($dumpbinOutput | ForEach-Object {
+        if ($_ -match "delay load dependencies") {
+            $inDelayLoad = $true
+        }
+        if (-not $inDelayLoad -and $_ -match '^\s+(\S+\.dll)\s*$') {
+            $Matches[1]
+        }
+    })
+
+    foreach ($dllName in $dependencies) {
+        if (-not $dllName) { continue }
+
+        # Skip if already in output directory (also breaks circular dependencies)
+        if (Test-Path (Join-Path $OutputDir $dllName)) { continue }
+
+        # Skip API set forwarders (always present on any Windows installation)
+        if ($dllName -like "api-ms-win-*" -or $dllName -like "ext-ms-*") { continue }
+
+        # Skip Python interpreter DLLs — the consumer must have their own Python installation
+        if ($dllName -like "python*.dll") { continue }
+
+        # MSVC runtime DLLs should be included even if found in system directories,
+        # as they may be absent on machines without the VC++ redistributable
+        $isMsvcRuntime = ($dllName -like "vcruntime*" -or $dllName -like "msvcp*" -or
+                          $dllName -like "concrt*" -or $dllName -like "vcomp*")
+
+        # Search for the DLL in priority order.
+        # where.exe / PATH is intentionally not used: it can pick up ABI-incompatible copies
+        # (e.g. MinGW/MySQL OpenSSL) — see python/provizio_dds.py:35-37 for rationale.
+        $resolvedPath = $null
+
+        # 1. Additional search directory (e.g., C++ bin/ when processing Python dirs)
+        if (-not $resolvedPath -and $AdditionalSearchDir -and
+            (Test-Path (Join-Path $AdditionalSearchDir $dllName))) {
+            $resolvedPath = (Join-Path $AdditionalSearchDir $dllName)
+        }
+
+        # 2. Pre-built index of build directory and MSVC redist (O(1) lookup)
+        if (-not $resolvedPath) {
+            $indexKey = $dllName.ToLower()
+            if ($DllIndex.ContainsKey($indexKey)) {
+                $resolvedPath = $DllIndex[$indexKey]
+            }
+        }
+
+        # Skip system DLLs (under C:\Windows) unless they are MSVC runtime DLLs.
+        # This check must happen before the "not found" throw because dumpbin lists
+        # system DLLs like KERNEL32.dll by name — they won't be in the build/redist
+        # index but do exist under C:\Windows\System32.
+        $windowsDir = if ($env:SystemRoot) { $env:SystemRoot } else { "C:\Windows" }
+        if (-not $resolvedPath) {
+            $systemPath = Join-Path "${windowsDir}\System32" $dllName
+            if (Test-Path $systemPath) {
+                if ($isMsvcRuntime) {
+                    $resolvedPath = $systemPath
+                } else {
+                    continue
+                }
+            }
+        }
+
+        if (-not $resolvedPath) {
+            throw "Dependency '$dllName' of '$(Split-Path $Binary -Leaf)' not found in any search location"
+        }
+
+        # Also skip if resolved from index/additional dir but path is under C:\Windows
+        if ($resolvedPath -like "${windowsDir}\*" -and -not $isMsvcRuntime) {
+            continue
+        }
+
+        # Copy to output directory and recurse
+        Copy-Item -Path $resolvedPath -Destination (Join-Path $OutputDir $dllName) -Force
+        Write-Host "  Collected: $dllName (from $resolvedPath)"
+
+        Collect-DllDependencies -Binary (Join-Path $OutputDir $dllName) -OutputDir $OutputDir `
+            -DllIndex $DllIndex -AdditionalSearchDir $AdditionalSearchDir
+    }
+}
+
+# Process all DLLs/PYDs in a directory (mirrors Linux collect_all_libs in build_cache.sh).
+function Collect-AllDllDependencies {
+    param(
+        [string]$Directory,
+        [hashtable]$DllIndex = @{},
+        [string]$AdditionalSearchDir = ""
+    )
+
+    Write-Host "Collecting transitive DLL dependencies in: $Directory"
+
+    Get-ChildItem -Path $Directory -File | Where-Object {
+        $_.Extension -in @('.dll', '.pyd')
+    } | ForEach-Object {
+        Write-Host "Processing: $($_.Name)"
+        Collect-DllDependencies -Binary $_.FullName -OutputDir $Directory `
+            -DllIndex $DllIndex -AdditionalSearchDir $AdditionalSearchDir
+    }
+}
+
+# Build a DLL index from search directories for O(1) lookups.
+# Directories are processed in priority order — first entry wins.
+function Build-DllIndex {
+    param(
+        [string[]]$SearchRoots
+    )
+
+    $index = @{}
+    foreach ($root in $SearchRoots) {
+        if (-not $root -or -not (Test-Path $root)) { continue }
+        Get-ChildItem -Path $root -Filter "*.dll" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $name = $_.Name.ToLower()
+            if (-not $index.ContainsKey($name)) {
+                $index[$name] = $_.FullName
+            }
+        }
+    }
+    Write-Host "  DLL index: $($index.Count) entries from $($SearchRoots.Count) search roots"
+    return $index
+}
+
 Push-Location $PSScriptRoot
 try {
     Set-Location ..\..
@@ -145,6 +282,27 @@ try {
         $pythonLibDirs = Get-ChildItem -Path (Join-Path $targetPath "lib") -Filter "python*" -Directory -ErrorAction SilentlyContinue
         if ($pythonLibDirs) {
             $pythonLibDirs | Remove-Item -Recurse -Force
+        }
+
+        # Collect transitive DLL dependencies (mirrors Linux collect_all_libs in build_cache.sh).
+        # Build the DLL index once and reuse across all calls.
+        $dllSearchRoots = @()
+        if (Test-Path $buildDir) { $dllSearchRoots += (Resolve-Path $buildDir).Path }
+        if ($env:VCToolsRedistDir) {
+            $redistX64 = Join-Path $env:VCToolsRedistDir "x64"
+            if (Test-Path $redistX64) { $dllSearchRoots += $redistX64 }
+        }
+        $dllIndex = Build-DllIndex -SearchRoots $dllSearchRoots
+
+        Collect-AllDllDependencies -Directory (Join-Path $targetPath "bin") `
+            -DllIndex $dllIndex
+        if ($Python -eq "ON") {
+            # Collect DLL dependencies for the provizio_dds Python package only.
+            # This matches the runtime DLL loading model: provizio_dds.py adds only its own
+            # directory to the DLL search path via os.add_dll_directory() on Windows.
+            $binDir = Join-Path $targetPath "bin"
+            Collect-AllDllDependencies -Directory (Join-Path $pythonTargetPath "provizio_dds") `
+                -DllIndex $dllIndex -AdditionalSearchDir $binDir
         }
 
         if ($Python -eq "ON") {
