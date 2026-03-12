@@ -302,7 +302,7 @@ try {
         $windowsDirForPath = if ($env:SystemRoot) { $env:SystemRoot } else { "C:\Windows" }
         foreach ($pathDir in ($env:PATH -split ';')) {
             if (-not $pathDir -or -not (Test-Path $pathDir -PathType Container)) { continue }
-            if ($pathDir -like "${windowsDirForPath}*") { continue }
+            if ($pathDir -like "${windowsDirForPath}\*" -or $pathDir -eq $windowsDirForPath) { continue }
             Get-ChildItem -Path $pathDir -Filter "*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
                 $name = $_.Name.ToLower()
                 if (-not $dllIndex.ContainsKey($name)) {
