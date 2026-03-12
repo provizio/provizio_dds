@@ -67,8 +67,9 @@ function Collect-DllDependencies {
                           $dllName -like "concrt*" -or $dllName -like "vcomp*")
 
         # Search for the DLL in priority order.
-        # where.exe / PATH is intentionally not used: it can pick up ABI-incompatible copies
-        # (e.g. MinGW/MySQL OpenSSL) — see python/provizio_dds.py:35-37 for rationale.
+        # The DLL index is pre-built with build-dir first, then MSVC redist, then PATH
+        # directories (excluding C:\Windows). Build-dir entries take precedence to avoid
+        # ABI-incompatible copies (e.g. MinGW OpenSSL on PATH).
         $resolvedPath = $null
 
         # 1. Additional search directory (e.g., C++ bin/ when processing Python dirs)
@@ -293,6 +294,23 @@ try {
             if (Test-Path $redistX64) { $dllSearchRoots += $redistX64 }
         }
         $dllIndex = Build-DllIndex -SearchRoots $dllSearchRoots
+
+        # Also index DLLs found on PATH (non-recursive, lowest priority).
+        # This finds DLLs from system-installed packages (e.g. OpenSSL) that the
+        # build linked against but that aren't in the build directory or MSVC redist.
+        # Build-dir and redist entries take precedence (first-entry-wins in the index).
+        $windowsDirForPath = if ($env:SystemRoot) { $env:SystemRoot } else { "C:\Windows" }
+        foreach ($pathDir in ($env:PATH -split ';')) {
+            if (-not $pathDir -or -not (Test-Path $pathDir -PathType Container)) { continue }
+            if ($pathDir -like "${windowsDirForPath}*") { continue }
+            Get-ChildItem -Path $pathDir -Filter "*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
+                $name = $_.Name.ToLower()
+                if (-not $dllIndex.ContainsKey($name)) {
+                    $dllIndex[$name] = $_.FullName
+                }
+            }
+        }
+        Write-Host "  DLL index after PATH scan: $($dllIndex.Count) entries"
 
         Collect-AllDllDependencies -Directory (Join-Path $targetPath "bin") `
             -DllIndex $dllIndex
