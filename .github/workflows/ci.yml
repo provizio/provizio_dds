@@ -499,6 +499,13 @@ jobs:
               print('ERROR:', type(e).__name__, e)
           "
       - name: Setup legacy provizio_dds 1.10.1 venv for cross-version compat
+        # Skip on Python 3.8 — the legacy provizio_dds 1.10.1 source build
+        # via pip fails before any output on the EOL'd Python 3.8 Windows
+        # toolchain (WinError 2 from the venv bootstrap). The matching
+        # CMake guard in test/python/CMakeLists.txt drops
+        # cross_version_compat_test from the registered set on this combo,
+        # so the test step doesn't try to run it. Python 3.9+ stays on.
+        if: matrix.python-version != '3.8'
         shell: bash
         run: |
           # Cross-version interop test against the deployed-fleet 1.10.1

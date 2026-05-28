@@ -219,17 +219,40 @@ add_test(NAME legacy_api_compat_test COMMAND
 # PROVIZIO_DDS_LEGACY_PYTHON in its provizio_dds.yml workflow after
 # running setup_legacy_provizio_dds_venv.sh. See the runner script's
 # docstring for the full matrix.
-add_test(NAME cross_version_compat_test COMMAND
-    "${PYTHON_EXECUTABLE}" -q -X faulthandler ./cross_version_compat_test.py
-    WORKING_DIRECTORY "${TEST_PATH}"
-)
-# `SKIPPED:` is the marker the test prints when `PROVIZIO_DDS_LEGACY_PYTHON`
-# is unset or the legacy interpreter can't import provizio_dds. With this
-# regex set, ctest reports the test as "Skipped" rather than "Passed" so a
-# missing setup step on a CI runner shows up loudly in the output.
-set_tests_properties(cross_version_compat_test PROPERTIES
-    TIMEOUT 240
-    SKIP_REGULAR_EXPRESSION "^SKIPPED:")
+#
+# Probe the runtime Python's `(major, minor)` so we can skip registering
+# this test on platform/version combos where the legacy 1.10.1 venv setup
+# is known not to work. Right now that's Python 3.8 on Windows: the
+# `pip install git+...@1.10.1` source build of Fast-DDS 2.14.x against
+# the EOL'd Python 3.8 toolchain fails before any output is even emitted
+# (WinError 2 from the venv bootstrap), with no clean workaround. Python
+# 3.9+ on Windows works fine and stays in the matrix.
+execute_process(COMMAND "${PYTHON_EXECUTABLE}" -c
+    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+    OUTPUT_VARIABLE PYTHON_RUNTIME_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+set(CROSS_VERSION_COMPAT_TEST_ENABLED TRUE)
+if(WIN32 AND PYTHON_RUNTIME_VERSION VERSION_LESS "3.9")
+    message(STATUS
+        "Skipping cross_version_compat_test registration: Python "
+        "${PYTHON_RUNTIME_VERSION} on Windows can't build the legacy "
+        "provizio_dds 1.10.1 source distribution.")
+    set(CROSS_VERSION_COMPAT_TEST_ENABLED FALSE)
+endif()
+
+if(CROSS_VERSION_COMPAT_TEST_ENABLED)
+    add_test(NAME cross_version_compat_test COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler ./cross_version_compat_test.py
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    # `SKIPPED:` is the marker the test prints when `PROVIZIO_DDS_LEGACY_PYTHON`
+    # is unset or the legacy interpreter can't import provizio_dds. With this
+    # regex set, ctest reports the test as "Skipped" rather than "Passed" so a
+    # missing setup step on a CI runner shows up loudly in the output.
+    set_tests_properties(cross_version_compat_test PROPERTIES
+        TIMEOUT 240
+        SKIP_REGULAR_EXPRESSION "^SKIPPED:")
+endif()
 
 # Platform-specific timeouts: tighter on Linux/macOS to detect regressions,
 # wider on Windows where DDS discovery and process startup are slower.
@@ -263,8 +286,11 @@ if(WIN32)
         python_serial_service_cpp_concurrent_requests python_service_cpp_requests_concurrent
         pointcloud2_test python_publisher_no_leaks_test python_subscriber_no_leaks_test
         python_stop_subscriber_test accumulation_test
-        legacy_api_compat_test cross_version_compat_test
+        legacy_api_compat_test
     )
+    if(CROSS_VERSION_COMPAT_TEST_ENABLED)
+        list(APPEND PYTHON_TEST_NAMES cross_version_compat_test)
+    endif()
     # PATH: DLLs must be locatable at runtime.
     set_tests_properties(${PYTHON_TEST_NAMES} PROPERTIES ENVIRONMENT
         "PATH=${PROVIZIO_DDS_TEST_PATH}")
