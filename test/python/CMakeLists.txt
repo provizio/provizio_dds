@@ -212,6 +212,25 @@ add_test(NAME legacy_api_compat_test COMMAND
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
+# Cross-version wire-interop: spin up the current (2.x) build and the
+# pip-installed 1.10.1 reference side-by-side and exchange traffic in
+# every direction (pub<->sub, req<->svc). Skips itself when the legacy
+# venv isn't installed, so dev machines without it stay green; CI sets
+# PROVIZIO_DDS_LEGACY_PYTHON in its provizio_dds.yml workflow after
+# running setup_legacy_provizio_dds_venv.sh. See the runner script's
+# docstring for the full matrix.
+add_test(NAME cross_version_compat_test COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler ./cross_version_compat_test.py
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+# `SKIPPED:` is the marker the test prints when `PROVIZIO_DDS_LEGACY_PYTHON`
+# is unset or the legacy interpreter can't import provizio_dds. With this
+# regex set, ctest reports the test as "Skipped" rather than "Passed" so a
+# missing setup step on a CI runner shows up loudly in the output.
+set_tests_properties(cross_version_compat_test PROPERTIES
+    TIMEOUT 240
+    SKIP_REGULAR_EXPRESSION "^SKIPPED:")
+
 # Platform-specific timeouts: tighter on Linux/macOS to detect regressions,
 # wider on Windows where DDS discovery and process startup are slower.
 # "Takes long by design" tests keep the same timeout on all platforms.
@@ -244,7 +263,7 @@ if(WIN32)
         python_serial_service_cpp_concurrent_requests python_service_cpp_requests_concurrent
         pointcloud2_test python_publisher_no_leaks_test python_subscriber_no_leaks_test
         python_stop_subscriber_test accumulation_test
-        legacy_api_compat_test
+        legacy_api_compat_test cross_version_compat_test
     )
     # PATH: DLLs must be locatable at runtime.
     set_tests_properties(${PYTHON_TEST_NAMES} PROPERTIES ENVIRONMENT
