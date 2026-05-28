@@ -16,7 +16,10 @@
 
 set -e
 
-cd "$(cd "$(dirname "$0")" && pwd -P)"
+# Resolve to an absolute path before any `cd` so later references stay
+# valid regardless of how this script was invoked.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+cd "${SCRIPT_DIR}"
 
 source ./python_venv.sh
 
@@ -37,4 +40,31 @@ else
 fi
 
 cd ../../build
+
+# Cross-version wire-interop test against the deployed-fleet baseline
+# (provizio_dds 1.10.1, installed into a venv). Only relevant when the
+# current build includes Python bindings — the test exercises the python
+# pub/sub + request/response paths across the version boundary, with the
+# 1.10.1 side providing the canonical wire format radars and pipelines
+# already speak.
+#
+# In CI we *require* the legacy venv to install successfully: a setup
+# failure means the run isn't actually verifying wire-compat, which is
+# the whole point of the matrix on this branch. Outside CI (developer
+# machines without 1.10.1 already cached or building) the setup failure
+# is non-fatal — cross_version_compat_test simply reports Skipped via
+# its own SKIP_REGULAR_EXPRESSION.
+if grep -q '^PYTHON_BINDINGS:BOOL=ON' CMakeCache.txt; then
+    SETUP_SCRIPT="${SCRIPT_DIR}/../../test/python/setup_legacy_provizio_dds_venv.sh"
+    if PROVIZIO_DDS_LEGACY_PYTHON="$("${SETUP_SCRIPT}")"; then
+        export PROVIZIO_DDS_LEGACY_PYTHON
+        echo "Cross-version compat enabled: legacy python at ${PROVIZIO_DDS_LEGACY_PYTHON}"
+    elif [[ "${CI:-}" == "true" ]]; then
+        echo "::error::Failed to set up legacy provizio_dds 1.10.1 venv in CI — cross-version compat would silently skip, which defeats the matrix"
+        exit 1
+    else
+        echo "Warning: Failed to set up legacy provizio_dds 1.10.1 venv — cross_version_compat_test will report Skipped, not run"
+    fi
+fi
+
 ctest --output-on-failure
