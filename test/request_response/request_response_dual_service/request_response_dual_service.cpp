@@ -18,8 +18,8 @@
 
 #include "provizio/dds/request_response.h"
 
-#include <std_msgs/msg/Int32PubSubTypes.h>
-#include <std_msgs/msg/Int64PubSubTypes.h>
+#include <std_msgs/msg/Int32PubSubTypes.hpp>
+#include <std_msgs/msg/Int64PubSubTypes.hpp>
 
 constexpr const char *log_prefix = "request_response_dual_service: ";
 
@@ -38,7 +38,7 @@ try
         participant, service_name, [](const std_msgs::msg::Int32 &request) {
             if ((request.data() % 2) == 0)
             {
-                throw provizio::dds::ignore_request{}; // drop even requests here
+                throw provizio::dds::ignore_request{};  // drop even requests here
             }
             std_msgs::msg::Int64 response;
             const std::int64_t value = static_cast<std::int64_t>(request.data()) * request.data();
@@ -51,7 +51,7 @@ try
         participant, service_name, [](const std_msgs::msg::Int32 &request) {
             if ((request.data() % 2) != 0)
             {
-                throw provizio::dds::ignore_request{}; // drop odd requests here
+                throw provizio::dds::ignore_request{};  // drop odd requests here
             }
             std_msgs::msg::Int64 response;
             const std::int64_t value = static_cast<std::int64_t>(request.data()) * request.data();

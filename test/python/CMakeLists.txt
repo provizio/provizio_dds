@@ -1,9 +1,17 @@
 set(TEST_PATH "${CMAKE_CURRENT_BINARY_DIR}")
 
-# Install dependencies, copy tests and all dependencies to the same test directory
-# Suppressing errors as packages can be installed manually, as the case in CI
+# Install dependencies, copy tests and all dependencies to the same test directory.
+# Suppressing errors as packages can be installed manually, as the case in CI.
+# On Windows, pywin32 is also required at runtime: Fast-DDS-Python 2.x's generated
+# `fastdds.py` calls `win32api.LoadLibrary('fastdds-X.Y.dll')` at import time on
+# Windows, and without it every Python test fails with ModuleNotFoundError.
+if(WIN32)
+    set(PYTHON_TEST_DEPS "'numpy>=1.16', 'transforms3d>=0.4.1', 'pywin32'")
+else()
+    set(PYTHON_TEST_DEPS "'numpy>=1.16', 'transforms3d>=0.4.1'")
+endif()
 add_custom_target(python_tests ALL
-    COMMAND ${PYTHON_EXECUTABLE} -c "import subprocess, sys$<SEMICOLON> subprocess.call([sys.executable, '-m', 'pip', 'install', 'numpy>=1.16', 'transforms3d>=0.4.1', '--quiet'])"
+    COMMAND ${PYTHON_EXECUTABLE} -c "import subprocess, sys$<SEMICOLON> subprocess.call([sys.executable, '-m', 'pip', 'install', ${PYTHON_TEST_DEPS}, '--quiet'])"
     VERBATIM
 )
 file(GLOB TEST_SCRIPTS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
@@ -195,6 +203,15 @@ add_test(NAME accumulation_test COMMAND
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
+# 1.10.x Python API source-compat: ensures `ReturnCode_t.RETCODE_OK`,
+# `pub_sub_type.getName()`, and other camelCase / enum-class spellings
+# carried over from Fast-DDS-python 1.x still resolve after the 2.x
+# migration. Pure import-level checks, no DDS network activity.
+add_test(NAME legacy_api_compat_test COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler ./legacy_api_compat_test.py
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+
 # Platform-specific timeouts: tighter on Linux/macOS to detect regressions,
 # wider on Windows where DDS discovery and process startup are slower.
 # "Takes long by design" tests keep the same timeout on all platforms.
@@ -227,6 +244,7 @@ if(WIN32)
         python_serial_service_cpp_concurrent_requests python_service_cpp_requests_concurrent
         pointcloud2_test python_publisher_no_leaks_test python_subscriber_no_leaks_test
         python_stop_subscriber_test accumulation_test
+        legacy_api_compat_test
     )
     # PATH: DLLs must be locatable at runtime.
     set_tests_properties(${PYTHON_TEST_NAMES} PROPERTIES ENVIRONMENT

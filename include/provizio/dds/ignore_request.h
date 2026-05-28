@@ -35,6 +35,6 @@ namespace provizio::dds
             return "ignore_request";
         }
     };
-} // namespace provizio::dds
+}  // namespace provizio::dds
 
-#endif // DDS_IGNORE_REQUEST
+#endif  // DDS_IGNORE_REQUEST

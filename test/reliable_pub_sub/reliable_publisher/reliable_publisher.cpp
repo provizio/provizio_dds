@@ -18,7 +18,7 @@
 
 #include "provizio/dds/publisher.h"
 
-#include <std_msgs/msg/StringPubSubTypes.h>
+#include <std_msgs/msg/StringPubSubTypes.hpp>
 
 int main()
 {

@@ -193,18 +193,18 @@ namespace provizio::dds
         void on_data(const typename request_pub_sub_type::type &data, const SampleInfo &info);
         void on_matched(bool matched, const guid &subscriber_guid);
         void on_response(typename response_pub_sub_type::type data,
-                         const eprosima::fastrtps::rtps::SampleIdentity &identity);
+                         const eprosima::fastdds::rtps::SampleIdentity &identity);
         bool is_subscriber_matched_mutex_prelocked(const guid &subscriber_guid);
         void dispatch_responses();
 
         struct ready_response
         {
             ready_response(typename response_pub_sub_type::type data,
-                           const eprosima::fastrtps::rtps::SampleIdentity &identity,
+                           const eprosima::fastdds::rtps::SampleIdentity &identity,
                            const std::chrono::system_clock::time_point &time_ready);
 
             typename response_pub_sub_type::type data;
-            eprosima::fastrtps::rtps::SampleIdentity identity;
+            eprosima::fastdds::rtps::SampleIdentity identity;
             std::chrono::system_clock::time_point time_ready;
         };
 
@@ -289,7 +289,7 @@ namespace provizio::dds
           request_handler(
               std::move(handle_request_function),
               [this](typename response_pub_sub_type::type data,
-                     const eprosima::fastrtps::rtps::SampleIdentity &identity) { on_response(data, identity); },
+                     const eprosima::fastdds::rtps::SampleIdentity &identity) { on_response(data, identity); },
               detail::to_max_queue_size(max_history_depth)),
           subscriber(make_subscriber<request_pub_sub_type>(
               participant, request_topic_name,
@@ -369,7 +369,7 @@ namespace provizio::dds
 
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
     void service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>::on_response(
-        typename response_pub_sub_type::type data, const eprosima::fastrtps::rtps::SampleIdentity &identity)
+        typename response_pub_sub_type::type data, const eprosima::fastdds::rtps::SampleIdentity &identity)
     {
         const std::lock_guard<std::mutex> lock{mutex};
         if (is_subscriber_matched_mutex_prelocked(identity.writer_guid()))
@@ -438,7 +438,7 @@ namespace provizio::dds
 
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
     service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>::ready_response::ready_response(
-        typename response_pub_sub_type::type data, const eprosima::fastrtps::rtps::SampleIdentity &identity,
+        typename response_pub_sub_type::type data, const eprosima::fastdds::rtps::SampleIdentity &identity,
         const std::chrono::system_clock::time_point &time_ready)
         : data(data), identity(identity), time_ready(time_ready)
     {
@@ -564,6 +564,6 @@ namespace provizio::dds
 
         return data->get();
     }
-} // namespace provizio::dds
+}  // namespace provizio::dds
 
-#endif // DDS_REQUEST_RESPONSE
+#endif  // DDS_REQUEST_RESPONSE

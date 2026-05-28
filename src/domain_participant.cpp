@@ -30,10 +30,6 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 #include <fastdds/dds/topic/qos/TopicQos.hpp>
 #include <fastdds/rtps/attributes/BuiltinTransports.hpp>
-#include <fastrtps/types/TypesBase.h>
-#ifndef _MSC_VER
-#include <fastrtps/xmlparser/XMLParserCommon.h>
-#endif
 
 namespace provizio::dds
 {
@@ -41,47 +37,32 @@ namespace provizio::dds
     {
         // More reliable participants matching (only 5 multicast announcements are sent 0.1 seconds apart by default
         // and then only once in 3 seconds, which is often not enough when nearing 100% bandwidth load)
-        const eprosima::fastrtps::Duration_t initial_announcements_period{0.05};       // NOLINT: Doesn't throw
-        const eprosima::fastrtps::Duration_t lease_duration_announcement_period{1, 0}; // NOLINT: Doesn't throw
+        const eprosima::fastdds::dds::Duration_t initial_announcements_period{0.05};        // NOLINT: Doesn't throw
+        const eprosima::fastdds::dds::Duration_t lease_duration_announcement_period{1, 0};  // NOLINT: Doesn't throw
         constexpr std::uint32_t num_initial_discovery_announcements = 200;
 
-        // Hardcoded instead of using eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE
-        // because that extern const lacks __declspec(dllimport) in Fast-DDS headers, causing
-        // LNK2019 on MSVC. On non-MSVC platforms a runtime check (below) verifies the value
-        // still matches the Fast-DDS extern so CI catches mismatches on upgrade.
-        // In Fast-DDS 3 it becomes DEFAULT_FASTDDS_ENV_VARIABLE with value
-        // "FASTDDS_DEFAULT_PROFILES_FILE" — update provizio_dds.py accordingly.
-        // NOLINTNEXTLINE: follows eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE
-        constexpr char default_fastrtps_env_variable[] = "FASTRTPS_DEFAULT_PROFILES_FILE";
-    } // namespace
+        // Fast-DDS 3.x renamed the XML profiles env variable from
+        // FASTRTPS_DEFAULT_PROFILES_FILE → FASTDDS_DEFAULT_PROFILES_FILE.
+        // The DEFAULT_FASTRTPS_ENV_VARIABLE extern from <fastrtps/xmlparser/XMLParserCommon.h>
+        // is gone in 3.x (the entire <fastrtps/...> tree is removed); we now hardcode the
+        // 3.x value here. Keep provizio_dds.py's _DomainParticipant.xml_profiles_env_variable
+        // in sync with this constant.
+        constexpr const char *const default_fastdds_env_variable = "FASTDDS_DEFAULT_PROFILES_FILE";
+    }  // namespace
 
     domain_participant::domain_participant(const DomainId_t domain_id)
         : registered_topics_mutex(std::make_shared<std::mutex>())
     {
-#ifndef _MSC_VER
-        // Verify at runtime that the hardcoded env variable name still matches the Fast-DDS extern.
-        // On MSVC the extern can't be linked (missing dllimport), so this check is non-Windows only.
-        const char *const env_var = default_fastrtps_env_variable; // NOLINT: intentional array-to-pointer
-        if (std::string(env_var) != eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE)
-        {
-            // If this fires, update default_fastrtps_env_variable above AND
-            // _DomainParticipant.xml_profiles_env_variable in provizio_dds.py.
-            throw std::runtime_error("provizio_dds: hardcoded env variable '" + std::string(env_var) +
-                                     "' does not match Fast-DDS DEFAULT_FASTRTPS_ENV_VARIABLE ('" +
-                                     std::string(eprosima::fastrtps::xmlparser::DEFAULT_FASTRTPS_ENV_VARIABLE) + "')");
-        }
-#endif
-
         DomainParticipantQos customized_qos;
 
         bool xml_profile = false;
-        if (auto *const file_path = std::getenv(default_fastrtps_env_variable)) // NOLINT: getenv required
+        if (auto *const file_path = std::getenv(default_fastdds_env_variable))  // NOLINT: getenv required
         {
             xml_profile = std::filesystem::exists(file_path) && !std::filesystem::is_directory(file_path);
         }
 
         auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
-        if (!xml_profile) // Unless configured via the XML profile
+        if (!xml_profile)  // Unless configured via the XML profile
         {
             participant_factory->load_profiles();
             participant_factory->get_default_participant_qos(customized_qos);
@@ -106,7 +87,7 @@ namespace provizio::dds
             // indefinitely.  UDPv4-only transport avoids this issue with no practical
             // performance impact for the typical single-host or cross-network DDS use
             // cases this library targets.
-            if (!std::getenv("FASTDDS_BUILTIN_TRANSPORTS")) // NOLINT: getenv required
+            if (!std::getenv("FASTDDS_BUILTIN_TRANSPORTS"))  // NOLINT: getenv required
             {
                 customized_qos.setup_transports(eprosima::fastdds::rtps::BuiltinTransports::UDPv4);
             }
@@ -163,7 +144,7 @@ namespace provizio::dds
                 }
 
                 // Ensure QoS is the same
-                if (!(handle->qos() == qos)) // Yep, TopicQos defines operator== but not operator!=
+                if (!(handle->qos() == qos))  // Yep, TopicQos defines operator== but not operator!=
                 {
                     throw std::runtime_error{"Topic " + topic_name +
                                              " has been already registered, but with a different QoS!"};
@@ -182,4 +163,4 @@ namespace provizio::dds
     {
         return std::make_shared<domain_participant>(domain_id);
     }
-} // namespace provizio::dds
+}  // namespace provizio::dds

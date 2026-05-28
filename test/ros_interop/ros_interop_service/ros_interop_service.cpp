@@ -19,7 +19,7 @@
 #include <string>
 #include <thread>
 
-#include <std_srvs/srv/SetBoolPubSubTypes.h>
+#include <std_srvs/srv/SetBoolPubSubTypes.hpp>
 
 #include "provizio/dds/request_response.h"
 
@@ -31,7 +31,7 @@ int main()
     constexpr std::chrono::seconds total_timeout{5};
     constexpr std::chrono::seconds end_sleep{2};
     constexpr std::int32_t max_history_depth =
-        provizio::dds::use_default_qos_durability; // Keep all default for ROS2 compatibility
+        provizio::dds::use_default_qos_durability;  // Keep all default for ROS2 compatibility
 
     std::mutex mutex;
     std::condition_variable condition_variable;

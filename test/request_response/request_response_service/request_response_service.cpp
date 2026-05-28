@@ -20,8 +20,8 @@
 
 #include "provizio/dds/request_response.h"
 
-#include <std_msgs/msg/Int32PubSubTypes.h>
-#include <std_msgs/msg/Int64PubSubTypes.h>
+#include <std_msgs/msg/Int32PubSubTypes.hpp>
+#include <std_msgs/msg/Int64PubSubTypes.hpp>
 
 int main(int argc, char *argv[])
 {
@@ -33,7 +33,7 @@ int main(int argc, char *argv[])
     constexpr std::chrono::seconds end_sleep{4};
     // Optional argument: "serial_requests" => use default QoS durability (no history),
     // otherwise keep transient local with depth = requests_expected
-    const bool serial_requests = (argc >= 2 && std::string(argv[1]) == "serial_requests"); // NOLINT
+    const bool serial_requests = (argc >= 2 && std::string(argv[1]) == "serial_requests");  // NOLINT
     const std::int32_t max_history_depth =
         serial_requests ? provizio::dds::use_default_qos_durability : requests_expected;
 

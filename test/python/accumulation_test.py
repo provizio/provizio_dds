@@ -1012,9 +1012,13 @@ def test_accumulate_dds_simple():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    time.sleep(
-        0.3
-    )  # Make sure there is enough time for publishers and subscribers to match
+    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
+    # (stable-match settling window), longer under CI load. The old 0.3 s
+    # window was borderline on slow runners — a publish in the not-yet-
+    # matched window is silently dropped by BEST_EFFORT readers, which
+    # is the default for DDSPointCloudsAccumulator's subscriber.
+    # 2 s is conservative and keeps these tests deterministic.
+    time.sleep(2.0)
     publish_odometry(
         localization_publisher,
         provizio_dds.accumulation.RigidTransform(ego_pos_0, no_rotation),
@@ -1140,9 +1144,13 @@ def test_accumulate_dds_simple_extrinsics():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    time.sleep(
-        0.3
-    )  # Make sure there is enough time for publishers and subscribers to match
+    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
+    # (stable-match settling window), longer under CI load. The old 0.3 s
+    # window was borderline on slow runners — a publish in the not-yet-
+    # matched window is silently dropped by BEST_EFFORT readers, which
+    # is the default for DDSPointCloudsAccumulator's subscriber.
+    # 2 s is conservative and keeps these tests deterministic.
+    time.sleep(2.0)
     publish_extrinsics(
         extrinsics_publisher,
         provizio_dds.accumulation.RigidTransform(radar_extrinsics_pos, no_rotation),
@@ -1332,9 +1340,13 @@ def test_accumulate_dds_simple_extrinsics_including_localization():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    time.sleep(
-        0.3
-    )  # Make sure there is enough time for publishers and subscribers to match
+    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
+    # (stable-match settling window), longer under CI load. The old 0.3 s
+    # window was borderline on slow runners — a publish in the not-yet-
+    # matched window is silently dropped by BEST_EFFORT readers, which
+    # is the default for DDSPointCloudsAccumulator's subscriber.
+    # 2 s is conservative and keeps these tests deterministic.
+    time.sleep(2.0)
     publish_extrinsics(
         radar_extrinsics_publisher,
         provizio_dds.accumulation.RigidTransform(
@@ -1475,9 +1487,13 @@ def test_accumulate_dds_no_localization_no_extrinsics():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    time.sleep(
-        0.3
-    )  # Make sure there is enough time for publishers and subscribers to match
+    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
+    # (stable-match settling window), longer under CI load. The old 0.3 s
+    # window was borderline on slow runners — a publish in the not-yet-
+    # matched window is silently dropped by BEST_EFFORT readers, which
+    # is the default for DDSPointCloudsAccumulator's subscriber.
+    # 2 s is conservative and keeps these tests deterministic.
+    time.sleep(2.0)
     publish_pc2(pc2_publisher, [point_0], radar_id)
     publish_pc2(pc2_publisher, [point_1, point_2], radar_id)
 
@@ -1556,9 +1572,13 @@ def test_accumulate_dds_no_localization_with_extrinsics():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    time.sleep(
-        0.3
-    )  # Make sure there is enough time for publishers and subscribers to match
+    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
+    # (stable-match settling window), longer under CI load. The old 0.3 s
+    # window was borderline on slow runners — a publish in the not-yet-
+    # matched window is silently dropped by BEST_EFFORT readers, which
+    # is the default for DDSPointCloudsAccumulator's subscriber.
+    # 2 s is conservative and keeps these tests deterministic.
+    time.sleep(2.0)
     publish_extrinsics(
         extrinsics_publisher,
         provizio_dds.accumulation.RigidTransform(radar_extrinsics_pos, no_rotation),
@@ -1678,9 +1698,13 @@ def test_accumulate_dds_nav_sat_fix_localization():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    time.sleep(
-        0.3
-    )  # Make sure there is enough time for publishers and subscribers to match
+    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
+    # (stable-match settling window), longer under CI load. The old 0.3 s
+    # window was borderline on slow runners — a publish in the not-yet-
+    # matched window is silently dropped by BEST_EFFORT readers, which
+    # is the default for DDSPointCloudsAccumulator's subscriber.
+    # 2 s is conservative and keeps these tests deterministic.
+    time.sleep(2.0)
     publish_nav_sat_fix(
         localization_publisher,
         ego_fix_0,
@@ -1773,17 +1797,17 @@ def test_accumulate_dds_on_pc2_callback():
     point = [1, 2, 3, 4, 5, 6]
     dds_domain_participant_publishers = provizio_dds.make_domain_participant()
     dds_domain_participant_subscribers = provizio_dds.make_domain_participant()
-    mutex = threading.Lock()
+    matched = threading.Event()
+    callback_fired = threading.Event()
     num_accumulated = 0
 
     def do_on_point_cloud(accumulator):
-        nonlocal mutex
         nonlocal num_accumulated
-        with mutex:
-            num_accumulated = len(accumulator.get_points_local_frame_relative())
-            print(
-                f"test_accumulate_dds_on_pc2_callback on_point_cloud called, {num_accumulated} points were accumulated"
-            )
+        num_accumulated = len(accumulator.get_points_local_frame_relative())
+        print(
+            f"test_accumulate_dds_on_pc2_callback on_point_cloud called, {num_accumulated} points were accumulated"
+        )
+        callback_fired.set()
 
     dds_accumulator = provizio_dds.accumulation.DDSPointCloudsAccumulator(
         1,
@@ -1797,25 +1821,49 @@ def test_accumulate_dds_on_pc2_callback():
         on_point_cloud=lambda accumulator: do_on_point_cloud(accumulator),
     )
 
+    def on_pub_matched(_, has_subscriber):
+        print(
+            f"test_accumulate_dds_on_pc2_callback pc2_publisher has_subscriber={has_subscriber}"
+        )
+        if has_subscriber:
+            matched.set()
+
     pc2_publisher = provizio_dds.Publisher(
         dds_domain_participant_publishers,
         pointcloud2_topic,
         provizio_dds.PointCloud2PubSubType,
-        lambda _, has_subscriber: print(
-            f"test_accumulate_dds_on_pc2_callback pc2_publisher has_subscriber={has_subscriber}"
-        ),
+        on_pub_matched,
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    time.sleep(
-        0.3
-    )  # Make sure there is enough time for publishers and subscribers to match
-    assert num_accumulated == 0  # Nothing accumulated
-    publish_pc2(pc2_publisher, [point], radar_id)
-    time.sleep(0.2)  # Make sure there is enough time to publish
+    # Wait for the subscriber to actually match before publishing — the
+    # old `time.sleep(0.3)` was borderline on slower configs (kilted
+    # Debug clang in particular) and would publish before Fast-DDS 3.x's
+    # discovery handshake had completed.
+    assert matched.wait(timeout=10.0), "publisher never matched subscriber"
+    assert num_accumulated == 0, "no point published yet, but accumulator already has data"
+
+    # The publisher's on_matched fires when its *writer-side* discovery
+    # observes a compatible reader, but the matched reader's RX path
+    # (registering the topic handler, settling SHM/UDP routing) is an
+    # independent asynchronous step that can still be in flight for
+    # 10s-100s of ms after that point. A single publish in that window
+    # is dropped on the floor by the not-quite-ready reader, and because
+    # DDSPointCloudsAccumulator's subscriber is BEST_EFFORT (no ACKs,
+    # no retransmits) and KEEP_LAST(1) the writer never re-sends it.
+    # Publish in a small loop until the callback fires (or we time out),
+    # which is robust to that race regardless of platform-specific
+    # discovery timing. The accumulator is configured with
+    # max_frames_per_radar=1, so duplicate publishes leave
+    # num_accumulated == 1 — the assertion semantics are unchanged.
+    publish_deadline = time.monotonic() + 5.0
+    while not callback_fired.is_set() and time.monotonic() < publish_deadline:
+        publish_pc2(pc2_publisher, [point], radar_id)
+        callback_fired.wait(timeout=0.5)
+    assert callback_fired.is_set(), "on_point_cloud callback never fired"
     assert (
         num_accumulated == 1
-    )  # A callback was indeed invoked and 1 point was accumulated
+    ), f"expected 1 accumulated point, got {num_accumulated}"
 
 
 test_accumulate_0_accumulated_point_clouds()

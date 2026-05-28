@@ -39,6 +39,32 @@ if os.name == "nt":
     # Keep the handle alive: closing it removes the directory from the search path.
     _dll_directory_handle = os.add_dll_directory(os.path.dirname(os.path.abspath(__file__)))
 
+    # Preload fastdds-X.Y.dll (and its fastcdr-X.Y.dll dependency) via ctypes
+    # before triggering `from fastdds import *` below. The upstream
+    # Fast-DDS-Python 2.x package's generated fastdds.fastdds module calls
+    # `win32api.LoadLibrary('fastdds-X.Y.dll')` at import time, and
+    # win32api uses the legacy Win32 LoadLibrary which does *not* respect
+    # `os.add_dll_directory` (that flag only feeds the newer
+    # LoadLibraryEx LOAD_LIBRARY_SEARCH_USER_DIRS path). ctypes.WinDLL on
+    # Python 3.8+ uses the LoadLibraryEx path and *does* respect
+    # add_dll_directory, so preloading here brings the DLL into the
+    # process and the later win32api.LoadLibrary call returns the same
+    # handle without consulting the search path.
+    #
+    # The `fastdds*-*.dll` / `fastcdr*-*.dll` patterns intentionally match
+    # both the Release naming (`fastdds-3.6.dll`) and the Debug naming
+    # with the `d` suffix Fast-DDS adds via FAST_DDS_DEBUG_SUFFIX
+    # (`fastddsd-3.6.dll`). The pip wheel always builds Release, but in-
+    # tree Debug builds reuse this same import path and would otherwise
+    # silently no-op the preload.
+    import ctypes as _ctypes
+    import glob as _glob
+    _module_dir = os.path.dirname(os.path.abspath(__file__))
+    for _dll in sorted(_glob.glob(os.path.join(_module_dir, "fastcdr*-*.dll"))):
+        _ctypes.WinDLL(_dll)
+    for _dll in sorted(_glob.glob(os.path.join(_module_dir, "fastdds*-*.dll"))):
+        _ctypes.WinDLL(_dll)
+
 # Import fastdds first: on Windows, _provizio_dds_python_types.pyd has a DLL-level
 # dependency on _fastdds_python.pyd.  If provizio_dds_python_types is imported first,
 # Windows loads _fastdds_python.pyd as a regular DLL (DllMain only), without calling
@@ -53,6 +79,48 @@ if __package__ or "." in __name__:
 else:
     import point_cloud2
     import accumulation
+
+
+# --------------------------------------------------------------------------- #
+# Backwards-compat shims for the Fast-DDS-python 1.x → 2.x API renames        #
+# --------------------------------------------------------------------------- #
+#
+# Fast-DDS 3.x (and the matching Fast-DDS-python 2.x bindings) renamed
+# several camelCase APIs to snake_case and flattened the `ReturnCode_t`
+# enum class to module-level `RETCODE_*` constants. provizio_dds is
+# expected to be source-compatible with 1.10.x consumer code, so we
+# re-expose the old spellings here. The wrapper's own code uses the new
+# snake_case form — these shims exist purely so user code written
+# against 1.10.x keeps importing and running unchanged.
+import fastdds as _fastdds  # noqa: E402
+
+if not hasattr(_fastdds, "ReturnCode_t"):
+    class _ReturnCode_t_shim:  # pylint: disable=invalid-name
+        """Stand-in for the Fast-DDS-python 1.x `fastdds.ReturnCode_t`
+        enum class. The 2.x bindings dropped the enclosing class and
+        exposed each return code as a module-level integer constant
+        (`fastdds.RETCODE_OK`); this shim re-mounts them under their
+        legacy `ReturnCode_t.RETCODE_*` path."""
+
+    for _attr_name in dir(_fastdds):
+        if _attr_name.startswith("RETCODE_"):
+            setattr(_ReturnCode_t_shim, _attr_name, getattr(_fastdds, _attr_name))
+    _fastdds.ReturnCode_t = _ReturnCode_t_shim
+    # The `from fastdds import *` above already executed by the time we
+    # add this attribute to `_fastdds`, so that import does not pull the
+    # shim into the provizio_dds namespace. Bind it explicitly here so
+    # consumer code spelling `provizio_dds.ReturnCode_t.RETCODE_OK`
+    # resolves to the legacy 1.x path.
+    ReturnCode_t = _ReturnCode_t_shim
+
+# `TopicDataType::getName()` was renamed to `get_name()` in Fast-DDS 3.x.
+# Add a method alias on the base class — it propagates to every SWIG-
+# generated `*PubSubType` subclass, so user code that called
+# `MyTypePubSubType().getName()` continues to resolve.
+if hasattr(_fastdds, "TopicDataType"):
+    _topic_data_type = _fastdds.TopicDataType
+    if hasattr(_topic_data_type, "get_name") and not hasattr(_topic_data_type, "getName"):
+        _topic_data_type.getName = _topic_data_type.get_name
 
 
 class QosDefaults:
@@ -189,10 +257,12 @@ def make_domain_participant(domain_id: int = 0):
     """
 
     class _DomainParticipant:
-        # Hardcoded — must match the C++ constant in domain_participant.cpp, which has a
-        # runtime assertion on Linux/macOS CI verifying it against the Fast-DDS extern.
-        # In Fast-DDS 3 it becomes "FASTDDS_DEFAULT_PROFILES_FILE".
-        xml_profiles_env_variable = "FASTRTPS_DEFAULT_PROFILES_FILE"
+        # Hardcoded — must match the default_fastdds_env_variable constant in
+        # src/domain_participant.cpp. Fast-DDS 3.x renamed the variable from
+        # FASTRTPS_DEFAULT_PROFILES_FILE to FASTDDS_DEFAULT_PROFILES_FILE and
+        # removed the <fastrtps/...> extern that previously backed a runtime
+        # sanity check, so both sides hardcode the 3.x value.
+        xml_profiles_env_variable = "FASTDDS_DEFAULT_PROFILES_FILE"
 
         # Disable shared memory transport on Windows and macOS via environment
         # variable (the SWIG bindings do not expose setup_transports()).
@@ -275,12 +345,12 @@ def make_domain_participant(domain_id: int = 0):
         def register_type(self, pub_sub_type_instance):
             with self._register_type_mutex:
                 type_support = self._registered_types.get(
-                    pub_sub_type_instance.getName(), None
+                    pub_sub_type_instance.get_name(), None
                 )
                 if type_support is None:
                     type_support = TypeSupport(pub_sub_type_instance)
                     self._participant.register_type(type_support)
-                    self._registered_types[pub_sub_type_instance.getName()] = (
+                    self._registered_types[pub_sub_type_instance.get_name()] = (
                         type_support
                     )
                 return type_support
@@ -292,7 +362,7 @@ def make_domain_participant(domain_id: int = 0):
                 if topic_info:
                     # Ensure the type matches the already registered topic's type
                     existing_type_name = topic_info["type_support"].get_type_name()
-                    requested_type_name = pub_sub_type().getName()
+                    requested_type_name = pub_sub_type().get_name()
                     if existing_type_name != requested_type_name:
                         raise RuntimeError(
                             f"Topic {topic_name} has been already registered, but with a different type (existing: '{existing_type_name}', requested: '{requested_type_name}')!"
@@ -308,7 +378,7 @@ def make_domain_participant(domain_id: int = 0):
                     topic_qos = TopicQos()
                     self.fastdds_participant().get_default_topic_qos(topic_qos)
                     new_topic = self.fastdds_participant().create_topic(
-                        topic_name, pub_sub_type_instance.getName(), topic_qos
+                        topic_name, pub_sub_type_instance.get_name(), topic_qos
                     )
 
                     self._registered_topics[topic_name] = {
@@ -478,9 +548,15 @@ class Publisher(_TopicHandle):
         :param params: optional WriteParams to control the write operation
         :return: True if published successfully, and False otherwise
         """
+        # Fast-DDS 3.x: DataWriter.write() returns a ReturnCode_t integer
+        # (RETCODE_OK == 0) rather than the bool that Fast-DDS 2.x produced
+        # via the Python bindings. Compare explicitly so a successful write
+        # maps to True and any other return code to False — without this,
+        # `RETCODE_OK == 0` falsifies as Python bool and every publish would
+        # be reported as a failure.
         if params:
-            return self._writer.write(data, params)
-        return self._writer.write(data)
+            return self._writer.write(data, params) == RETCODE_OK
+        return self._writer.write(data) == RETCODE_OK
 
     def _update_num_matched_subscribers(self, count: int):
         with self._num_matched_cv:
@@ -523,7 +599,7 @@ class Subscriber(_TopicHandle):
             while True:
                 info = SampleInfo()
                 data = self._data_type()
-                if reader.take_next_sample(data, info) != ReturnCode_t.RETCODE_OK:
+                if reader.take_next_sample(data, info) != RETCODE_OK:
                     break
                 if not info.valid_data:
                     continue
