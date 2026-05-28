@@ -4,6 +4,14 @@ on:
   workflow_dispatch:
   pull_request:
 
+# Cancel any in-progress run for the same PR (or, for workflow_dispatch,
+# the same ref) when a new run starts. Without this, every push to a
+# feature branch racks up parallel runs on stale commits — wastes runners
+# and lets the auto-committed bin-cache jobs land on top of force-pushes.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-cache:
     name: Build bin cache (C++ only)
