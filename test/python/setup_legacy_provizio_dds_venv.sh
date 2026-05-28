@@ -63,11 +63,13 @@ MARKER="${VENV_DIR}/.installed.${LEGACY_TAG}"
 # need to bootstrap the legacy venv for the cross-version compat test).
 case "${OSTYPE:-}" in
     msys*|cygwin*|win32*)
+        IS_WINDOWS=1
         VENV_BIN_SUBDIR="Scripts"
         VENV_PYTHON_NAME="python.exe"
         VENV_PIP_NAME="pip.exe"
         ;;
     *)
+        IS_WINDOWS=0
         VENV_BIN_SUBDIR="bin"
         VENV_PYTHON_NAME="python3"
         VENV_PIP_NAME="pip"
@@ -76,11 +78,25 @@ esac
 VENV_PYTHON="${VENV_DIR}/${VENV_BIN_SUBDIR}/${VENV_PYTHON_NAME}"
 VENV_PIP="${VENV_DIR}/${VENV_BIN_SUBDIR}/${VENV_PIP_NAME}"
 
+# On Git Bash / MSYS, paths printed by this script flow into $GITHUB_ENV and
+# then into a native Windows ctest/Python process which does not perform
+# MSYS path translation. Emit a native Windows path (`C:\...\python.exe`)
+# instead of the MSYS `/c/.../python.exe` form so
+# `Path(PROVIZIO_DDS_LEGACY_PYTHON).is_file()` succeeds on the consumer
+# side. `cygpath -w` is shipped with Git for Windows.
+to_native_path() {
+    if [[ "${IS_WINDOWS}" -eq 1 ]] && command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
 # Stdout must contain only the final venv interpreter path so callers can
 # capture it via $(...). Everything else — pip output, build logs, the
 # smoke-test prints — goes to stderr.
 if [[ -f "${MARKER}" && "${force_reinstall}" -eq 0 ]]; then
-    echo "${VENV_PYTHON}"
+    to_native_path "${VENV_PYTHON}"
     exit 0
 fi
 
@@ -103,20 +119,31 @@ for tool in git cmake; do
         exit 2
     fi
 done
-# The C/C++ toolchain is whatever the caller (or CI) has configured via
-# CC/CXX, falling back to the `cc`/`c++` symlinks every Linux distro and
-# macOS provide. Don't hard-code gcc/g++ — the clang CI jobs export
-# CC=clang and CXX=clang++ and the system may not have gcc installed
-# at all.
-CC_CANDIDATE="${CC:-cc}"
-CXX_CANDIDATE="${CXX:-c++}"
-if ! command -v "${CC_CANDIDATE}" >/dev/null 2>&1; then
-    echo "setup_legacy_provizio_dds_venv: missing C compiler: ${CC_CANDIDATE}" >&2
-    exit 2
-fi
-if ! command -v "${CXX_CANDIDATE}" >/dev/null 2>&1; then
-    echo "setup_legacy_provizio_dds_venv: missing C++ compiler: ${CXX_CANDIDATE}" >&2
-    exit 2
+# The C/C++ toolchain is whatever the caller (or CI) has configured.
+# POSIX: prefer CC/CXX if exported (clang CI jobs set CC=clang CXX=clang++),
+# falling back to the `cc`/`c++` symlinks every Linux distro and macOS
+# provide. Don't hard-code gcc/g++ — the system may not have gcc at all.
+# Windows: MSVC (`cl`) is the toolchain. The Windows CI step runs after
+# `ilammy/msvc-dev-cmd`, which puts `cl` in PATH; probe for it directly
+# rather than the POSIX `cc`/`c++` symlinks (which don't exist on a stock
+# Windows runner — the script would have failed before pip could even
+# invoke the configured MSVC environment).
+if [[ "${IS_WINDOWS}" -eq 1 ]]; then
+    if ! command -v cl >/dev/null 2>&1; then
+        echo "setup_legacy_provizio_dds_venv: missing MSVC toolchain (cl not in PATH); call this script after the msvc-dev-cmd / vcvarsall.bat setup step" >&2
+        exit 2
+    fi
+else
+    CC_CANDIDATE="${CC:-cc}"
+    CXX_CANDIDATE="${CXX:-c++}"
+    if ! command -v "${CC_CANDIDATE}" >/dev/null 2>&1; then
+        echo "setup_legacy_provizio_dds_venv: missing C compiler: ${CC_CANDIDATE}" >&2
+        exit 2
+    fi
+    if ! command -v "${CXX_CANDIDATE}" >/dev/null 2>&1; then
+        echo "setup_legacy_provizio_dds_venv: missing C++ compiler: ${CXX_CANDIDATE}" >&2
+        exit 2
+    fi
 fi
 
 # Re-create the venv fresh whenever we cross the install-marker boundary so
@@ -154,4 +181,4 @@ print('legacy provizio_dds smoke test passed:', provizio_dds.__file__)
 ") >&2
 
 touch "${MARKER}"
-echo "${VENV_PYTHON}"
+to_native_path "${VENV_PYTHON}"
