@@ -55,8 +55,11 @@ Required environment:
   * PROVIZIO_DDS_LEGACY_PYTHON — absolute path to the python3 interpreter
     of a venv with provizio_dds 1.10.1 installed. The venv is set up by
     `test/python/setup_legacy_provizio_dds_venv.sh` (see that script for
-    install steps). If unset, the test prints a SKIP marker and exits 0
-    so CI environments without the legacy install don't block on it.
+    install steps). When unset on a dev machine (CI unset) the test
+    prints a SKIP marker and exits 0 so local runs without the legacy
+    install don't block. In CI (`CI=true`), a missing/invalid value is
+    a hard failure — silent skip there would erase the wire-interop
+    matrix this test exists to enforce.
 
 Parallelism note: the cross_compat/*.py scripts run on DDS domain 42 and
 use their own topic + service names so this test can execute concurrently
@@ -83,13 +86,39 @@ HERE = Path(__file__).resolve().parent
 CURRENT_PYTHON = sys.executable
 
 
-def skip(reason: str) -> None:
-    # The leading-anchor "SKIPPED:" marker is what the matching CMake
-    # `set_tests_properties(... SKIP_REGULAR_EXPRESSION ...)` looks for so
-    # ctest reports the test as `Skipped` (not silent green) — important
-    # because a missing legacy venv on a CI runner is a setup gap worth
-    # noticing, not pretending we ran wire-interop checks we actually
-    # didn't.
+def _in_ci() -> bool:
+    # GitHub Actions (and most other CI services) set `CI=true`. We treat
+    # any truthy value as CI for portability — a missing legacy venv is a
+    # setup gap there, not an opt-out, so the test must fail loudly
+    # instead of skipping. The Windows ctest jobs invoke ctest directly
+    # (bypassing `.github/workflows/test.sh`, which is what sets
+    # PROVIZIO_DDS_LEGACY_PYTHON on Linux/macOS), so silent skip on
+    # Windows would lose the wire-interop check across half the matrix
+    # without any signal.
+    return os.environ.get("CI", "").lower() in ("1", "true", "yes")
+
+
+def skip_or_fail(reason: str) -> None:
+    # Outside CI a missing legacy venv is an expected dev-machine
+    # state — print the leading-anchor `SKIPPED:` marker that the
+    # matching CMake `set_tests_properties(... SKIP_REGULAR_EXPRESSION
+    # ...)` looks for and exit 0, so ctest reports the test as
+    # `Skipped` rather than `Passed`. In CI, refuse to skip: the
+    # cross-version check is the whole point of the matrix, and a
+    # silent skip when the setup didn't run (e.g. the Windows ctest
+    # path doesn't invoke `.github/workflows/test.sh`) would mask
+    # exactly the wire-interop regression this test is supposed to
+    # catch. Fail with a clear remediation hint instead.
+    if _in_ci():
+        print(
+            f"FAIL cross_version_compat — {reason}\n"
+            f"  CI=true detected; refusing to skip the cross-version interop check.\n"
+            f"  Set {LEGACY_ENV_VAR} to a python3 inside a venv with provizio_dds 1.10.1\n"
+            f"  installed (use test/python/setup_legacy_provizio_dds_venv.sh on POSIX,\n"
+            f"  or the equivalent venv bootstrap on Windows).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     print(f"SKIPPED: cross_version_compat — {reason}")
     sys.exit(0)
 
@@ -197,9 +226,9 @@ def run_pair(stage: str, cmd_a, cmd_b, timeout: float = 25.0) -> None:
 def main() -> int:
     legacy_python = os.environ.get(LEGACY_ENV_VAR)
     if not legacy_python:
-        skip(f"{LEGACY_ENV_VAR} unset")
+        skip_or_fail(f"{LEGACY_ENV_VAR} unset")
     if not Path(legacy_python).is_file():
-        skip(f"{LEGACY_ENV_VAR} points at non-existent file: {legacy_python}")
+        skip_or_fail(f"{LEGACY_ENV_VAR} points at non-existent file: {legacy_python}")
 
     # Sanity-check that the legacy interpreter can actually import the
     # 1.10.x wrapper from its venv. The current build's `provizio_dds.py`
@@ -218,12 +247,13 @@ def main() -> int:
          "import provizio_dds; print(provizio_dds.__file__)"],
         capture_output=True, text=True)
     if probe.returncode != 0:
-        skip(f"legacy interpreter cannot import provizio_dds:\n{probe.stderr}")
+        skip_or_fail(f"legacy interpreter cannot import provizio_dds:\n{probe.stderr}")
     resolved = probe.stdout.strip()
     if str(HERE) in resolved or not resolved:
-        # Defensive: -P should have prevented this, but assert anyway so a
-        # silent regression in shadowing logic can't masquerade as a pass.
-        skip(f"legacy provizio_dds resolved to test dir (shadowing): {resolved!r}")
+        # Defensive: the sys.path.pop(0) wrapper above should have prevented
+        # this, but assert anyway so a silent regression in shadowing logic
+        # can't masquerade as a pass.
+        skip_or_fail(f"legacy provizio_dds resolved to test dir (shadowing): {resolved!r}")
     print(f"legacy provizio_dds: {resolved}")
 
     pub = ["./cross_compat_publisher.py"]
