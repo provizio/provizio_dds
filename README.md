@@ -103,8 +103,8 @@ ExternalProject_Add(libprovizio_dds
 add_dependencies(<YOUR_CMAKE_TARGET> libprovizio_dds)
 target_include_directories(<YOUR_CMAKE_TARGET> SYSTEM PUBLIC "${PROVIZIO_DDS_INSTALL_DIR}/include")
 target_link_directories(<YOUR_CMAKE_TARGET> PUBLIC "${PROVIZIO_DDS_INSTALL_DIR}/lib")
-target_link_libraries(<YOUR_CMAKE_TARGET> PUBLIC provizio_dds provizio_dds_types fastrtps fastcdr)
-# Note: on Windows/MSVC, Fast-DDS uses versioned library names (e.g. fastrtps-2.14, fastcdr-2.2).
+target_link_libraries(<YOUR_CMAKE_TARGET> PUBLIC provizio_dds provizio_dds_types fastdds fastcdr)
+# Note: on Windows/MSVC, Fast-DDS uses versioned library names (e.g. fastdds-3.6, fastcdr-2.3).
 # The ExternalProject above creates unversioned imported targets that resolve automatically.
 ```
 
@@ -394,7 +394,7 @@ For more details see [python/accumulation.py](python/accumulation.py) and [test/
 
 ## XML Profiles
 
-As DDS allows for configuring many of its parameters, you can optionally define a custom XML profile and enable it via setting its path to environment variable `FASTRTPS_DEFAULT_PROFILES_FILE`. Make sure to set the `participant` tag's attribute `is_default_profile` to `true` to activate the profile automatically, f.e.:
+As DDS allows for configuring many of its parameters, you can optionally define a custom XML profile and enable it via setting its path to environment variable `FASTDDS_DEFAULT_PROFILES_FILE` (renamed from `FASTRTPS_DEFAULT_PROFILES_FILE` in Fast-DDS 3.x). Make sure to set the `participant` tag's attribute `is_default_profile` to `true` to activate the profile automatically, f.e.:
 
 ```XML
 <?xml version="1.0" encoding="UTF-8" ?>
@@ -407,8 +407,8 @@ As DDS allows for configuring many of its parameters, you can optionally define 
 </profiles>
 ```
 
-For more details, please refer to [Fast-DDS documentation](https://fast-dds.docs.eprosima.com/en/2.14.x/fastdds/xml_configuration/xml_configuration.html).
-Please note that some of che changes may break compatibility between publishers and subscribers, unless applied on both sides.
+For more details, please refer to [Fast-DDS documentation](https://fast-dds.docs.eprosima.com/en/v3.6.1/fastdds/xml_configuration/xml_configuration.html).
+Please note that some of the changes may break compatibility between publishers and subscribers, unless applied on both sides.
 
 You may see how this functionality is used to activate Discovery-Server-based participants discovery in provizio_dds tests:
 

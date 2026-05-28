@@ -5,17 +5,17 @@
             <builtin>
                 <discovery_config>
                     <discoveryProtocol>CLIENT</discoveryProtocol>
+                    <!-- Fast-DDS 3.x simplified the discovery-server schema:
+                         the <RemoteServer prefix="..."><metatrafficUnicastLocatorList>...
+                         wrapper is gone, the prefix is auto-discovered, and
+                         <discoveryServersList> now contains <locator> entries directly. -->
                     <discoveryServersList>
-                        <RemoteServer prefix="43.2a.19.7f.1d.ee.8c.4b.a9.f5.32.df">
-                            <metatrafficUnicastLocatorList>
-                                <locator>
-                                    <udpv4>
-                                        <address>201.10.0.1</address>
-                                        <port>11811</port>
-                                    </udpv4>
-                                </locator>
-                            </metatrafficUnicastLocatorList>
-                        </RemoteServer>
+                        <locator>
+                            <udpv4>
+                                <address>201.10.0.1</address>
+                                <port>11811</port>
+                            </udpv4>
+                        </locator>
                     </discoveryServersList>
                     <clientAnnouncementPeriod>
                         <nanosec>100000000</nanosec>

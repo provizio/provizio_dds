@@ -16,7 +16,7 @@
 #include <iostream>
 #include <string>
 
-#include <std_srvs/srv/SetBoolPubSubTypes.h>
+#include <std_srvs/srv/SetBoolPubSubTypes.hpp>
 
 #include "provizio/dds/request_response.h"
 

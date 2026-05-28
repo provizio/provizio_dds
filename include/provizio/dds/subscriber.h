@@ -199,7 +199,7 @@ namespace provizio::dds
         const auto &topic_qos = TOPIC_QOS_DEFAULT;
         const auto &subscriber_qos = SUBSCRIBER_QOS_DEFAULT;
 
-        the_topic = this->participant->register_topic(topic_name, type_support->getName(), topic_qos);
+        the_topic = this->participant->register_topic(topic_name, type_support->get_name(), topic_qos);
         subscriber = this->participant->fastdds_participant().create_subscriber(subscriber_qos);
 
         DataReaderQos datareader_qos;
@@ -302,7 +302,7 @@ namespace provizio::dds
             {
                 data_type data;
                 SampleInfo info;
-                while (reader->take_next_sample(&data, &info) == ReturnCode_t::RETCODE_OK)
+                while (reader->take_next_sample(&data, &info) == RETCODE_OK)
                 {
                     if (info.valid_data)
                     {
@@ -323,7 +323,7 @@ namespace provizio::dds
           private:
             on_data_function_type on_data_function;
         };
-    } // namespace detail
+    }  // namespace detail
 
     template <typename data_pub_sub_type, typename on_data_function_type>
     std::shared_ptr<subscriber_handle<data_pub_sub_type>> make_subscriber(
@@ -371,7 +371,7 @@ namespace provizio::dds
           private:
             on_has_publisher_changed_function_type on_has_publisher_changed_function;
         };
-    } // namespace detail
+    }  // namespace detail
 
     template <typename data_pub_sub_type, typename on_data_function_type,
               typename on_has_publisher_changed_function_type>
@@ -388,6 +388,6 @@ namespace provizio::dds
                 std::move(on_data_function), std::move(on_has_publisher_changed_function)),
             reliability_kind, max_history_depth);
     }
-} // namespace provizio::dds
+}  // namespace provizio::dds
 
-#endif // DDS_SUBSCRIBER
+#endif  // DDS_SUBSCRIBER

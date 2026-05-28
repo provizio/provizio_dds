@@ -90,14 +90,14 @@ namespace provizio::dds
         std::shared_ptr<std::mutex> registered_topics_mutex;
         std::unordered_map<std::string, std::weak_ptr<topic>> registered_topics;
     };
-    using DomainParticipant = domain_participant; // To match DDS domain participant name, as previously used directly
+    using DomainParticipant = domain_participant;  // To match DDS domain participant name, as previously used directly
 
     template <typename data_pub_sub_type> TypeSupport domain_participant::register_type()
     {
         const std::lock_guard<std::mutex> lock{registered_types_mutex};
 
         auto pub_sub = std::make_unique<data_pub_sub_type>();
-        const auto type_it = registered_types.find(pub_sub->getName());
+        const auto type_it = registered_types.find(pub_sub->get_name());
         if (type_it != registered_types.end())
         {
             return type_it->second;
@@ -106,7 +106,7 @@ namespace provizio::dds
         {
             TypeSupport type_support{pub_sub.release()};
             participant->register_type(type_support);
-            registered_types.insert({type_support->getName(), type_support});
+            registered_types.insert({type_support->get_name(), type_support});
             return type_support;
         }
     }
@@ -122,6 +122,6 @@ namespace provizio::dds
      * https://fast-dds.docs.eprosima.com/en/latest/fastdds/api_reference/dds_pim/domain/domainparticipant.html
      */
     PROVIZIO_DDS_API std::shared_ptr<domain_participant> make_domain_participant(DomainId_t domain_id = 0);
-} // namespace provizio::dds
+}  // namespace provizio::dds
 
-#endif // DDS_DOMAIN_PARTICIPANT
+#endif  // DDS_DOMAIN_PARTICIPANT

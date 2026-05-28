@@ -188,7 +188,15 @@ setup(
     url="https://github.com/provizio/provizio_dds",
     long_description=readme,
     long_description_content_type="text/markdown",
-    install_requires=["numpy>=1.16", "transforms3d>=0.4.1"],
+    install_requires=[
+        "numpy>=1.16",
+        "transforms3d>=0.4.1",
+        # Fast-DDS-Python 2.x's generated fastdds.py calls
+        # win32api.LoadLibrary('fastdds-X.Y.dll') at import time on
+        # Windows, so the wheel depends on pywin32 there. Linux/macOS
+        # use the ctypes preload in provizio_dds/__init__.py instead.
+        'pywin32; sys_platform == "win32"',
+    ],
     packages=["fastdds", "provizio_dds_python_types", "provizio_dds"],
     package_dir={
         "fastdds": f"{target_dir}/fastdds",

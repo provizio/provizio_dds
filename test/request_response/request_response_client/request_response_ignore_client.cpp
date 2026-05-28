@@ -18,8 +18,8 @@
 
 #include "provizio/dds/request_response.h"
 
-#include <std_msgs/msg/Int32PubSubTypes.h>
-#include <std_msgs/msg/Int64PubSubTypes.h>
+#include <std_msgs/msg/Int32PubSubTypes.hpp>
+#include <std_msgs/msg/Int64PubSubTypes.hpp>
 
 constexpr const char *log_prefix = "request_response_ignore_client: ";
 
@@ -30,8 +30,8 @@ try
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr std::chrono::seconds time_to_match{3};
     constexpr std::chrono::seconds timeout{
-        15}; // Longer timeout: DDS entity matching can be slow on some platforms (e.g. Windows)
-    constexpr std::chrono::seconds ignore_timeout{5}; // Shorter timeout for requests that should be ignored
+        15};  // Longer timeout: DDS entity matching can be slow on some platforms (e.g. Windows)
+    constexpr std::chrono::seconds ignore_timeout{5};  // Shorter timeout for requests that should be ignored
     const std::array<int, 5> requests{1, 2, 3, 4, 5};
 
     auto participant = provizio::dds::make_domain_participant(domain_id);

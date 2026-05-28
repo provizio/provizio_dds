@@ -33,12 +33,12 @@
 
 namespace provizio::dds
 {
-    using WriteParams = ::eprosima::fastrtps::rtps::WriteParams;
+    using WriteParams = ::eprosima::fastdds::rtps::WriteParams;
 
     namespace detail
     {
         template <typename data_pub_sub_type, typename on_matched_function_type = void *> class data_writer_listener;
-    } // namespace detail
+    }  // namespace detail
 
     /**
      * @file publisher.h
@@ -327,7 +327,7 @@ namespace provizio::dds
           private:
             publisher_handle<data_pub_sub_type, on_matched_function_type> &publisher;
         };
-    } // namespace detail
+    }  // namespace detail
 
     template <typename data_pub_sub_type, typename on_matched_function_type>
     publisher_handle<data_pub_sub_type, on_matched_function_type>::publisher_handle(
@@ -364,7 +364,7 @@ namespace provizio::dds
         const auto &topic_qos = TOPIC_QOS_DEFAULT;
         const auto &publisher_qos = PUBLISHER_QOS_DEFAULT;
 
-        the_topic = this->participant->register_topic(topic_name, type_support->getName(), topic_qos);
+        the_topic = this->participant->register_topic(topic_name, type_support->get_name(), topic_qos);
         publisher = this->participant->fastdds_participant().create_publisher(publisher_qos);
 
         DataWriterQos datawriter_qos;
@@ -416,13 +416,16 @@ namespace provizio::dds
     template <typename data_pub_sub_type, typename on_matched_function_type>
     bool publisher_handle<data_pub_sub_type, on_matched_function_type>::publish(data_type &data)
     {
-        return data_writer->write(&data);
+        // Fast-DDS 3.x: DataWriter::write returns ReturnCode_t (int32_t with
+        // RETCODE_OK = 0), not bool. Compare explicitly so success (0) maps
+        // to true.
+        return data_writer->write(&data) == RETCODE_OK;
     }
 
     template <typename data_pub_sub_type, typename on_matched_function_type>
     bool publisher_handle<data_pub_sub_type, on_matched_function_type>::publish(data_type &data, WriteParams &params)
     {
-        return data_writer->write(&data, params);
+        return data_writer->write(&data, params) == RETCODE_OK;
     }
 
     template <typename data_pub_sub_type, typename on_matched_function_type>
@@ -465,6 +468,6 @@ namespace provizio::dds
 
         return num_matched_subscribers;
     }
-} // namespace provizio::dds
+}  // namespace provizio::dds
 
-#endif // DDS_PUBLISHER
+#endif  // DDS_PUBLISHER

@@ -21,8 +21,8 @@
 
 #include "provizio/dds/request_response.h"
 
-#include <std_msgs/msg/Int32PubSubTypes.h>
-#include <std_msgs/msg/Int64PubSubTypes.h>
+#include <std_msgs/msg/Int32PubSubTypes.hpp>
+#include <std_msgs/msg/Int64PubSubTypes.hpp>
 
 int main(int argc, char *argv[])
 {
@@ -31,14 +31,14 @@ int main(int argc, char *argv[])
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr int requests_expected_default = 7;
     constexpr std::chrono::seconds total_timeout{
-        60}; // DDS entity matching can be slow on some platforms (e.g. Windows)
+        60};  // DDS entity matching can be slow on some platforms (e.g. Windows)
     constexpr std::chrono::seconds end_sleep{4};
 
     int requests_expected = requests_expected_default;
     if (argc == 2)
     {
         // Supports specifying the expected number of requests
-        const auto argument = argv[1]; // NOLINT: Pointer coming from main() arguments
+        const auto argument = argv[1];  // NOLINT: Pointer coming from main() arguments
         requests_expected = std::stoi(argument);
         if (requests_expected <= 0)
         {

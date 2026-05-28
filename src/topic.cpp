@@ -39,4 +39,4 @@ namespace provizio::dds
             participant->delete_topic(the_topic);
         }
     }
-} // namespace provizio::dds
+}  // namespace provizio::dds

@@ -20,8 +20,8 @@
 
 #include "provizio/dds/request_response.h"
 
-#include <std_msgs/msg/Int32PubSubTypes.h>
-#include <std_msgs/msg/Int64PubSubTypes.h>
+#include <std_msgs/msg/Int32PubSubTypes.hpp>
+#include <std_msgs/msg/Int64PubSubTypes.hpp>
 
 constexpr const char *log_prefix = "request_response_concurrent_client: ";
 
@@ -32,7 +32,7 @@ try
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr std::chrono::seconds time_to_match{5};
     constexpr std::chrono::milliseconds timeout{
-        10000}; // DDS entity matching can be slow on some platforms (e.g. Windows)
+        10000};  // DDS entity matching can be slow on some platforms (e.g. Windows)
 
     // These are x and x^2 pairs, except of those with expected values of 0 which means we want to interrupt the
     // requests and make sure all behaves well

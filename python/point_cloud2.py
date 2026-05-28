@@ -381,7 +381,7 @@ def make_radar_point_cloud(
 
 
 def make_entities(
-    header: Header, has_radar_data: Bool, has_camera_data: Bool, entities: Iterable
+    header: Header, has_radar_data: bool, has_camera_data: bool, entities: Iterable
 ) -> PointCloud2:
     """
     Create a PointCloud2 containing entities (radar, camera or fused).
