@@ -103,9 +103,16 @@ ExternalProject_Add(libprovizio_dds
 add_dependencies(<YOUR_CMAKE_TARGET> libprovizio_dds)
 target_include_directories(<YOUR_CMAKE_TARGET> SYSTEM PUBLIC "${PROVIZIO_DDS_INSTALL_DIR}/include")
 target_link_directories(<YOUR_CMAKE_TARGET> PUBLIC "${PROVIZIO_DDS_INSTALL_DIR}/lib")
-target_link_libraries(<YOUR_CMAKE_TARGET> PUBLIC provizio_dds provizio_dds_types fastdds fastcdr)
-# Note: on Windows/MSVC, Fast-DDS uses versioned library names (e.g. fastdds-3.6, fastcdr-2.3).
-# The ExternalProject above creates unversioned imported targets that resolve automatically.
+if(WIN32)
+    # On Windows the installed import libraries are versioned (e.g.
+    # fastdds-3.6.lib, fastcdr-2.3.lib). The ExternalProject above is a
+    # standalone CMake build, so its internal unversioned imported targets
+    # don't propagate here — link the versioned names directly. Replace
+    # the trailing numbers if you pinned a different Fast-DDS version.
+    target_link_libraries(<YOUR_CMAKE_TARGET> PUBLIC provizio_dds provizio_dds_types fastdds-3.6 fastcdr-2.3)
+else()
+    target_link_libraries(<YOUR_CMAKE_TARGET> PUBLIC provizio_dds provizio_dds_types fastdds fastcdr)
+endif()
 ```
 
 **Python (pip):**

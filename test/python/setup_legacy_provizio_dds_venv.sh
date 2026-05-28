@@ -57,19 +57,47 @@ done
 VENV_DIR="${venv_dir_arg:-${TMPDIR:-/tmp}/provizio_dds_1_10_1_venv}"
 MARKER="${VENV_DIR}/.installed.${LEGACY_TAG}"
 
+# Cross-platform venv layout: POSIX puts the interpreter at bin/python3,
+# Windows puts it at Scripts/python.exe. Detect via OSTYPE so this script
+# also works under Git Bash on the Windows CI runners (which is where we
+# need to bootstrap the legacy venv for the cross-version compat test).
+case "${OSTYPE:-}" in
+    msys*|cygwin*|win32*)
+        VENV_BIN_SUBDIR="Scripts"
+        VENV_PYTHON_NAME="python.exe"
+        VENV_PIP_NAME="pip.exe"
+        ;;
+    *)
+        VENV_BIN_SUBDIR="bin"
+        VENV_PYTHON_NAME="python3"
+        VENV_PIP_NAME="pip"
+        ;;
+esac
+VENV_PYTHON="${VENV_DIR}/${VENV_BIN_SUBDIR}/${VENV_PYTHON_NAME}"
+VENV_PIP="${VENV_DIR}/${VENV_BIN_SUBDIR}/${VENV_PIP_NAME}"
+
 # Stdout must contain only the final venv interpreter path so callers can
 # capture it via $(...). Everything else — pip output, build logs, the
 # smoke-test prints — goes to stderr.
 if [[ -f "${MARKER}" && "${force_reinstall}" -eq 0 ]]; then
-    echo "${VENV_DIR}/bin/python3"
+    echo "${VENV_PYTHON}"
     exit 0
 fi
 
 # Building 1.10.1 from source goes through its bundled CMake + Fast-DDS
 # externalproject, which expects the usual system toolchain. Check the
 # bare minimum upfront so failures point at the actual missing pieces
-# rather than a deep CMake log line.
-for tool in python3 git cmake; do
+# rather than a deep CMake log line. On Windows the python launcher is
+# `python` (not `python3`), so probe both forms.
+if command -v python3 >/dev/null 2>&1; then
+    HOST_PYTHON="python3"
+elif command -v python >/dev/null 2>&1; then
+    HOST_PYTHON="python"
+else
+    echo "setup_legacy_provizio_dds_venv: missing required tool: python3 (or python)" >&2
+    exit 2
+fi
+for tool in git cmake; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
         echo "setup_legacy_provizio_dds_venv: missing required tool: ${tool}" >&2
         exit 2
@@ -94,17 +122,17 @@ fi
 # Re-create the venv fresh whenever we cross the install-marker boundary so
 # stale builds from earlier tag attempts don't shadow the new install.
 rm -rf "${VENV_DIR}" >&2
-python3 -m venv "${VENV_DIR}" >&2
+"${HOST_PYTHON}" -m venv "${VENV_DIR}" >&2
 
 # Resolve a Python interpreter the venv can actually use to run pip — on
 # minimal containers pip itself sometimes needs an explicit upgrade
 # before it can resolve git+https URLs cleanly.
-"${VENV_DIR}/bin/pip" install --quiet --upgrade pip setuptools wheel >&2
+"${VENV_PIP}" install --quiet --upgrade pip setuptools wheel >&2
 
 # Build from the immutable tag, not the moving branch — the whole point
 # of this test is to compare against the deployed-fleet baseline that
 # 1.10.1 represents.
-"${VENV_DIR}/bin/pip" install -v "git+${GIT_URL}@${LEGACY_TAG}" >&2
+"${VENV_PIP}" install -v "git+${GIT_URL}@${LEGACY_TAG}" >&2
 
 # Smoke-test the install so a subtle compile issue doesn't surface as a
 # mystery import failure inside the actual cross-version test runner.
@@ -114,7 +142,7 @@ python3 -m venv "${VENV_DIR}" >&2
 # test.sh) chdir to the build tree before invoking us, and the build tree
 # contains the SWIG-generated provizio_dds_python_types.py for the *current*
 # Fast-DDS version, ABI-incompatible with the 1.10.1 wheel's bundled libs.
-(cd "${VENV_DIR}" && "${VENV_DIR}/bin/python3" -c "
+(cd "${VENV_DIR}" && "${VENV_PYTHON}" -c "
 import provizio_dds
 assert hasattr(provizio_dds, 'Publisher')
 assert hasattr(provizio_dds, 'Subscriber')
@@ -126,4 +154,4 @@ print('legacy provizio_dds smoke test passed:', provizio_dds.__file__)
 ") >&2
 
 touch "${MARKER}"
-echo "${VENV_DIR}/bin/python3"
+echo "${VENV_PYTHON}"
