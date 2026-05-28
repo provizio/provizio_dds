@@ -948,7 +948,13 @@ else(HAS_BIN_CACHE)
     # These are not needed at runtime and should not be included in packages or caches.
     # Scoped to specific subdirectories to avoid destroying unrelated cmake configs
     # when installed to a shared prefix.
+    # Also remove the pre-3.x `fastrtps` config dir in case this install
+    # is layering on top of a prefix that already had a Fast-DDS 1.x/2.x
+    # tree there — leaving it behind would let a later
+    # `find_package(fastrtps)` pick up the obsolete config from the same
+    # prefix.
     install(CODE "
+        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastrtps\")
         file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastdds\")
         file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastcdr\")
         file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastdds_python\")
