@@ -202,15 +202,19 @@ def main() -> int:
         skip(f"{LEGACY_ENV_VAR} points at non-existent file: {legacy_python}")
 
     # Sanity-check that the legacy interpreter can actually import the
-    # 1.10.x wrapper from its venv. `-P` strips the script-directory entry
-    # (or cwd for `-c`) from sys.path[0] — without it, the current build's
-    # `provizio_dds.py` copied into this test directory would shadow the
-    # venv-installed `provizio_dds/` package and the probe (plus every
-    # cross_compat_*.py run below) would silently exercise current-vs-
-    # current. Verify the resolved path lives under the venv to catch any
-    # future Python version where -P semantics change.
+    # 1.10.x wrapper from its venv. The current build's `provizio_dds.py`
+    # is copied into this test directory by the python_tests CMake target,
+    # and Python's default behaviour of prepending the cwd (for `-c`) or
+    # the script dir to sys.path[0] would shadow the venv-installed
+    # `provizio_dds/` package — turning the probe (and every cross_compat_*.py
+    # run below) into a silent current-vs-current check. `-P` (Python 3.11+)
+    # suppresses that prepend, but the CI matrix also covers 3.8-3.10 where
+    # `-P` is unknown, so we use a portable `sys.path.pop(0)` wrapper instead.
+    # Verify the resolved path lives outside this directory to catch any
+    # future regression in the shadowing logic.
     probe = subprocess.run(
-        [legacy_python, "-P", "-c",
+        [legacy_python, "-c",
+         "import sys; sys.path.pop(0); "
          "import provizio_dds; print(provizio_dds.__file__)"],
         capture_output=True, text=True)
     if probe.returncode != 0:
@@ -235,14 +239,24 @@ def main() -> int:
         return [CURRENT_PYTHON, "-q", "-X", "faulthandler", *script]
 
     def py_legacy(script):
-        # `-P` is mandatory: this test directory contains the *current*
-        # build's `provizio_dds.py` (copied by the python_tests CMake
-        # target), and Python's default behaviour of prepending the
+        # Path-shadowing avoidance: this test directory contains the
+        # *current* build's `provizio_dds.py` (copied by the python_tests
+        # CMake target), and Python's default behaviour of prepending the
         # script directory to sys.path[0] would shadow the venv-installed
         # 1.10.1 package — turning the cross-version test into a silent
-        # current-vs-current test. -P (Python 3.11+) suppresses that
-        # prepend so the venv's site-packages provizio_dds wins.
-        return [legacy_python, "-P", "-q", "-X", "faulthandler", *script]
+        # current-vs-current test. `-P` (Python 3.11+) suppresses that
+        # prepend, but the CI matrix also covers Python 3.8-3.10 where
+        # `-P` is unknown, so we wrap each script in a `-c` bootstrap that
+        # pops sys.path[0] (the cwd entry that `-c` injects) before
+        # execing the target file with __name__=='__main__'.
+        target = script[0]
+        bootstrap = (
+            "import sys; sys.path.pop(0); "
+            "code = compile(open(sys.argv[1]).read(), sys.argv[1], 'exec'); "
+            "exec(code, {'__name__': '__main__', '__file__': sys.argv[1]})"
+        )
+        return [legacy_python, "-q", "-X", "faulthandler",
+                "-c", bootstrap, target, *script[1:]]
 
     run_pair("pub(2.x) -> sub(1.10.1)", py_cur(pub), py_legacy(sub))
     run_pair("pub(1.10.1) -> sub(2.x)", py_legacy(pub), py_cur(sub))
