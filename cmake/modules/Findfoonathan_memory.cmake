@@ -21,7 +21,14 @@ if(NOT foonathan_memory_FOUND)
 
     if(foonathan_memory_LIB_DIR)
         set(foonathan_memory_FOUND TRUE)
-        set(foonathan_memory_INCLUDE_DIRS "${foonathan_memory_DIR}/include/foonathan_memory")
+        # foonathan_memory_vendor v1.4+ installs headers under include/foonathan/memory/.
+        # v1.3 used include/foonathan_memory/foonathan/memory/ (with a top-level
+        # foonathan_memory parent dir). Detect which layout is present.
+        if(EXISTS "${foonathan_memory_DIR}/include/foonathan/memory/config.hpp")
+            set(foonathan_memory_INCLUDE_DIRS "${foonathan_memory_DIR}/include")
+        else()
+            set(foonathan_memory_INCLUDE_DIRS "${foonathan_memory_DIR}/include/foonathan_memory")
+        endif()
 
         # Find the actual library file to set IMPORTED_LOCATION
         if(WIN32)
