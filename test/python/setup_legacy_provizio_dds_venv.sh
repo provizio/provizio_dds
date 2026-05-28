@@ -66,17 +66,14 @@ case "${OSTYPE:-}" in
         IS_WINDOWS=1
         VENV_BIN_SUBDIR="Scripts"
         VENV_PYTHON_NAME="python.exe"
-        VENV_PIP_NAME="pip.exe"
         ;;
     *)
         IS_WINDOWS=0
         VENV_BIN_SUBDIR="bin"
         VENV_PYTHON_NAME="python3"
-        VENV_PIP_NAME="pip"
         ;;
 esac
 VENV_PYTHON="${VENV_DIR}/${VENV_BIN_SUBDIR}/${VENV_PYTHON_NAME}"
-VENV_PIP="${VENV_DIR}/${VENV_BIN_SUBDIR}/${VENV_PIP_NAME}"
 
 # On Git Bash / MSYS, paths printed by this script flow into $GITHUB_ENV and
 # then into a native Windows ctest/Python process which does not perform
@@ -154,12 +151,20 @@ rm -rf "${VENV_DIR}" >&2
 # Resolve a Python interpreter the venv can actually use to run pip — on
 # minimal containers pip itself sometimes needs an explicit upgrade
 # before it can resolve git+https URLs cleanly.
-"${VENV_PIP}" install --quiet --upgrade pip setuptools wheel >&2
+#
+# Invoke pip via `python -m pip` rather than the standalone pip executable:
+# on Windows pip cannot replace its own running .exe in-place, so
+# `pip install --upgrade pip` aborts with
+# "ERROR: To modify pip, please run the following command: ... -m pip install"
+# The `-m pip` form has python load the package and run pip without holding
+# the on-disk launcher, so the upgrade can replace it cleanly. Harmless on
+# POSIX too.
+"${VENV_PYTHON}" -m pip install --quiet --upgrade pip setuptools wheel >&2
 
 # Build from the immutable tag, not the moving branch — the whole point
 # of this test is to compare against the deployed-fleet baseline that
 # 1.10.1 represents.
-"${VENV_PIP}" install -v "git+${GIT_URL}@${LEGACY_TAG}" >&2
+"${VENV_PYTHON}" -m pip install -v "git+${GIT_URL}@${LEGACY_TAG}" >&2
 
 # Smoke-test the install so a subtle compile issue doesn't surface as a
 # mystery import failure inside the actual cross-version test runner.
