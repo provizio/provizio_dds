@@ -830,18 +830,22 @@ class Publisher(_TopicHandle):
                             return
 
                         if self._on_has_subscriber_changed_takes_guid:
+                            # Copy the GUID before handing it to user code.
+                            # InstanceHandle_t::get_guid() is SWIG-aliased to
+                            # ``operator const GUID_t&`` (see fast_dds_python's
+                            # InstanceHandle.i), so the return is a Python
+                            # wrapper holding a raw pointer into the
+                            # InstanceHandle_t bytes inside ``info``. ``info``
+                            # only lives until this listener callback returns,
+                            # at which point a user callback that stored the
+                            # GUID would be reading freed memory. Constructing
+                            # a fresh GUID_t invokes the C++ copy constructor
+                            # so the value the user gets is Python-owned.
+                            matched_guid = GUID_t(info.last_subscription_handle.get_guid())
                             if info.current_count_change > 0:
-                                self._on_has_subscriber_changed_function(
-                                    publisher,
-                                    True,
-                                    info.last_subscription_handle.get_guid(),
-                                )
+                                self._on_has_subscriber_changed_function(publisher, True, matched_guid)
                             elif info.current_count_change < 0:
-                                self._on_has_subscriber_changed_function(
-                                    publisher,
-                                    False,
-                                    info.last_subscription_handle.get_guid(),
-                                )
+                                self._on_has_subscriber_changed_function(publisher, False, matched_guid)
                         else:
                             if (
                                 info.current_count > 0
@@ -1086,6 +1090,24 @@ class Publisher(_TopicHandle):
                 except Exception:
                     pass
         super().__del__()
+
+    def get_guid(self):
+        """Return a stable Python-owned copy of the underlying DataWriter's GUID.
+
+        Fast-DDS' ``DataWriter::guid()`` returns by const-reference. Through SWIG that
+        becomes a Python wrapper holding a raw pointer into the DataWriter — if the
+        DataWriter is later destroyed (e.g. by a network-recovery reset), reading
+        that wrapper is use-after-free. Constructing a new ``GUID_t`` from the
+        reference invokes the C++ copy constructor so the returned object lives
+        independently of the writer.
+        """
+        with self._participant.lifecycle_lock():
+            if (
+                self._writer is None
+                or self._built_against_generation != self._participant.participant_generation()
+            ):
+                return GUID_t.unknown()
+            return GUID_t(self._writer.guid())
 
     def publish(self, data: object, params: WriteParams = None):
         """Publishes DDS data
@@ -1414,13 +1436,22 @@ class Subscriber(_TopicHandle):
         super().__del__()
 
     def get_guid(self):
+        """Return a stable Python-owned copy of the underlying DataReader's GUID.
+
+        Fast-DDS' ``DataReader::guid()`` returns by const-reference. Through SWIG
+        that becomes a Python wrapper holding a raw pointer into the DataReader — if
+        the DataReader is later destroyed (e.g. by a network-recovery reset),
+        reading that wrapper is use-after-free. Constructing a new ``GUID_t`` from
+        the reference invokes the C++ copy constructor so the returned object lives
+        independently of the reader.
+        """
         with self._participant.lifecycle_lock():
             if (
                 self._reader is None
                 or self._built_against_generation != self._participant.participant_generation()
             ):
                 return GUID_t.unknown()
-            return self._reader.guid()
+            return GUID_t(self._reader.guid())
 
     def get_num_matched_publishers(
         self, timeout_sec: float, settle_time_sec: float

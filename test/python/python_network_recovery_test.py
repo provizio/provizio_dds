@@ -199,7 +199,12 @@ def test_reset_roundtrip():
                 received_event.clear()
     assert saw_before, "did not receive baseline message"
 
-    guid_before = publisher._writer.guid() if publisher._writer else None
+    # Publisher.get_guid() returns a copy of the DataWriter's GUID rather than
+    # the by-reference view Fast-DDS' DataWriter::guid() returns directly —
+    # reading the raw reference after the reset destroys the writer would be
+    # use-after-free (observed as a same-GUID-after-reset flake on macOS where
+    # the freed slot is reused for the new writer).
+    guid_before = publisher.get_guid()
 
     # Trigger the reset directly via the participant's recovery hook. This
     # is the same code path the polling-based monitor would drive on a
@@ -222,7 +227,7 @@ def test_reset_roundtrip():
                 received_event.clear()
     assert saw_after, "did not receive after-reset message"
 
-    guid_after = publisher._writer.guid() if publisher._writer else None
+    guid_after = publisher.get_guid()
     assert str(guid_before) != str(guid_after), "DataWriter GUID did not change across reset"
 
     _log("reset_roundtrip: PASS")
