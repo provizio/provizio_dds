@@ -232,10 +232,52 @@ endif(PYTHON_BINDINGS AND NOT PYTHON_PACKAGES_INSTALL_DIR AND HAS_BIN_CACHE)
 
 # Provizio Config Standards - Enables multiple quality checks (see https://github.com/provizio/coding_standards)
 if(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
-    file(DOWNLOAD
-        "https://raw.githubusercontent.com/provizio/coding_standards/${PROVIZIO_CODING_STANDARDS_VERSION}/cpp/cmake/StandardConfig.cmake"
-        "${CMAKE_BINARY_DIR}/StandardConfig.cmake" TLS_VERIFY ON)
-    include(${CMAKE_BINARY_DIR}/StandardConfig.cmake)
+    set(_provizio_standards_url
+        "https://raw.githubusercontent.com/provizio/coding_standards/${PROVIZIO_CODING_STANDARDS_VERSION}/cpp/cmake/StandardConfig.cmake")
+    set(_provizio_standards_file "${CMAKE_BINARY_DIR}/StandardConfig.cmake")
+    # Retry — Docker / CI runners hit raw.githubusercontent.com transient
+    # failures (TLS handshake reset, DNS hiccup, GitHub Raw 5xx) often enough
+    # that a single attempt is flaky. Without an explicit STATUS check, a
+    # silent download failure surfaces as "Unknown CMake command StandardConfig"
+    # on the include() + StandardConfig() lines below, which is misleading.
+    set(_provizio_standards_attempts 3)
+    set(_provizio_standards_downloaded FALSE)
+    foreach(_attempt RANGE 1 ${_provizio_standards_attempts})
+        file(REMOVE "${_provizio_standards_file}")
+        file(DOWNLOAD
+            "${_provizio_standards_url}"
+            "${_provizio_standards_file}"
+            TLS_VERIFY ON
+            TIMEOUT 60
+            STATUS _provizio_standards_status
+            LOG _provizio_standards_log)
+        list(GET _provizio_standards_status 0 _provizio_standards_code)
+        list(GET _provizio_standards_status 1 _provizio_standards_msg)
+        if(_provizio_standards_code EQUAL 0)
+            # CMake reports success even on a 0-byte body, so verify the file
+            # actually has content before calling include() on it.
+            file(SIZE "${_provizio_standards_file}" _provizio_standards_size)
+            if(_provizio_standards_size GREATER 0)
+                set(_provizio_standards_downloaded TRUE)
+                break()
+            endif()
+            set(_provizio_standards_msg "downloaded file is empty (0 bytes)")
+        endif()
+        message(STATUS
+            "Provizio coding_standards download attempt ${_attempt}/${_provizio_standards_attempts} "
+            "failed: ${_provizio_standards_msg} (status ${_provizio_standards_code})")
+    endforeach()
+    if(NOT _provizio_standards_downloaded)
+        message(FATAL_ERROR
+            "Failed to download Provizio coding_standards after ${_provizio_standards_attempts} attempts.\n"
+            "  URL:    ${_provizio_standards_url}\n"
+            "  Status: ${_provizio_standards_msg} (code ${_provizio_standards_code})\n"
+            "Likely causes: transient network / DNS / TLS issue on this runner, "
+            "GitHub Raw outage, or an invalid PROVIZIO_CODING_STANDARDS_VERSION "
+            "(\"${PROVIZIO_CODING_STANDARDS_VERSION}\").\n"
+            "Last download log:\n${_provizio_standards_log}")
+    endif()
+    include("${_provizio_standards_file}")
     StandardConfig(SAFETY_CRITICAL)
 else(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
     set(CMAKE_CXX_STANDARD 17)
