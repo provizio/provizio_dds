@@ -312,22 +312,53 @@ namespace provizio::dds
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
     service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>::~service()
     {
+        // Shutdown order:
+        //  1. Stop incoming requests by destroying the subscriber. This must
+        //     come before request_handler.stop_and_join(): otherwise DDS
+        //     internal threads may still fire on_data into the request_handler
+        //     while it is being joined (use-after-free SEGFAULTs were seen on
+        //     Windows without this ordering).
+        //  2. Drain the request_handler queue. Each pending request runs the
+        //     user handler and then service::on_response, which either
+        //     publishes the response (if matched_subscriptions has already
+        //     learned about the requesting client) or stashes it in
+        //     ready_responses.
+        //  3. Give the dispatch thread a bounded window to publish anything
+        //     left in ready_responses. The response-publisher's
+        //     SubscriptionMatchedStatus callback is asynchronous w.r.t. the
+        //     request-direction match, so service::on_response can run before
+        //     on_matched has populated matched_subscriptions for that client —
+        //     in which case the response is stashed and only goes out once
+        //     dispatch_responses observes the match. Without this drain, a
+        //     fast-shutdown service (e.g. a single-iteration test that
+        //     returns shortly after its handler completes) destroys the
+        //     publisher with the response still stashed, dropping it and
+        //     producing a client-side timeout. The drain is bounded so a
+        //     non-arriving match (peer gone away) does not hang the
+        //     destructor.
+        //  4. Stop the dispatch thread.
+        //  5. Destroy the publisher last (no thread reaches it after this).
+        subscriber.reset();
+        request_handler.stop_and_join();
+        {
+            // 2 s, not max_time_to_keep_ready_responses (10 s): this is the
+            // destructor latency the typical caller is willing to pay for the
+            // last response to leave. A response whose match never arrives is
+            // a peer that already went away; waiting the full 10 s only to
+            // drop it is worse than dropping it 2 s in. The remove_timed_out
+            // path in dispatch_responses still collects it on the normal
+            // 1 s cleanup tick if dispatch keeps running, and on destructor
+            // exit it goes away with the publisher regardless.
+            constexpr auto ready_responses_drain_timeout = std::chrono::seconds{2};
+            std::unique_lock<std::mutex> lock{mutex};
+            cv.wait_for(lock, ready_responses_drain_timeout, [&]() { return ready_responses.empty(); });
+        }
         {
             const std::lock_guard<std::mutex> lock{mutex};
             stop = true;
         }
         cv.notify_all();
         dispatch_responses_thread.join();
-
-        // Explicit shutdown order: stop the subscriber first so no more DDS
-        // callbacks can fire on_data (which pushes to request_handler). Then
-        // destroy the request_handler (joins its processing thread). Finally
-        // destroy the publisher. Without this, implicit member destruction
-        // order (reverse of declaration) destroys subscriber before
-        // request_handler, causing use-after-free SEGFAULTs on Windows where
-        // DDS internal threads may still deliver callbacks during destruction.
-        subscriber.reset();
-        request_handler.stop_and_join();
         publisher.reset();
     }
 
@@ -408,6 +439,10 @@ namespace provizio::dds
                     params.related_sample_identity(it->identity);
                     publisher->publish(it->data, params);
                     ready_responses.erase(it);
+                    // Wake ~service()'s drain wait, which uses cv with predicate
+                    // ready_responses.empty(). Notifying here (under the lock)
+                    // is safe — the waiter only re-evaluates after we release.
+                    cv.notify_all();
                     return true;
                 }
             }
@@ -420,6 +455,8 @@ namespace provizio::dds
                 if (time_now - it->time_ready > max_time_to_keep_ready_responses)
                 {
                     ready_responses.erase(it);
+                    // Same rationale as dispatch_matched(): wake any drain waiter.
+                    cv.notify_all();
                     return true;
                 }
             }
