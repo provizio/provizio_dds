@@ -43,12 +43,12 @@ int main(int argc, char *argv[])
         if (requests_expected <= 0)
         {
             std::cerr << log_prefix << "Incorrect argument: " << argument << ". Number of requests to wait expected!"
-                      << std::endl;
+                      << '\n';
             return 1;
         }
     }
 
-    std::int32_t max_history_depth = requests_expected;
+    const std::int32_t max_history_depth = requests_expected;
 
     std::mutex mutex;
     std::condition_variable condition_variable;
@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
 
     auto domain_participant = provizio::dds::make_domain_participant(domain_id);
 
-    std::cout << log_prefix << "Waiting for " << requests_expected << " requests... " << std::endl;
+    std::cout << log_prefix << "Waiting for " << requests_expected << " requests... " << '\n';
     auto service = provizio::dds::make_service<std_msgs::msg::Int32PubSubType, std_msgs::msg::Int64PubSubType>(
         domain_participant, service_name,
         [&](const std_msgs::msg::Int32 &request) {
@@ -72,7 +72,7 @@ int main(int argc, char *argv[])
 
                 const std::int64_t value = static_cast<std::int64_t>(request.data()) * request.data();
 
-                std::cout << log_prefix << "Processing request " << request.data() << " => " << value << std::endl;
+                std::cout << log_prefix << "Processing request " << request.data() << " => " << value << '\n';
                 std::this_thread::sleep_for(std::chrono::milliseconds{value});
 
                 response.data(value);
@@ -84,7 +84,7 @@ int main(int argc, char *argv[])
                     condition_variable.notify_all();
                 }
 
-                std::cout << log_prefix << "Response sent (" << request.data() << " => " << value << ")" << std::endl;
+                std::cout << log_prefix << "Response sent (" << request.data() << " => " << value << ")" << '\n';
                 return response;
             });
 #if defined(__clang__)
@@ -96,13 +96,13 @@ int main(int argc, char *argv[])
     std::unique_lock<std::mutex> lock{mutex};
     if (!condition_variable.wait_for(lock, total_timeout, [&]() { return got_requests >= requests_expected; }))
     {
-        std::cerr << log_prefix << "Timeout! Got " << got_requests << " requests so far" << std::endl;
+        std::cerr << log_prefix << "Timeout! Got " << got_requests << " requests so far" << '\n';
         return 1;
     }
 
     // Make sure to deliver the last response
     std::this_thread::sleep_for(end_sleep);
 
-    std::cout << log_prefix << "Successfully sent all the responses" << std::endl;
+    std::cout << log_prefix << "Successfully sent all the responses" << '\n';
     return 0;
 }

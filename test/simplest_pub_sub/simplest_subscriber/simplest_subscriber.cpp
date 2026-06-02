@@ -29,7 +29,7 @@ int main()
     std::mutex mutex;
     std::condition_variable condition_variable;
     std::string string;
-    std::cout << "simplest_subscriber: Waiting for messages..." << std::endl;
+    std::cout << "simplest_subscriber: Waiting for messages..." << '\n';
     const auto subscriber = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
         provizio::dds::make_domain_participant(), topic_name, [&](const std_msgs::msg::String &message) {
             const std::lock_guard<std::mutex> lock{mutex};
@@ -44,12 +44,12 @@ int main()
         if (string != expected_value)
         {
             std::cerr << "simplest_subscriber: " << expected_value << " was expected but "
-                      << (string.empty() ? "nothing" : string) << " was received!" << std::endl;
+                      << (string.empty() ? "nothing" : string) << " was received!" << '\n';
             return 1;
         }
     }
 
-    std::cout << "simplest_subscriber: Success" << std::endl;
+    std::cout << "simplest_subscriber: Success" << '\n';
 
     return 0;
 }

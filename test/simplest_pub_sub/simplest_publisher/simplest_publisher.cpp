@@ -35,7 +35,7 @@ int main()
     message.data(string);
     int successful_times = 0;
 
-    std::cout << "simplest_publisher: Publishing..." << std::endl;
+    std::cout << "simplest_publisher: Publishing..." << '\n';
     for (int i = 0; i < publish_times; ++i)
     {
         successful_times += publisher->publish(message) ? 1 : 0;
@@ -43,7 +43,7 @@ int main()
     }
 
     std::cout << "simplest_publisher: Successfully published " << successful_times << " times out of " << publish_times
-              << " attempts" << std::endl;
+              << " attempts" << '\n';
 
     return successful_times > 0 ? 0 : 1;
 }

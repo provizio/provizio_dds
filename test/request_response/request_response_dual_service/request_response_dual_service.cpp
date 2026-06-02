@@ -59,7 +59,7 @@ try
             return response;
         });
 
-    std::cout << log_prefix << "Starting..." << std::endl;
+    std::cout << log_prefix << "Starting..." << '\n';
     const std::vector<int> values{1, 2, 3, 4, 5};
     for (const int value : values)
     {
@@ -70,7 +70,7 @@ try
 
         if (fut.wait_for(10s) != std::future_status::ready)
         {
-            std::cerr << log_prefix << "Timeout waiting for response to " << value << std::endl;
+            std::cerr << log_prefix << "Timeout waiting for response to " << value << '\n';
             return 1;
         }
         const auto &resp = fut.get();
@@ -78,17 +78,17 @@ try
         if (resp.data() != expected)
         {
             std::cerr << log_prefix << "Unexpected response for " << value << ": got " << resp.data() << ", expected "
-                      << expected << std::endl;
+                      << expected << '\n';
             return 1;
         }
-        std::cout << log_prefix << "Got response for " << value << ": " << resp.data() << std::endl;
+        std::cout << log_prefix << "Got response for " << value << ": " << resp.data() << '\n';
     }
 
-    std::cout << log_prefix << "Success" << std::endl;
+    std::cout << log_prefix << "Success" << '\n';
     return 0;
 }
 catch (const std::exception &e)
 {
-    std::cerr << log_prefix << "Exception: " << e.what() << std::endl;
+    std::cerr << log_prefix << "Exception: " << e.what() << '\n';
     return 1;
 }

@@ -66,7 +66,7 @@ namespace
                                                        const eprosima::fastrtps::rtps::SampleIdentity &identity)
     {
         // The legacy GUID_t spelling must work end-to-end as well.
-        const eprosima::fastrtps::rtps::GUID_t writer = identity.writer_guid();
+        const eprosima::fastrtps::rtps::GUID_t &writer = identity.writer_guid();
         (void)writer;
     }
 }  // namespace
@@ -81,7 +81,7 @@ namespace
     template <typename pub_sub_type> bool check_wire_name(const char *expected)
     {
         pub_sub_type instance;
-        const std::string actual = instance.get_name();
+        const std::string &actual = instance.get_name();
         if (actual != expected)
         {
             std::cerr << "FAIL: " << typeid(pub_sub_type).name() << ".get_name() = '" << actual << "', expected '"

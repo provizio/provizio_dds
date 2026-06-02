@@ -52,7 +52,7 @@ try
             // Ignored; should timeout
             if (future.wait_for(ignore_timeout) != std::future_status::timeout)
             {
-                std::cerr << log_prefix << "Expected timeout for ignored request " << value << std::endl;
+                std::cerr << log_prefix << "Expected timeout for ignored request " << value << '\n';
                 return 1;
             }
         }
@@ -60,17 +60,17 @@ try
         {
             if (future.wait_for(timeout) != std::future_status::ready)
             {
-                std::cerr << log_prefix << "Timeout! Expected response for request " << value << std::endl;
+                std::cerr << log_prefix << "Timeout! Expected response for request " << value << '\n';
                 return 1;
             }
-            std::cout << log_prefix << "Received response for request " << value << std::endl;
+            std::cout << log_prefix << "Received response for request " << value << '\n';
 
             const auto &response = future.get();
             const auto expected = static_cast<std::int64_t>(value) * value;
             if (response.data() != expected)
             {
                 std::cerr << log_prefix << "Unexpected response for " << value << ": got " << response.data()
-                          << ", expected " << expected << std::endl;
+                          << ", expected " << expected << '\n';
                 return 1;
             }
             ++received;
@@ -79,15 +79,15 @@ try
 
     if (received != 3)
     {
-        std::cerr << log_prefix << "Expected 3 responses, got " << received << std::endl;
+        std::cerr << log_prefix << "Expected 3 responses, got " << received << '\n';
         return 1;
     }
 
-    std::cout << log_prefix << "Successfully validated ignore_request" << std::endl;
+    std::cout << log_prefix << "Successfully validated ignore_request" << '\n';
     return 0;
 }
 catch (const std::exception &e)
 {
-    std::cerr << log_prefix << "Exception: " << e.what() << std::endl;
+    std::cerr << log_prefix << "Exception: " << e.what() << '\n';
     return 1;
 }

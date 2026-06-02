@@ -43,10 +43,12 @@ int main(int argc, char *argv[])
     constexpr int max_wait_rnd = 1999;
     constexpr int half_wait_rnd = 1000;
     constexpr std::chrono::milliseconds time_to_deliver_last_response{250};
+    constexpr int min_argc = 4;
+    constexpr int max_argc = 5;
 
-    if (argc < 4 || argc > 5)
+    if (argc < min_argc || argc > max_argc)
     {
-        std::cerr << "Wrong number of arguments!" << std::endl;
+        std::cerr << "Wrong number of arguments!" << '\n';
         return 1;
     }
 
@@ -72,7 +74,7 @@ int main(int argc, char *argv[])
     const auto wait = std::uniform_int_distribution<int>{0, max_wait_rnd}(engine);
     if (wait >= half_wait_rnd)
     {
-        std::cout << log_prefix << timestamp() << "Waiting " << wait << "ms..." << std::endl;
+        std::cout << log_prefix << timestamp() << "Waiting " << wait << "ms..." << '\n';
         std::this_thread::sleep_for(std::chrono::milliseconds{wait});
     }
 
@@ -83,20 +85,20 @@ int main(int argc, char *argv[])
 
     auto service = provizio::dds::make_service<std_msgs::msg::Int32PubSubType, std_msgs::msg::Int32PubSubType>(
         provizio::dds::make_domain_participant(domain_id), service_name, [&](const std_msgs::msg::Int32 &request) {
-            std::cout << log_prefix << timestamp() << "Got request: " << request.data() << std::endl;
+            std::cout << log_prefix << timestamp() << "Got request: " << request.data() << '\n';
 
             const auto value = request.data();
 
             std_msgs::msg::Int32 response;
             response.data(expected_value);
 
-            std::lock_guard<std::mutex> lock{mutex};
+            const std::lock_guard<std::mutex> lock{mutex};
 
             requests_processed = (num_iterations <= 1);
             if (value != expected_value)
             {
                 std::cerr << log_prefix << timestamp() << "Incorrect request received: " << value << " when "
-                          << expected_value << " was expected!" << std::endl;
+                          << expected_value << " was expected!" << '\n';
                 received_expected_values = false;
             }
 
@@ -108,7 +110,7 @@ int main(int argc, char *argv[])
                 condition_variable.notify_all();
             }
 
-            std::cout << log_prefix << timestamp() << "Responding value: " << response.data() << std::endl;
+            std::cout << log_prefix << timestamp() << "Responding value: " << response.data() << '\n';
 
             return response;
         });
@@ -116,7 +118,7 @@ int main(int argc, char *argv[])
     std::unique_lock<std::mutex> lock{mutex};
     if (!condition_variable.wait_for(lock, wait_timeout, [&]() { return requests_processed; }))
     {
-        std::cerr << log_prefix << timestamp() << "Timeout waiting for request" << std::endl;
+        std::cerr << log_prefix << timestamp() << "Timeout waiting for request" << '\n';
         return 1;
     }
 
@@ -127,6 +129,6 @@ int main(int argc, char *argv[])
 
     std::this_thread::sleep_for(time_to_deliver_last_response);
 
-    std::cout << log_prefix << timestamp() << "Successfully processed value " << expected_value << std::endl;
+    std::cout << log_prefix << timestamp() << "Successfully processed value " << expected_value << '\n';
     return 0;
 }

@@ -54,7 +54,7 @@ try
             if (status != std::future_status::ready)
             {
                 std::cerr << log_prefix << "Timeout waiting when " << request_response_pair.second << " was expected!"
-                          << std::endl;
+                          << '\n';
                 return 1;
             }
 
@@ -62,21 +62,21 @@ try
             if (received != request_response_pair.second)
             {
                 std::cerr << log_prefix << "Unexpected value received from test_service! "
-                          << request_response_pair.second << " expected, " << received << " received." << std::endl;
+                          << request_response_pair.second << " expected, " << received << " received." << '\n';
                 return 1;
             }
 
-            std::cout << log_prefix << "Correctly got expected response = " << received << std::endl;
+            std::cout << log_prefix << "Correctly got expected response = " << received << '\n';
         }
     }
 
-    std::cout << log_prefix << "Successfully complete" << std::endl;
+    std::cout << log_prefix << "Successfully complete" << '\n';
 
     return 0;
 }
 catch (const std::exception &exception)
 {
-    std::cout << log_prefix << "Exception during the test: " << exception.what() << std::endl;
+    std::cout << log_prefix << "Exception during the test: " << exception.what() << '\n';
 
     return 1;
 }

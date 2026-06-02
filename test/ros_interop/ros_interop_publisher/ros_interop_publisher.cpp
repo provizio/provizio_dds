@@ -38,7 +38,7 @@ int main()
         std::this_thread::sleep_for(wait_time);
     }
 
-    std::cout << "ros_interop_publisher: Successfully published " << successful_times << " times" << std::endl;
+    std::cout << "ros_interop_publisher: Successfully published " << successful_times << " times" << '\n';
 
     return successful_times > 0 ? 0 : 1;
 }

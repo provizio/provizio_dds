@@ -39,7 +39,7 @@ int main()
 
     auto domain_participant = provizio::dds::make_domain_participant();
 
-    std::cout << log_prefix << "Waiting for requests..." << std::endl;
+    std::cout << log_prefix << "Waiting for requests..." << '\n';
     auto service = provizio::dds::make_service<std_srvs::srv::SetBool_RequestPubSubType,
                                                std_srvs::srv::SetBool_ResponsePubSubType>(
         domain_participant, service_name,
@@ -56,7 +56,7 @@ int main()
             }
 
             std::cout << log_prefix << "Response sent (" << request.data() << " => " << response.success() << ")"
-                      << std::endl;
+                      << '\n';
             return response;
         },
         max_history_depth);
@@ -64,13 +64,13 @@ int main()
     std::unique_lock<std::mutex> lock{mutex};
     if (!condition_variable.wait_for(lock, total_timeout, [&]() { return got_requests >= requests_expected; }))
     {
-        std::cerr << log_prefix << "Timeout! Got " << got_requests << " requests so far" << std::endl;
+        std::cerr << log_prefix << "Timeout! Got " << got_requests << " requests so far" << '\n';
         return 1;
     }
 
     // Make sure to deliver the last response
     std::this_thread::sleep_for(end_sleep);
 
-    std::cout << log_prefix << "Successfully sent all the responses" << std::endl;
+    std::cout << log_prefix << "Successfully sent all the responses" << '\n';
     return 0;
 }

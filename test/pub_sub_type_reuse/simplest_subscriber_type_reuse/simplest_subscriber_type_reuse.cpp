@@ -31,7 +31,7 @@ int main()
     std::condition_variable condition_variable;
     std::string string_1;
     std::string string_2;
-    std::cout << "simplest_subscriber: Waiting for messages..." << std::endl;
+    std::cout << "simplest_subscriber: Waiting for messages..." << '\n';
     const auto participant = provizio::dds::make_domain_participant();
     const auto subscriber_1 = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
         participant, topic_name_1, [&](const std_msgs::msg::String &message) {
@@ -55,7 +55,7 @@ int main()
         if (string_1 != expected_value)
         {
             std::cerr << "simplest_subscriber: " << expected_value << " was expected by subscriber_1 but "
-                      << (string_1.empty() ? "nothing" : string_1) << " was received!" << std::endl;
+                      << (string_1.empty() ? "nothing" : string_1) << " was received!" << '\n';
             return 1;
         }
     }
@@ -68,12 +68,12 @@ int main()
         if (string_2 != expected_value)
         {
             std::cerr << "simplest_subscriber: " << expected_value << " was expected by subscriber_2 but "
-                      << (string_2.empty() ? "nothing" : string_2) << " was received!" << std::endl;
+                      << (string_2.empty() ? "nothing" : string_2) << " was received!" << '\n';
             return 1;
         }
     }
 
-    std::cout << "simplest_subscriber: Success" << std::endl;
+    std::cout << "simplest_subscriber: Success" << '\n';
 
     return 0;
 }

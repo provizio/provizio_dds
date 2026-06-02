@@ -54,12 +54,12 @@ int main()
         if (string.substr(0, expected_substring.length()) != expected_substring)
         {
             std::cerr << expected_substring << "* was expected but " << (string.empty() ? "nothing" : string)
-                      << " was received!" << std::endl;
+                      << " was received!" << '\n';
             return 1;
         }
     }
 
-    std::cout << "ros_interop_subscriber: Success" << std::endl;
+    std::cout << "ros_interop_subscriber: Success" << '\n';
 
     return 0;
 }
