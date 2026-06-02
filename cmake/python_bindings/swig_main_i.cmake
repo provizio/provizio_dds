@@ -66,6 +66,10 @@ function(provizio_dds_write_swig_main_i)
         file(READ "${_idl}" _idl_content)
         string(REPLACE "%module" "//" _idl_content "${_idl_content}")
         file(WRITE "${_idl}" "${_idl_content}")
-        file(APPEND "${_ARG_OUTPUT}" "%include ${_idl}\n")
+        # Quote the path so SWIG treats it as a single token even when the
+        # build / source tree path contains spaces (common on Windows under
+        # C:\Users\<Name>\...). Without quotes, an unquoted path with spaces
+        # would be parsed as multiple arguments and %include would fail.
+        file(APPEND "${_ARG_OUTPUT}" "%include \"${_idl}\"\n")
     endforeach()
 endfunction()

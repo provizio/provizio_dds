@@ -119,10 +119,12 @@ namespace provizio::dds
      * that gap. It is a thin wrapper around the (otherwise internal)
      * @c eprosima::SystemInfo::update_interfaces, made portable across Linux /
      * macOS (default-visibility ELF / Mach-O exports the symbol already) and
-     * Windows (the provizio_dds CMake passes @c CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS
-     * when building Fast-DDS specifically so this symbol — which lives on a
-     * Fast-DDS-internal class without @c FASTDDS_EXPORTED_API — is reachable in
-     * the resulting DLL's export table).
+     * Windows (a targeted Fast-DDS ExternalProject patch step,
+     * @c cmake/fast_dds/export_system_info.cmake, decorates just this one
+     * declaration with @c FASTDDS_EXPORTED_API so it lands in the DLL's
+     * export table — preferred over @c CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS,
+     * which would overflow the 65535-symbol Windows DLL export ceiling on a
+     * library Fast-DDS' size).
      *
      * Thread-safe: @c SystemInfo guards the cache with its own internal mutex.
      * Cost: one @c getifaddrs / @c GetAdaptersAddresses syscall, on the order
