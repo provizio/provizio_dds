@@ -250,6 +250,28 @@ else(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
     endif(STATIC_ANALYSIS)
 endif(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
 
+if(WIN32)
+    # NOMINMAX: prevents <windows.h> from macro-defining `min` / `max`,
+    # which clobber std::numeric_limits<...>::min() / ::max() in Fast-DDS
+    # headers (e.g. ThreadSettings.hpp).
+    # WIN32_LEAN_AND_MEAN: skip rarely used pieces of <windows.h>.
+    # _WIN32_WINNT=0x0600 / NTDDI_VERSION=NTDDI_VISTA: required by
+    # netioapi.h for NotifyUnicastIpAddressChange / CancelMibChangeNotify2
+    # used by the network-auto-recovery Windows monitor.
+    # Applied globally as compiler -D flags so the values are seen before
+    # ANY include — and so downstream consumers transitively pulling
+    # Fast-DDS via provizio_dds headers also get the same surface. Set
+    # OUTSIDE the coding-standards if/else above so it activates on every
+    # Windows build, including the StandardConfig(SAFETY_CRITICAL) branch
+    # that downstream consumers (apt_gui) take.
+    add_compile_definitions(
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        _WIN32_WINNT=0x0600
+        NTDDI_VERSION=0x06000000
+    )
+endif(WIN32)
+
 # Disable runtime analysis tools
 if(CMAKE_CXX_FLAGS)
     message(WARNING "Runtime analysis tools will be disabled due to known issues in Fast-DDS")
@@ -463,6 +485,18 @@ else(HAS_BIN_CACHE)
             GIT_REPOSITORY "https://github.com/${FAST_DDS_GITHUB_PROJECT}.git"
             GIT_TAG "${FAST_DDS_VERSION}"
             UPDATE_COMMAND ""
+            # Decorate eprosima::SystemInfo::update_interfaces() with
+            # FASTDDS_EXPORTED_API so it is reachable in the Windows DLL
+            # export table (provizio_dds calls it to refresh Fast-DDS's
+            # interface cache on network-recovery resets — APT-11792). The
+            # script is a no-op on Linux / macOS (default visibility already
+            # exports it) and idempotent. See export_system_info.cmake for
+            # why this targeted patch is used instead of
+            # CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS (the latter overflows the
+            # 65535-symbol Windows DLL export limit on a library this large).
+            PATCH_COMMAND ${CMAKE_COMMAND}
+                "-DSYSTEMINFO_HPP=<SOURCE_DIR>/src/cpp/utils/SystemInfo.hpp"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
@@ -522,13 +556,42 @@ else(HAS_BIN_CACHE)
 
     # provizio_dds library
     set(PROVIZIO_DDS_SOURCES
+        src/network_recovery_coordinator.cpp
         src/domain_participant.cpp
+        src/logging.cpp
+        src/network_recovery.cpp
         src/request_response.cpp
         src/topic.cpp
     )
+    # Per-platform network monitoring + address-snapshot backends. Each .cpp is
+    # gated internally by the matching #ifdef so the build can also tolerate the
+    # files being unconditionally listed; we still split per platform here so a
+    # CMake regeneration on the wrong OS surfaces an obvious missing-file message.
+    if(WIN32)
+        list(APPEND PROVIZIO_DDS_SOURCES
+            src/address_snapshot_windows.cpp
+            src/network_monitor_windows.cpp
+        )
+    elseif(APPLE)
+        list(APPEND PROVIZIO_DDS_SOURCES
+            src/address_snapshot_macos.cpp
+            src/network_monitor_macos.cpp
+        )
+    else()
+        list(APPEND PROVIZIO_DDS_SOURCES
+            src/address_snapshot_linux.cpp
+            src/network_monitor_linux.cpp
+        )
+    endif()
     add_library(provizio_dds SHARED ${PROVIZIO_DDS_SOURCES})
     target_link_libraries(provizio_dds PUBLIC provizio_dds_types ${FASTDDS_LIB} ${FASTCDR_LIB})
     set_target_properties(provizio_dds PROPERTIES DEFINE_SYMBOL "PROVIZIO_DDS_EXPORTS")
+    # PROVIZIO_DDS_ENABLE_TESTS is no longer needed as a compile definition:
+    # the test-only entry points on the network_recovery_coordinator are now
+    # always part of the ABI (gated behind a different compile flag would
+    # change the class layout between consumers built with and without it,
+    # causing memory corruption on mismatch). The methods are documented as
+    # test-only and unconditional.
 
     # Installation config
     install(
@@ -837,6 +900,7 @@ else(HAS_BIN_CACHE)
             "${CMAKE_CURRENT_SOURCE_DIR}/python/point_cloud2.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/accumulation.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/gps_utils.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/network_recovery.py"
         )
         set(PROVIZIO_DDS_ALL_PYTHON_LIBS
             ${FASTDDS_PYTHON_LIBS}

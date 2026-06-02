@@ -36,6 +36,7 @@ add_subdirectory(request_response)
 add_subdirectory(request_response_concurrent)
 add_subdirectory(ros_interop)
 add_subdirectory(legacy_api_compat)
+add_subdirectory(network_recovery)
 
 if(PYTHON_BINDINGS)
     message(STATUS "PYTHON_BINDINGS is ON: Python tests will be built and enabled.")

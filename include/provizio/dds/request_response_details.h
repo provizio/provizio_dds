@@ -24,7 +24,6 @@
 #include <exception>
 #include <functional>
 #include <future>
-#include <iostream>
 #include <limits>
 #include <mutex>
 #include <queue>
@@ -39,6 +38,7 @@
 #include "provizio/dds/common.h"
 #include "provizio/dds/function_traits.h"
 #include "provizio/dds/ignore_request.h"
+#include "provizio/dds/logging.h"
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/subscriber.h"
 
@@ -422,6 +422,7 @@ namespace provizio::dds::detail
                          sfinae_placeholder>::handle_request(typename request_pub_sub_type::type request,
                                                              const eprosima::fastdds::rtps::SampleIdentity &identity)
     {
+        bool queue_full = false;
         {
             const std::lock_guard<std::mutex> lock{requests_queue_mutex};
             if (requests_queue.size() < max_queue_size)
@@ -430,8 +431,15 @@ namespace provizio::dds::detail
             }
             else
             {
-                std::cerr << requests_queue_full_error_message << std::endl;
+                queue_full = true;
             }
+        }
+        // Logged outside the lock: the user-supplied log callback may call back
+        // into provizio_dds APIs, so emitting under requests_queue_mutex risks
+        // deadlock / unbounded blocking on a hot publish path.
+        if (queue_full)
+        {
+            log_error() << requests_queue_full_error_message;
         }
         cv.notify_all();
     }
@@ -502,22 +510,32 @@ namespace provizio::dds::detail
         handle_request(const typename request_pub_sub_type::type &request,
                        const eprosima::fastdds::rtps::SampleIdentity &identity)
     {
-        const std::lock_guard<std::mutex> lock{mutex};
-        if (futures.size() < max_queue_size)
+        bool queue_full = false;
         {
-            try
+            const std::lock_guard<std::mutex> lock{mutex};
+            if (futures.size() < max_queue_size)
             {
-                // Handler may throw ignore_request before returning a future
-                futures.emplace_back(handle_request_function(request), identity);
+                try
+                {
+                    // Handler may throw ignore_request before returning a future
+                    futures.emplace_back(handle_request_function(request), identity);
+                }
+                catch (const ignore_request &)
+                {
+                    // Silently drop
+                }
             }
-            catch (const ignore_request &)
+            else
             {
-                // Silently drop
+                queue_full = true;
             }
         }
-        else
+        // Logged outside the lock: the user-supplied log callback may call back
+        // into provizio_dds APIs, so emitting under mutex risks deadlock /
+        // unbounded blocking on a hot publish path.
+        if (queue_full)
         {
-            std::cerr << requests_queue_full_error_message << std::endl;
+            log_error() << requests_queue_full_error_message;
         }
     }
 

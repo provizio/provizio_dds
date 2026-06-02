@@ -241,6 +241,99 @@ For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/
 - Subscribers support configurable durability QoS and optional history depth: keep default durability by passing `-1` (no changes), pass `0` to force VOLATILE durability (no history), or pass a positive value to enable TRANSIENT_LOCAL durability (KEEP_LAST with the given depth). See headers/Python docs for details.
 - You can optionally receive publisher match/unmatch notifications. See `provizio::dds::make_subscriber` (C++) or `provizio_dds.Subscriber` (Python) for parameters.
 
+## Network Auto-Recovery
+
+DDS participants bind their UDP transports to the set of network interfaces present at participant-creation time. If the host's network changes afterwards — the primary interface comes up after the application started, a DHCP lease arrives, a USB Ethernet adapter is plugged in, the host roams to a new network — Fast-DDS does not refresh those bindings, and affected participants stop discovering off-host peers until recreated.
+
+provizio_dds handles this transparently. A process-wide background monitor watches the OS for interface-address changes (netlink on Linux, PF_ROUTE on macOS, `NotifyUnicastIpAddressChange` on Windows), coalesces bursts of events (3 s of quiescence or up to 60 s of debounce), snapshot-diffs to filter out irrelevant churn (Docker / veth bridges, virtual / tunnel interfaces, link-local IPv6), and on a confirmed change tears down and rebuilds the underlying Fast-DDS participant for every participant that opted in. Existing publisher and subscriber handles survive the rebuild — their internal Fast-DDS objects are swapped under the caller-held `shared_ptr` and the user-supplied callbacks are re-attached automatically.
+
+Note: IPv6 RFC 4941 temporary / privacy addresses are not filtered by `IFA_F_*` flags today, so on Linux/macOS/Windows hosts with privacy addresses enabled (the default on desktop installs of Ubuntu/Fedora/Mint, macOS, and Windows) the periodic rotation produces a snapshot delta — typically not more than once per 24 h with default kernel settings. In practice this is negligible and doesn't require any changes; if you ever hit a host where it matters, disable `use_tempaddr` on the DDS-carrying interface or opt out per-process via `PROVIZIO_DDS_NETWORK_RECOVERY=off`.
+
+Auto-recovery is **on by default**. To override the mode per participant, pass a `network_recovery_mode` to `make_domain_participant`:
+
+```C++
+#include "provizio/dds/domain_participant.h"
+#include "provizio/dds/network_recovery.h"
+
+// Default — honour the PROVIZIO_DDS_NETWORK_RECOVERY env var (on by default):
+auto participant_default = provizio::dds::make_domain_participant();
+
+// Always on, regardless of env var:
+auto participant_on = provizio::dds::make_domain_participant(
+    0, provizio::dds::network_recovery_mode::on);
+
+// Always off:
+auto participant_off = provizio::dds::make_domain_participant(
+    0, provizio::dds::network_recovery_mode::off);
+```
+
+The Python binding exposes the same surface via `provizio_dds.make_domain_participant`:
+
+```Python
+import provizio_dds
+
+# Default — honour the PROVIZIO_DDS_NETWORK_RECOVERY env var:
+participant = provizio_dds.make_domain_participant()
+
+# Always on:
+participant = provizio_dds.make_domain_participant(
+    0, provizio_dds.NetworkRecoveryMode.ON)
+
+# Always off:
+participant = provizio_dds.make_domain_participant(
+    0, provizio_dds.NetworkRecoveryMode.OFF)
+```
+
+The Python implementation uses polling rather than kernel notifications (Python's stdlib has no portable kernel-event subscription API, and recovery is already debounced over a multi-second quiet period — the latency cost of polling is well within the design budget). It applies the same set of loopback / link-local / per-OS adapter-name exclusions as the C++ side, AND on Linux the same `IFLA_INFO_KIND` exclusions (bridge / veth / dummy / vxlan / macvlan / ipvlan / ip6tnl / tun) via a small `RTM_GETLINK` netlink dump on each snapshot. The polling cadence is configurable via `PROVIZIO_DDS_NETWORK_RECOVERY_POLL_INTERVAL_SEC`, default 3 s. See `python/network_recovery.py` for details.
+
+To disable auto-recovery process-wide, set the env var before launching:
+
+```Bash
+PROVIZIO_DDS_NETWORK_RECOVERY=off my_app
+```
+
+Recognised values (case-insensitive): `on` / `1` / `true` / `yes` to enable, `off` / `0` / `false` / `no` to disable. Unset or empty defaults to enabled. An unrecognised value is treated as enabled and logged as a warning.
+
+**Cost when not in use:** if no participant ever enables auto-recovery, the background monitor is never started — no threads, no kernel channels, no per-participant memory beyond a single boolean flag.
+
+**Cost during a reset:** typical end-to-end recovery time is a few seconds — about 3 s of event coalescing plus the time Fast-DDS needs for rediscovery and TypeLookup against the new participant. Each reset is logged (see [Logging](#logging) below).
+
+For details see [include/provizio/dds/network_recovery.h](include/provizio/dds/network_recovery.h).
+
+## Logging
+
+provizio_dds emits diagnostic messages from background threads (network-recovery monitor, coalescer, participant reset) as well as from a few error paths in the request/response code. By default, info and warning messages go to `std::cout` and errors go to `std::cerr`, all prefixed with `[provizio_dds]`. To route the output into your application's logging system, install a callback:
+
+```C++
+#include "provizio/dds/logging.h"
+
+provizio::dds::set_log_callback(
+    [](provizio::dds::log_level level, std::string_view message) {
+        switch (level) {
+            case provizio::dds::log_level::info:    my_logger.info(message);    break;
+            case provizio::dds::log_level::warning: my_logger.warning(message); break;
+            case provizio::dds::log_level::error:   my_logger.error(message);   break;
+        }
+    });
+```
+
+`set_log_callback` returns the previously installed callback; passing an empty callback restores the default stdout/stderr emitter. The callback may be invoked from any thread and must be reentrant; do any heavy work in your own background thread.
+
+The Python binding mirrors this:
+
+```Python
+import provizio_dds
+
+def on_log(level, message):
+    if level == provizio_dds.LogLevel.INFO:    my_logger.info(message)
+    elif level == provizio_dds.LogLevel.WARNING: my_logger.warning(message)
+    elif level == provizio_dds.LogLevel.ERROR:   my_logger.error(message)
+
+provizio_dds.set_log_callback(on_log)
+```
+
+For details see [include/provizio/dds/logging.h](include/provizio/dds/logging.h) and [python/network_recovery.py](python/network_recovery.py).
+
 ## Request/Response
 
 The library provides a lightweight request/response API built on top of DDS topics. A service subscribes to a request topic and publishes replies to a response topic with correlation tracking; clients send requests and await replies.
