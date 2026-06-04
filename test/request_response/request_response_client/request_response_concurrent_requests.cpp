@@ -20,8 +20,8 @@
 
 #include "provizio/dds/request_response.h"
 
-#include <std_msgs/msg/Int32PubSubTypes.h>
-#include <std_msgs/msg/Int64PubSubTypes.h>
+#include <std_msgs/msg/Int32PubSubTypes.hpp>
+#include <std_msgs/msg/Int64PubSubTypes.hpp>
 
 constexpr const char *log_prefix = "request_response_concurrent_requests: ";
 
@@ -50,7 +50,7 @@ try
         request.data(request_response_pair.first);
 
         std::cout << log_prefix << "Requesting " << request_response_pair.first << " with expected response of "
-                  << request_response_pair.second << "..." << std::endl;
+                  << request_response_pair.second << "..." << '\n';
         future_responses.emplace_back(
             provizio::dds::request<std_msgs::msg::Int32PubSubType, std_msgs::msg::Int64PubSubType>(
                 domain_participant, service_name, request),
@@ -58,7 +58,7 @@ try
     }
 
     std::this_thread::sleep_for(time_to_match);
-    std::cout << log_prefix << "Requests sent, expecting responses now..." << std::endl;
+    std::cout << log_prefix << "Requests sent, expecting responses now..." << '\n';
 
     // Now we're waiting for all responses, except those that are expected to timeout
     for (auto &future_response : future_responses)
@@ -69,7 +69,7 @@ try
             if (status != std::future_status::ready)
             {
                 std::cerr << log_prefix << "Timeout waiting when " << future_response.second << " was expected!"
-                          << std::endl;
+                          << '\n';
                 return 1;
             }
 
@@ -77,21 +77,21 @@ try
             if (received != future_response.second)
             {
                 std::cerr << log_prefix << "Unexpected value received from test_service! " << future_response.second
-                          << " expected, " << received << " received." << std::endl;
+                          << " expected, " << received << " received." << '\n';
                 return 1;
             }
 
-            std::cout << log_prefix << "Correctly got expected response = " << received << std::endl;
+            std::cout << log_prefix << "Correctly got expected response = " << received << '\n';
         }
     }
 
-    std::cout << log_prefix << "Successfully complete" << std::endl;
+    std::cout << log_prefix << "Successfully complete" << '\n';
 
     return 0;
 }
 catch (const std::exception &exception)
 {
-    std::cout << log_prefix << "Exception during the test: " << exception.what() << std::endl;
+    std::cout << log_prefix << "Exception during the test: " << exception.what() << '\n';
 
     return 1;
 }

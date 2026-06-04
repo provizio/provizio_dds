@@ -21,8 +21,8 @@
 #include "provizio/dds/ignore_request.h"
 #include "provizio/dds/request_response.h"
 
-#include <std_msgs/msg/Int32PubSubTypes.h>
-#include <std_msgs/msg/Int64PubSubTypes.h>
+#include <std_msgs/msg/Int32PubSubTypes.hpp>
+#include <std_msgs/msg/Int64PubSubTypes.hpp>
 
 int main()
 {
@@ -33,7 +33,7 @@ int main()
     constexpr std::chrono::seconds total_timeout{30};
     constexpr std::chrono::seconds end_sleep{4};
 
-    std::cout << log_prefix << "Starting..." << std::endl;
+    std::cout << log_prefix << "Starting..." << '\n';
 
     std::mutex mutex;
     std::condition_variable condition_variable;
@@ -68,13 +68,13 @@ int main()
     std::unique_lock<std::mutex> lock{mutex};
     if (!condition_variable.wait_for(lock, total_timeout, [&]() { return got_requests >= requests_expected; }))
     {
-        std::cerr << log_prefix << "Timeout! Got " << got_requests << " requests so far" << std::endl;
+        std::cerr << log_prefix << "Timeout! Got " << got_requests << " requests so far" << '\n';
         return 1;
     }
 
     // Make sure to deliver the last response
     std::this_thread::sleep_for(end_sleep);
 
-    std::cout << log_prefix << "Successfully sent all the responses" << std::endl;
+    std::cout << log_prefix << "Successfully sent all the responses" << '\n';
     return 0;
 }

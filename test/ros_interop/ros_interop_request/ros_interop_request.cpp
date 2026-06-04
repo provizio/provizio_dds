@@ -16,7 +16,7 @@
 #include <iostream>
 #include <string>
 
-#include <std_srvs/srv/SetBoolPubSubTypes.h>
+#include <std_srvs/srv/SetBoolPubSubTypes.hpp>
 
 #include "provizio/dds/request_response.h"
 
@@ -35,7 +35,7 @@ try
         std_srvs::srv::SetBool_Request request;
         request.data(data);
 
-        std::cout << log_prefix << "Requesting " << data << "..." << std::endl;
+        std::cout << log_prefix << "Requesting " << data << "..." << '\n';
 
         auto future_response =
             provizio::dds::request<std_srvs::srv::SetBool_RequestPubSubType, std_srvs::srv::SetBool_ResponsePubSubType>(
@@ -43,7 +43,7 @@ try
 
         if (future_response.wait_for(timeout) != std::future_status::ready)
         {
-            std::cerr << log_prefix << "Timed out waiting for the response (" << data << " was expected)" << std::endl;
+            std::cerr << log_prefix << "Timed out waiting for the response (" << data << " was expected)" << '\n';
             return 1;
         }
 
@@ -51,12 +51,12 @@ try
         if (data != response.success())
         {
             std::cerr << log_prefix << "Got " << future_response.get().success() << " when " << data << " was expected!"
-                      << std::endl;
+                      << '\n';
             return 1;
         }
 
         std::cout << log_prefix << "Successfully received " << response.success()
-                  << " with message: " << response.message() << std::endl;
+                  << " with message: " << response.message() << '\n';
 
         if (data)
         {
@@ -64,12 +64,12 @@ try
         }
     }
 
-    std::cout << log_prefix << "Successfully got all the responses" << std::endl;
+    std::cout << log_prefix << "Successfully got all the responses" << '\n';
     return 0;
 }
 catch (const std::exception &exception)
 {
-    std::cout << log_prefix << "Exception during the test: " << exception.what() << std::endl;
+    std::cout << log_prefix << "Exception during the test: " << exception.what() << '\n';
 
     return 1;
 }

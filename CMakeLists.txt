@@ -16,15 +16,19 @@ cmake_minimum_required(VERSION 3.15.0)
 
 include(ExternalProject)
 include(FetchContent)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/imported_targets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 
 # Configuration
-set(PROVIZIO_DDS_IDLS_VERSION "1.6.1" CACHE STRING "provizio_dds_idls version")
-set(FAST_DDS_VERSION "v2.14.2" CACHE STRING "Fast-DDS version, when not already present in the system")
-set(FAST_CDR_VERSION "2.2" CACHE STRING "Fast-CDR major.minor version (for Windows versioned library naming). Must match the Fast-CDR bundled with FAST_DDS_VERSION")
+set(PROVIZIO_DDS_IDLS_VERSION "2.0.0" CACHE STRING "provizio_dds_idls version")
+set(FAST_DDS_VERSION "v3.6.1" CACHE STRING "Fast-DDS git ref (upstream tag, mirrored by the provizio fork)")
+set(FAST_DDS_NUMERIC_VERSION "3.6.1" CACHE STRING "Fast-DDS numeric version (used for library naming on Windows); must match what FAST_DDS_VERSION resolves to")
+set(FAST_CDR_VERSION "2.3" CACHE STRING "Fast-CDR major.minor version (for Windows versioned library naming). Must match the Fast-CDR bundled with FAST_DDS_VERSION")
 set(LOOK_FOR_FAST_DDS FALSE CACHE BOOL "Try to find Fast-DDS installation, and only build one when not found")
-set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.3.1" CACHE STRING "provizio_dds_idls foonathan_memory_vendor version")
-set(FAST_DDS_PYTHON_VERSION "1.3.2" CACHE STRING "Fast-DDS-python version, without v prefix")
-set(PROVIZIO_CODING_STANDARDS_VERSION "1.10.3" CACHE STRING "Provizio Coding Standards version")
+set(FOONATHAN_MEMORY_VENDOR_VERSION "v1.4.1" CACHE STRING "foonathan_memory_vendor git ref (upstream tag, mirrored by the provizio fork)")
+set(FAST_DDS_PYTHON_VERSION "v2.6.1" CACHE STRING "Fast-DDS-python git ref (upstream tag, mirrored by the provizio fork)")
+set(FAST_DDS_PYTHON_NUMERIC_VERSION "2.6.1" CACHE STRING "Fast-DDS-python numeric version (used for CMake project() VERSION); must match what FAST_DDS_PYTHON_VERSION resolves to")
+set(PROVIZIO_CODING_STANDARDS_VERSION "1.10.5" CACHE STRING "Provizio Coding Standards version")
 set(DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS OFF CACHE BOOL "Disable all provizio/coding_standards checks")
 set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, without v prefix")
 set(ENABLE_TESTS OFF CACHE BOOL "Defines whether tests are built and enabled")
@@ -228,10 +232,52 @@ endif(PYTHON_BINDINGS AND NOT PYTHON_PACKAGES_INSTALL_DIR AND HAS_BIN_CACHE)
 
 # Provizio Config Standards - Enables multiple quality checks (see https://github.com/provizio/coding_standards)
 if(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
-    file(DOWNLOAD
-        "https://raw.githubusercontent.com/provizio/coding_standards/${PROVIZIO_CODING_STANDARDS_VERSION}/cpp/cmake/StandardConfig.cmake"
-        "${CMAKE_BINARY_DIR}/StandardConfig.cmake" TLS_VERIFY ON)
-    include(${CMAKE_BINARY_DIR}/StandardConfig.cmake)
+    set(_provizio_standards_url
+        "https://raw.githubusercontent.com/provizio/coding_standards/${PROVIZIO_CODING_STANDARDS_VERSION}/cpp/cmake/StandardConfig.cmake")
+    set(_provizio_standards_file "${CMAKE_BINARY_DIR}/StandardConfig.cmake")
+    # Retry — Docker / CI runners hit raw.githubusercontent.com transient
+    # failures (TLS handshake reset, DNS hiccup, GitHub Raw 5xx) often enough
+    # that a single attempt is flaky. Without an explicit STATUS check, a
+    # silent download failure surfaces as "Unknown CMake command StandardConfig"
+    # on the include() + StandardConfig() lines below, which is misleading.
+    set(_provizio_standards_attempts 3)
+    set(_provizio_standards_downloaded FALSE)
+    foreach(_attempt RANGE 1 ${_provizio_standards_attempts})
+        file(REMOVE "${_provizio_standards_file}")
+        file(DOWNLOAD
+            "${_provizio_standards_url}"
+            "${_provizio_standards_file}"
+            TLS_VERIFY ON
+            TIMEOUT 60
+            STATUS _provizio_standards_status
+            LOG _provizio_standards_log)
+        list(GET _provizio_standards_status 0 _provizio_standards_code)
+        list(GET _provizio_standards_status 1 _provizio_standards_msg)
+        if(_provizio_standards_code EQUAL 0)
+            # CMake reports success even on a 0-byte body, so verify the file
+            # actually has content before calling include() on it.
+            file(SIZE "${_provizio_standards_file}" _provizio_standards_size)
+            if(_provizio_standards_size GREATER 0)
+                set(_provizio_standards_downloaded TRUE)
+                break()
+            endif()
+            set(_provizio_standards_msg "downloaded file is empty (0 bytes)")
+        endif()
+        message(STATUS
+            "Provizio coding_standards download attempt ${_attempt}/${_provizio_standards_attempts} "
+            "failed: ${_provizio_standards_msg} (status ${_provizio_standards_code})")
+    endforeach()
+    if(NOT _provizio_standards_downloaded)
+        message(FATAL_ERROR
+            "Failed to download Provizio coding_standards after ${_provizio_standards_attempts} attempts.\n"
+            "  URL:    ${_provizio_standards_url}\n"
+            "  Status: ${_provizio_standards_msg} (code ${_provizio_standards_code})\n"
+            "Likely causes: transient network / DNS / TLS issue on this runner, "
+            "GitHub Raw outage, or an invalid PROVIZIO_CODING_STANDARDS_VERSION "
+            "(\"${PROVIZIO_CODING_STANDARDS_VERSION}\").\n"
+            "Last download log:\n${_provizio_standards_log}")
+    endif()
+    include("${_provizio_standards_file}")
     StandardConfig(SAFETY_CRITICAL)
 else(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
     set(CMAKE_CXX_STANDARD 17)
@@ -245,6 +291,28 @@ else(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
         message(WARNING "STATIC_ANALYSIS setting doesn't have any effect when DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS is ON")
     endif(STATIC_ANALYSIS)
 endif(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
+
+if(WIN32)
+    # NOMINMAX: prevents <windows.h> from macro-defining `min` / `max`,
+    # which clobber std::numeric_limits<...>::min() / ::max() in Fast-DDS
+    # headers (e.g. ThreadSettings.hpp).
+    # WIN32_LEAN_AND_MEAN: skip rarely used pieces of <windows.h>.
+    # _WIN32_WINNT=0x0600 / NTDDI_VERSION=NTDDI_VISTA: required by
+    # netioapi.h for NotifyUnicastIpAddressChange / CancelMibChangeNotify2
+    # used by the network-auto-recovery Windows monitor.
+    # Applied globally as compiler -D flags so the values are seen before
+    # ANY include — and so downstream consumers transitively pulling
+    # Fast-DDS via provizio_dds headers also get the same surface. Set
+    # OUTSIDE the coding-standards if/else above so it activates on every
+    # Windows build, including the StandardConfig(SAFETY_CRITICAL) branch
+    # that downstream consumers (apt_gui) take.
+    add_compile_definitions(
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        _WIN32_WINNT=0x0600
+        NTDDI_VERSION=0x06000000
+    )
+endif(WIN32)
 
 # Disable runtime analysis tools
 if(CMAKE_CXX_FLAGS)
@@ -369,18 +437,18 @@ else(HAS_BIN_CACHE)
             find_package(fastcdr QUIET)
         endif()
 
-        if(NOT fastrtps_FOUND)
-            find_package(fastrtps QUIET)
+        if(NOT fastdds_FOUND)
+            find_package(fastdds QUIET)
         endif()
     endif(LOOK_FOR_FAST_DDS)
 
-    if(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
-        message(STATUS "Fast-DDS version ${fastrtps_VERSION} found at ${fastrtps_DIR} and will be used.")
+    if(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastdds_FOUND)
+        message(STATUS "Fast-DDS version ${fastdds_VERSION} found at ${fastdds_DIR} and will be used.")
         set(FAST_DDS_DEPENDENCIES)
         set(FAST_DDS_INCLUDE_DIRS)
-        set(FASTRTPS_LIB "fastrtps")
+        set(FASTDDS_LIB "fastdds")
         set(FASTCDR_LIB "fastcdr")
-    else(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
+    else(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastdds_FOUND)
         # Let's build Fast-DDS
         message(STATUS "Fast-DDS will be built. Version ${FAST_DDS_VERSION} with foonathan_memory_vendor version ${FOONATHAN_MEMORY_VENDOR_VERSION}.")
 
@@ -429,8 +497,13 @@ else(HAS_BIN_CACHE)
         # OpenSSL is always available here (find_package REQUIRED above)
 
         # Parse Fast-DDS version once for byproducts and library naming below
+        # Prefer FAST_DDS_NUMERIC_VERSION (for branch refs); fall back to parsing
+        # FAST_DDS_VERSION (when it's a vX.Y.Z tag).
         string(REGEX REPLACE "^v" "" FAST_DDS_VERSION_STRIPPED "${FAST_DDS_VERSION}")
         string(REGEX MATCH "^[0-9]+\\.[0-9]+" FAST_DDS_MAJOR_MINOR "${FAST_DDS_VERSION_STRIPPED}")
+        if(NOT FAST_DDS_MAJOR_MINOR AND FAST_DDS_NUMERIC_VERSION)
+            string(REGEX MATCH "^[0-9]+\\.[0-9]+" FAST_DDS_MAJOR_MINOR "${FAST_DDS_NUMERIC_VERSION}")
+        endif()
         if(_FAST_DDS_BUILD_TYPE STREQUAL "Debug")
             set(FAST_DDS_DEBUG_SUFFIX "d")
         else()
@@ -442,18 +515,30 @@ else(HAS_BIN_CACHE)
         if(WIN32)
             set(_FAST_DDS_BYPRODUCTS
                 "${FAST_DDS_INSTALL_DIR}/lib/fastcdr${FAST_DDS_DEBUG_SUFFIX}-${FAST_CDR_VERSION}.lib"
-                "${FAST_DDS_INSTALL_DIR}/lib/fastrtps${FAST_DDS_DEBUG_SUFFIX}-${FAST_DDS_MAJOR_MINOR}.lib"
+                "${FAST_DDS_INSTALL_DIR}/lib/fastdds${FAST_DDS_DEBUG_SUFFIX}-${FAST_DDS_MAJOR_MINOR}.lib"
             )
         else()
             set(_FAST_DDS_BYPRODUCTS
                 "${FAST_DDS_INSTALL_DIR}/lib/libfastcdr${CMAKE_SHARED_LIBRARY_SUFFIX}"
-                "${FAST_DDS_INSTALL_DIR}/lib/libfastrtps${CMAKE_SHARED_LIBRARY_SUFFIX}"
+                "${FAST_DDS_INSTALL_DIR}/lib/libfastdds${CMAKE_SHARED_LIBRARY_SUFFIX}"
             )
         endif()
         ExternalProject_Add(libfast_dds
             GIT_REPOSITORY "https://github.com/${FAST_DDS_GITHUB_PROJECT}.git"
             GIT_TAG "${FAST_DDS_VERSION}"
             UPDATE_COMMAND ""
+            # Decorate eprosima::SystemInfo::update_interfaces() with
+            # FASTDDS_EXPORTED_API so it is reachable in the Windows DLL
+            # export table (provizio_dds calls it to refresh Fast-DDS's
+            # interface cache on network-recovery resets — APT-11792). The
+            # script is a no-op on Linux / macOS (default visibility already
+            # exports it) and idempotent. See export_system_info.cmake for
+            # why this targeted patch is used instead of
+            # CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS (the latter overflows the
+            # 65535-symbol Windows DLL export limit on a library this large).
+            PATCH_COMMAND ${CMAKE_COMMAND}
+                "-DSYSTEMINFO_HPP=<SOURCE_DIR>/src/cpp/utils/SystemInfo.hpp"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
@@ -462,39 +547,20 @@ else(HAS_BIN_CACHE)
         )
         link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
-        # On Windows, installed libraries have versioned names (e.g. fastrtps-2.14.lib).
-        # Debug builds add a 'd' suffix (e.g. fastrtpsd-2.14.lib).
+        # On Windows, installed libraries have versioned names (e.g. fastdds-3.6.lib).
+        # Debug builds add a 'd' suffix (e.g. fastddsd-3.6.lib).
         # Version variables (FAST_DDS_VERSION_STRIPPED, FAST_DDS_MAJOR_MINOR, FAST_DDS_DEBUG_SUFFIX)
         # are parsed above, shared with the byproducts block.
-        if(WIN32)
-            set(FASTRTPS_LIB "fastrtps${FAST_DDS_DEBUG_SUFFIX}-${FAST_DDS_MAJOR_MINOR}")
-            set(FASTCDR_LIB "fastcdr${FAST_DDS_DEBUG_SUFFIX}-${FAST_CDR_VERSION}")
-
-            # Create imported targets with unversioned names so that third-party CMake
-            # code (e.g. Fast-DDS-Python) that does target_link_libraries(... fastcdr fastrtps)
-            # resolves to the correct versioned libraries without patching.
-            if(NOT TARGET fastcdr)
-                add_library(fastcdr SHARED IMPORTED)
-                set_target_properties(fastcdr PROPERTIES
-                    IMPORTED_IMPLIB "${FAST_DDS_INSTALL_DIR}/lib/${FASTCDR_LIB}.lib"
-                    IMPORTED_LOCATION "${FAST_DDS_INSTALL_DIR}/bin/${FASTCDR_LIB}.dll"
-                )
-            endif()
-            if(NOT TARGET fastrtps)
-                add_library(fastrtps SHARED IMPORTED)
-                set_target_properties(fastrtps PROPERTIES
-                    IMPORTED_IMPLIB "${FAST_DDS_INSTALL_DIR}/lib/${FASTRTPS_LIB}.lib"
-                    IMPORTED_LOCATION "${FAST_DDS_INSTALL_DIR}/bin/${FASTRTPS_LIB}.dll"
-                )
-            endif()
-        else(WIN32)
-            set(FASTRTPS_LIB "fastrtps")
-            set(FASTCDR_LIB "fastcdr")
-        endif(WIN32)
+        provizio_dds_create_fast_dds_imported_targets(
+            INSTALL_DIR "${FAST_DDS_INSTALL_DIR}"
+            FAST_DDS_MAJOR_MINOR "${FAST_DDS_MAJOR_MINOR}"
+            FAST_CDR_VERSION "${FAST_CDR_VERSION}"
+            DEBUG_SUFFIX "${FAST_DDS_DEBUG_SUFFIX}"
+        )
 
         set(FAST_DDS_DEPENDENCIES libfast_dds)
         set(FAST_DDS_INCLUDE_DIRS "${FAST_DDS_INSTALL_DIR}/include/")
-    endif(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastrtps_FOUND)
+    endif(LOOK_FOR_FAST_DDS AND fastcdr_FOUND AND fastdds_FOUND)
 
     # Resolve provizio_dds_idls (https://github.com/provizio/provizio_dds_idls)
     FetchContent_Declare(provizio_dds_idls
@@ -515,7 +581,7 @@ else(HAS_BIN_CACHE)
     if(WIN32)
         target_compile_definitions(provizio_dds_types PRIVATE EPROSIMA_USER_DLL_EXPORT)
         # Disable eProsima auto-linking (#pragma comment(lib, ...)) — linking is handled by CMake.
-        # EPROSIMA_ALL_DYN_LINK enables __declspec(dllimport) for fastrtps/fastcdr shared libraries.
+        # EPROSIMA_ALL_DYN_LINK enables __declspec(dllimport) for fastdds/fastcdr shared libraries.
         target_compile_definitions(provizio_dds_types PUBLIC EPROSIMA_ALL_NO_LIB EPROSIMA_ALL_DYN_LINK)
     endif(WIN32)
 
@@ -524,7 +590,7 @@ else(HAS_BIN_CACHE)
     endif(FAST_DDS_DEPENDENCIES)
 
     target_include_directories(provizio_dds_types SYSTEM PUBLIC include ${PROVIZIO_DDS_IDLS_SRC_DIR} ${FAST_DDS_INCLUDE_DIRS})
-    target_link_libraries(provizio_dds_types PUBLIC ${FASTRTPS_LIB} ${FASTCDR_LIB})
+    target_link_libraries(provizio_dds_types PUBLIC ${FASTDDS_LIB} ${FASTCDR_LIB})
     # PROVIZIO_DDS_TYPES_EXPORTS is not currently consumed by any header macro
     # (generated IDL code uses EPROSIMA_USER_DLL_EXPORT instead), but is set for
     # forward compatibility if a PROVIZIO_DDS_TYPES_API macro is added later.
@@ -532,13 +598,42 @@ else(HAS_BIN_CACHE)
 
     # provizio_dds library
     set(PROVIZIO_DDS_SOURCES
+        src/network_recovery_coordinator.cpp
         src/domain_participant.cpp
+        src/logging.cpp
+        src/network_recovery.cpp
         src/request_response.cpp
         src/topic.cpp
     )
+    # Per-platform network monitoring + address-snapshot backends. Each .cpp is
+    # gated internally by the matching #ifdef so the build can also tolerate the
+    # files being unconditionally listed; we still split per platform here so a
+    # CMake regeneration on the wrong OS surfaces an obvious missing-file message.
+    if(WIN32)
+        list(APPEND PROVIZIO_DDS_SOURCES
+            src/address_snapshot_windows.cpp
+            src/network_monitor_windows.cpp
+        )
+    elseif(APPLE)
+        list(APPEND PROVIZIO_DDS_SOURCES
+            src/address_snapshot_macos.cpp
+            src/network_monitor_macos.cpp
+        )
+    else()
+        list(APPEND PROVIZIO_DDS_SOURCES
+            src/address_snapshot_linux.cpp
+            src/network_monitor_linux.cpp
+        )
+    endif()
     add_library(provizio_dds SHARED ${PROVIZIO_DDS_SOURCES})
-    target_link_libraries(provizio_dds PUBLIC provizio_dds_types ${FASTRTPS_LIB} ${FASTCDR_LIB})
+    target_link_libraries(provizio_dds PUBLIC provizio_dds_types ${FASTDDS_LIB} ${FASTCDR_LIB})
     set_target_properties(provizio_dds PROPERTIES DEFINE_SYMBOL "PROVIZIO_DDS_EXPORTS")
+    # PROVIZIO_DDS_ENABLE_TESTS is no longer needed as a compile definition:
+    # the test-only entry points on the network_recovery_coordinator are now
+    # always part of the ABI (gated behind a different compile flag would
+    # change the class layout between consumers built with and without it,
+    # causing memory corruption on mismatch). The methods are documented as
+    # test-only and unconditional.
 
     # Installation config
     install(
@@ -547,7 +642,45 @@ else(HAS_BIN_CACHE)
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
     install(DIRECTORY include/provizio DESTINATION include)
-    install(DIRECTORY "${PROVIZIO_DDS_IDLS_SRC_DIR}/" DESTINATION include FILES_MATCHING PATTERN "*.h")
+    install(DIRECTORY "${PROVIZIO_DDS_IDLS_SRC_DIR}/" DESTINATION include
+            FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp" PATTERN "*.ipp")
+
+    # IDL .h -> .hpp backward-compat shims.
+    # provizio_dds_idls v2.0.0 (Fast-DDS-Gen v4) renamed generated headers from
+    # *.h to *.hpp. Downstream C++ code that still includes the pre-v2.0.0 .h
+    # spelling would otherwise fail to compile. Generate matching .h files at
+    # install time, each containing a single #include of the .hpp sibling, so
+    # the rename is transparent to consumers without modifying provizio_dds_idls
+    # itself. Files (not symlinks) for cross-platform reliability — Windows
+    # symbolic-link creation requires admin / developer-mode privileges that
+    # an end-user install cannot assume, and CMake's file(CREATE_LINK) does
+    # not silently fall back to a copy. The shims are tiny (~150 bytes each)
+    # and live only in the installed tree; the upstream IDL repo and our
+    # build tree are untouched.
+    install(CODE "set(_provizio_dds_idl_src_dir \"${PROVIZIO_DDS_IDLS_SRC_DIR}\")")
+    install(CODE [=[
+        file(GLOB_RECURSE _provizio_dds_idl_hpp
+             RELATIVE "${_provizio_dds_idl_src_dir}"
+             "${_provizio_dds_idl_src_dir}/*.hpp")
+        list(LENGTH _provizio_dds_idl_hpp _provizio_dds_idl_count)
+        message(STATUS
+            "provizio_dds: generating ${_provizio_dds_idl_count} .h compat "
+            "shims for renamed IDL headers under ${CMAKE_INSTALL_PREFIX}/include")
+        foreach(_rel ${_provizio_dds_idl_hpp})
+            string(REGEX REPLACE "\\.hpp$" ".h" _rel_h "${_rel}")
+            get_filename_component(_hpp_basename "${_rel}" NAME)
+            set(_out "${CMAKE_INSTALL_PREFIX}/include/${_rel_h}")
+            if(NOT EXISTS "${_out}")
+                file(WRITE "${_out}"
+                    "// Auto-generated by provizio_dds install for backwards source\n"
+                    "// compatibility — provizio_dds_idls v2.0.0 renamed generated\n"
+                    "// headers from *.h to *.hpp when Fast-DDS-Gen v4 changed its\n"
+                    "// default extension. Existing code that includes the old .h\n"
+                    "// spelling keeps compiling via this shim.\n"
+                    "#include \"${_hpp_basename}\"\n")
+            endif()
+        endforeach()
+    ]=])
 
     if(FAST_DDS_INSTALL_DIR)
         install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/include/" DESTINATION include)
@@ -609,7 +742,7 @@ else(HAS_BIN_CACHE)
         # Resolve Fast-DDS-python
         FetchContent_Declare(fast_dds_python
             GIT_REPOSITORY "https://github.com/provizio/Fast-DDS-python"
-            GIT_TAG "v${FAST_DDS_PYTHON_VERSION}"
+            GIT_TAG "${FAST_DDS_PYTHON_VERSION}"
         )
         FetchContent_Populate(fast_dds_python)
 
@@ -620,6 +753,68 @@ else(HAS_BIN_CACHE)
             [=[from distutils import sysconfig; print\(sysconfig\.get_python_lib\(plat_specific=True, prefix='([^']*)' \) \)]=]
             [=[import sysconfig; print(sysconfig.get_path('platlib', vars={'base': '\1', 'platbase': '\1'}))]=]
             FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        # Strip the whitespace inside the upstream
+        #   $<IF:$<BOOL:${USE_PYTHON_STABLE_ABI}>, Python3::SABIModule, Python3::Module>
+        # generator expression. CMake < 3.27 keeps the leading spaces in the
+        # branch results, producing literal target names like " Python3::Module"
+        # that fail to resolve ("Target ... links to target 'Python3::Module>'").
+        # ROS 2 humble's docker image ships CMake 3.22, so the unfixed form
+        # blocks the compatibility build.
+        #
+        # `\${USE_PYTHON_STABLE_ABI}` is escaped so the patched downstream
+        # CMakeLists.txt still evaluates *its own* variable when Fast-DDS-
+        # python is configured. Without the escape, `${USE_PYTHON_STABLE_ABI}`
+        # would expand here (where the variable is undefined), permanently
+        # baking in the `Python3::Module` branch and disabling the stable-ABI
+        # option for downstream builds.
+        string(REGEX REPLACE
+            "\\$<IF:\\$<BOOL:\\$\\{USE_PYTHON_STABLE_ABI\\}>, *Python3::SABIModule, *Python3::Module>"
+            "\$<IF:\$<BOOL:\${USE_PYTHON_STABLE_ABI}>,Python3::SABIModule,Python3::Module>"
+            FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        # Fail closed: if a future FAST_DDS_PYTHON_VERSION bump shifts this text, the
+        # REGEX above silently no-ops and the CMake<3.27 / ROS 2 humble build regresses
+        # to the unresolvable " Python3::Module>" target. Assert the collapsed form is
+        # present afterwards (true whether we just produced it or upstream already ships
+        # it) rather than that the replace changed something: the patched file is written
+        # back and persists, so a "did it change?" check would FATAL on every re-configure.
+        string(FIND "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}"
+            "\$<IF:\$<BOOL:\${USE_PYTHON_STABLE_ABI}>,Python3::SABIModule,Python3::Module>"
+            _stable_abi_genexpr_pos)
+        if(_stable_abi_genexpr_pos EQUAL -1)
+            message(FATAL_ERROR
+                "Fast-DDS-python ${FAST_DDS_PYTHON_VERSION}: the Python3 SABIModule/Module generator-expression "
+                "patch did not produce the expected collapsed form — upstream text has likely changed. Update the "
+                "REGEX REPLACE in CMakeLists.txt or the CMake 3.22 / ROS 2 humble compatibility build will break.")
+        endif()
+        # Don't set SWIGWORDSIZE64 on macOS. Upstream defines it on every
+        # 64-bit UNIX, which makes SWIG treat `long` as the native 64-bit
+        # integer — fine on Linux where `uint64_t` is `unsigned long`, but
+        # broken on macOS where `uint64_t` is `unsigned long long`. With
+        # the macro set on macOS, SWIG generates wrapper code that
+        # alternates between `std::vector<uint64_t>` (==
+        # `std::vector<unsigned long long>`) and `std::vector<unsigned
+        # long>`, and the C++ compiler then rejects the mismatched
+        # pointer/iterator conversions (no implicit conversion between
+        # the two `vector<>` instantiations, even though the elements are
+        # the same size). Skipping the macro on APPLE matches what we
+        # already do for our own provizio_dds_python_types target.
+        string(REGEX REPLACE
+            "if\\(UNIX AND CMAKE_SIZEOF_VOID_P EQUAL 8\\)"
+            "if(UNIX AND NOT APPLE AND CMAKE_SIZEOF_VOID_P EQUAL 8)"
+            FASTDDS_PYTHON_SWIG_CMAKE_CONTENT "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+        # Fail closed (see the generator-expression patch above): assert the macOS guard
+        # is present after patching so a future upstream text shift surfaces here instead
+        # of as a macOS-only std::vector<unsigned long> vs <unsigned long long> wrapper-
+        # compile failure.
+        string(FIND "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}"
+            "if(UNIX AND NOT APPLE AND CMAKE_SIZEOF_VOID_P EQUAL 8)"
+            _swigwordsize_guard_pos)
+        if(_swigwordsize_guard_pos EQUAL -1)
+            message(FATAL_ERROR
+                "Fast-DDS-python ${FAST_DDS_PYTHON_VERSION}: the SWIGWORDSIZE64 macOS-guard patch did not "
+                "produce the expected 'NOT APPLE' form — upstream text has likely changed. Update the "
+                "REGEX REPLACE in CMakeLists.txt or macOS wrapper compilation will regress.")
+        endif()
         # Remove cmake config/export install rules from fastdds_python (not needed at runtime, and
         # they install cmake files under lib/cmake/ that we don't want in the package)
         # 1. Remove "EXPORT <name>-targets" line from install(TARGETS) so it doesn't generate export sets
@@ -643,7 +838,7 @@ else(HAS_BIN_CACHE)
         file(WRITE
             "${FASTDDS_PYTHON_CMAKE_FILE}"
 
-            "project(fastdds_python VERSION ${FAST_DDS_PYTHON_VERSION})
+            "project(fastdds_python VERSION ${FAST_DDS_PYTHON_NUMERIC_VERSION})
         
         # Disable treating warnings as errors in Fast-DDS-python
         if(MSVC)
@@ -676,16 +871,14 @@ else(HAS_BIN_CACHE)
         file(GLOB_RECURSE PROVIZIO_DDS_IDL_I_S "${PROVIZIO_DDS_IDLS_SRC_DIR}/*.i")
         list(FILTER PROVIZIO_DDS_IDL_I_S EXCLUDE REGEX ".*PubSub.*")
 
-        # Remove %module as we'll package all type wrappers into single module instead
         set(MAIN_I "${CMAKE_CURRENT_BINARY_DIR}/provizio_dds_python_types.i")
-        file(WRITE "${MAIN_I}" "%module provizio_dds_python_types\n\n")
-
-        foreach(IDL_I ${PROVIZIO_DDS_IDL_I_S})
-            file(READ "${IDL_I}" FILE_CONTENTS)
-            string(REPLACE "%module" "//" FILE_CONTENTS "${FILE_CONTENTS}")
-            file(WRITE "${IDL_I}" "${FILE_CONTENTS}")
-            file(APPEND "${MAIN_I}" "%include ${IDL_I}\n")
-        endforeach(IDL_I ${PROVIZIO_DDS_IDL_I_S})
+        provizio_dds_write_swig_main_i(
+            OUTPUT "${MAIN_I}"
+            MODULE_NAME provizio_dds_python_types
+            IDL_FILES ${PROVIZIO_DDS_IDL_I_S}
+            IDLS_ROOT "${PROVIZIO_DDS_IDLS_SRC_DIR}"
+            PYTHON3_EXECUTABLE "${Python3_EXECUTABLE}"
+        )
 
         set_source_files_properties(${MAIN_I} PROPERTIES
             CPLUSPLUS ON
@@ -697,7 +890,10 @@ else(HAS_BIN_CACHE)
             SOURCES ${MAIN_I}
         )
 
-        # Add all IDL directories to include directories, as generated .cxx files include their headers just as #include "filename.h"
+        # Add all IDL directories to include directories, as generated files
+        # include their headers just as #include "filename.{h,hpp}". Fast-DDS-Gen v4
+        # emits .hpp + .ipp alongside (or instead of) the v3 .h flavor, so
+        # both header suffixes must be covered here.
         file(GLOB_RECURSE IDLS_SRC_DIRS LIST_DIRECTORIES true "${PROVIZIO_DDS_IDLS_SRC_DIR}/*")
 
         foreach(DIR ${IDLS_SRC_DIRS})
@@ -708,18 +904,22 @@ else(HAS_BIN_CACHE)
                     # macOS and Windows use case-insensitive file system, so ROS2 Time.h and String.h are confused with system time.h and string.h
                     # So instead of including their directories, we have to include the paths in the generated code
                     file(GLOB H_FILES RELATIVE "${DIR}" "${DIR}/*.h")
+                    file(GLOB HPP_FILES RELATIVE "${DIR}" "${DIR}/*.hpp")
+                    file(GLOB IPP_FILES RELATIVE "${DIR}" "${DIR}/*.ipp")
                     file(GLOB I_FILES RELATIVE "${DIR}" "${DIR}/*.i")
                     file(GLOB CXX_FILES RELATIVE "${DIR}" "${DIR}/*.cxx")
 
-                    foreach(GENERATED_FILE ${CXX_FILES} ${H_FILES} ${I_FILES})
+                    set(HEADER_FILES ${H_FILES} ${HPP_FILES} ${IPP_FILES})
+
+                    foreach(GENERATED_FILE ${CXX_FILES} ${HEADER_FILES} ${I_FILES})
                         file(READ "${DIR}/${GENERATED_FILE}" FILE_CONTENT)
 
-                        foreach(H_FILE ${H_FILES})
-                            string(REPLACE "#include \"${H_FILE}\"" "#include \"${DIR}/${H_FILE}\"" FILE_CONTENT "${FILE_CONTENT}")
-                        endforeach(H_FILE ${H_FILES})
+                        foreach(HEADER_FILE ${HEADER_FILES})
+                            string(REPLACE "#include \"${HEADER_FILE}\"" "#include \"${DIR}/${HEADER_FILE}\"" FILE_CONTENT "${FILE_CONTENT}")
+                        endforeach(HEADER_FILE ${HEADER_FILES})
 
                         file(WRITE "${DIR}/${GENERATED_FILE}" "${FILE_CONTENT}")
-                    endforeach(GENERATED_FILE ${CXX_FILES} ${H_FILES} ${I_FILES})
+                    endforeach(GENERATED_FILE ${CXX_FILES} ${HEADER_FILES} ${I_FILES})
                 endif(NOT APPLE AND NOT WIN32)
             endif(IS_DIRECTORY "${DIR}")
         endforeach(DIR ${IDLS_SRC_DIRS})
@@ -740,7 +940,7 @@ else(HAS_BIN_CACHE)
         swig_link_libraries(provizio_dds_python_types
             Python3::Module
             provizio_dds_types
-            ${FASTRTPS_LIB}
+            ${FASTDDS_LIB}
             ${FASTCDR_LIB}
             fastdds_python
         )
@@ -779,6 +979,7 @@ else(HAS_BIN_CACHE)
             "${CMAKE_CURRENT_SOURCE_DIR}/python/point_cloud2.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/accumulation.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/gps_utils.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/network_recovery.py"
         )
         set(PROVIZIO_DDS_ALL_PYTHON_LIBS
             ${FASTDDS_PYTHON_LIBS}
@@ -802,8 +1003,8 @@ else(HAS_BIN_CACHE)
             # Fast-DDS DLLs must also be copied because file(GLOB) above runs at configure
             # time before ExternalProject builds them, so FASTDDS_LIBS is empty.
             set(PROVIZIO_DDS_PYTHON_EXTRA_DLLS provizio_dds provizio_dds_types)
-            if(TARGET fastcdr AND TARGET fastrtps)
-                list(APPEND PROVIZIO_DDS_PYTHON_EXTRA_DLLS fastcdr fastrtps)
+            if(TARGET fastcdr AND TARGET fastdds)
+                list(APPEND PROVIZIO_DDS_PYTHON_EXTRA_DLLS fastcdr fastdds)
             endif()
 
             # Copy OpenSSL DLLs so they are found before any ABI-incompatible copies
@@ -918,8 +1119,14 @@ else(HAS_BIN_CACHE)
     # These are not needed at runtime and should not be included in packages or caches.
     # Scoped to specific subdirectories to avoid destroying unrelated cmake configs
     # when installed to a shared prefix.
+    # Also remove the pre-3.x `fastrtps` config dir in case this install
+    # is layering on top of a prefix that already had a Fast-DDS 1.x/2.x
+    # tree there — leaving it behind would let a later
+    # `find_package(fastrtps)` pick up the obsolete config from the same
+    # prefix.
     install(CODE "
         file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastrtps\")
+        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastdds\")
         file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastcdr\")
         file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastdds_python\")
         file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/foonathan_memory\")

@@ -106,13 +106,13 @@ namespace provizio::dds
     template <typename class_type, typename ret_type, typename... args, typename... function_args>
 #if defined DOXYGEN_ONLY
     struct function_traits<std::bind<ret_type (class_type::*)(args...), function_args...>>
-#elif defined _LIBCPP_VERSION  // libc++ (Clang)
+#elif defined _LIBCPP_VERSION   // libc++ (Clang)
     struct function_traits<std::__bind<ret_type (class_type::*)(args...), function_args...>>
-#elif defined _GLIBCXX_RELEASE // glibc++ (GNU C++ >= 7.1)
+#elif defined _GLIBCXX_RELEASE  // glibc++ (GNU C++ >= 7.1)
     struct function_traits<std::_Bind<ret_type (class_type::*(function_args...))(args...)>>
-#elif defined __GLIBCXX__      // glibc++ (GNU C++)
+#elif defined __GLIBCXX__       // glibc++ (GNU C++)
     struct function_traits<std::_Bind<std::_Mem_fn<ret_type (class_type::*)(args...)>(function_args...)>>
-#elif defined _MSC_VER         // MS Visual Studio
+#elif defined _MSC_VER          // MS Visual Studio
     struct function_traits<std::_Binder<std::_Unforced, ret_type (class_type::*)(args...), function_args...>>
 #else
 #error "Unsupported C++ compiler / standard library"
@@ -125,13 +125,13 @@ namespace provizio::dds
     template <typename class_type, typename ret_type, typename... args, typename... function_args>
 #if defined DOXYGEN_ONLY
     struct function_traits<std::bind<ret_type (class_type::*)(args...) const, function_args...>>
-#elif defined _LIBCPP_VERSION  // libc++ (Clang)
+#elif defined _LIBCPP_VERSION   // libc++ (Clang)
     struct function_traits<std::__bind<ret_type (class_type::*)(args...) const, function_args...>>
-#elif defined _GLIBCXX_RELEASE // glibc++ (GNU C++ >= 7.1)
+#elif defined _GLIBCXX_RELEASE  // glibc++ (GNU C++ >= 7.1)
     struct function_traits<std::_Bind<ret_type (class_type::*(function_args...))(args...) const>>
-#elif defined __GLIBCXX__      // glibc++ (GNU C++)
+#elif defined __GLIBCXX__       // glibc++ (GNU C++)
     struct function_traits<std::_Bind<std::_Mem_fn<ret_type (class_type::*)(args...) const>(function_args...)>>
-#elif defined _MSC_VER         // MS Visual Studio
+#elif defined _MSC_VER          // MS Visual Studio
     struct function_traits<std::_Binder<std::_Unforced, ret_type (class_type::*)(args...) const, function_args...>>
 #else
 #error "Unsupported C++ compiler / standard library"
@@ -144,11 +144,11 @@ namespace provizio::dds
     template <typename ret_type, typename... args, typename... function_args>
 #if defined DOXYGEN_ONLY
     struct function_traits<std::bind<ret_type (&)(args...), function_args...>>
-#elif defined _LIBCPP_VERSION // libc++ (Clang)
+#elif defined _LIBCPP_VERSION  // libc++ (Clang)
     struct function_traits<std::__bind<ret_type (&)(args...), function_args...>>
-#elif defined __GLIBCXX__     // glibc++ (GNU C++)
+#elif defined __GLIBCXX__      // glibc++ (GNU C++)
     struct function_traits<std::_Bind<ret_type (*(function_args...))(args...)>>
-#elif defined _MSC_VER        // MS Visual Studio
+#elif defined _MSC_VER         // MS Visual Studio
     struct function_traits<std::_Binder<std::_Unforced, ret_type (&)(args...), function_args...>>
 #else
 #error "Unsupported C++ compiler / standard library"
@@ -195,7 +195,7 @@ namespace provizio::dds
         {
             using type = std::function<ret_type(args...)>;
         };
-    } // namespace detail
+    }  // namespace detail
 
     template <typename functor_type, typename function_traits_type = function_traits<functor_type>>
     struct as_std_function
@@ -208,6 +208,6 @@ namespace provizio::dds
         using type = typename detail::as_std_function_helper<typename function_traits_type::return_type,
                                                              typename function_traits_type::arguments>::type;
     };
-} // namespace provizio::dds
+}  // namespace provizio::dds
 
-#endif // DDS_FUNCTION_TRAITS
+#endif  // DDS_FUNCTION_TRAITS

@@ -17,14 +17,14 @@
 
 #include "provizio/dds/publisher.h"
 
-#include <std_msgs/msg/StringPubSubTypes.h>
+#include <std_msgs/msg/StringPubSubTypes.hpp>
 
 int main()
 {
     const std::string topic_name{"provizio_dds_test_simplest_pub_sub_topic"};
     const std::string string{"provizio_dds_test"};
     const std::chrono::milliseconds publish_period{200};
-    const std::chrono::milliseconds initial_wait_time{2000}; // Give enough time for subscriber to run
+    const std::chrono::milliseconds initial_wait_time{2000};  // Give enough time for subscriber to run
     const int publish_times = 40;
 
     std::this_thread::sleep_for(initial_wait_time);
@@ -35,7 +35,7 @@ int main()
     message.data(string);
     int successful_times = 0;
 
-    std::cout << "simplest_publisher: Publishing..." << std::endl;
+    std::cout << "simplest_publisher: Publishing..." << '\n';
     for (int i = 0; i < publish_times; ++i)
     {
         successful_times += publisher->publish(message) ? 1 : 0;
@@ -43,7 +43,7 @@ int main()
     }
 
     std::cout << "simplest_publisher: Successfully published " << successful_times << " times out of " << publish_times
-              << " attempts" << std::endl;
+              << " attempts" << '\n';
 
     return successful_times > 0 ? 0 : 1;
 }

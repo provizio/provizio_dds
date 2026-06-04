@@ -20,8 +20,8 @@
 
 #include "provizio/dds/request_response.h"
 
-#include <std_msgs/msg/Int32PubSubTypes.h>
-#include <std_msgs/msg/Int64PubSubTypes.h>
+#include <std_msgs/msg/Int32PubSubTypes.hpp>
+#include <std_msgs/msg/Int64PubSubTypes.hpp>
 
 constexpr const char *log_prefix = "request_response_concurrent_client: ";
 
@@ -32,7 +32,7 @@ try
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr std::chrono::seconds time_to_match{5};
     constexpr std::chrono::milliseconds timeout{
-        10000}; // DDS entity matching can be slow on some platforms (e.g. Windows)
+        10000};  // DDS entity matching can be slow on some platforms (e.g. Windows)
 
     // These are x and x^2 pairs, except of those with expected values of 0 which means we want to interrupt the
     // requests and make sure all behaves well
@@ -49,7 +49,7 @@ try
     for (const auto &request_response_pair : expected_request_response_pairs)
     {
         std::cout << log_prefix << "Requesting " << request_response_pair.first << " with expected response of "
-                  << request_response_pair.second << "..." << std::endl;
+                  << request_response_pair.second << "..." << '\n';
 
         std_msgs::msg::Int32 request;
         request.data(request_response_pair.first);
@@ -73,7 +73,7 @@ try
             if (status != std::future_status::ready)
             {
                 std::cerr << log_prefix << "Timeout waiting when " << request_response_pair.second << " was expected!"
-                          << std::endl;
+                          << '\n';
                 return 1;
             }
 
@@ -81,24 +81,24 @@ try
             if (received != request_response_pair.second)
             {
                 std::cerr << log_prefix << "Unexpected value received from test_service! "
-                          << request_response_pair.second << " expected, " << received << " received." << std::endl;
+                          << request_response_pair.second << " expected, " << received << " received." << '\n';
                 return 1;
             }
 
-            std::cout << log_prefix << "Correctly got expected response = " << received << std::endl;
+            std::cout << log_prefix << "Correctly got expected response = " << received << '\n';
         }
 
         // Validates normal destroying or interrupting requests works fine and doesn't affect following requests
         request_response_pair.first.reset();
     }
 
-    std::cout << log_prefix << "Successfully complete" << std::endl;
+    std::cout << log_prefix << "Successfully complete" << '\n';
 
     return 0;
 }
 catch (const std::exception &exception)
 {
-    std::cout << log_prefix << "Exception during the test: " << exception.what() << std::endl;
+    std::cout << log_prefix << "Exception during the test: " << exception.what() << '\n';
 
     return 1;
 }

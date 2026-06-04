@@ -84,6 +84,6 @@ namespace provizio::dds
         Topic *const the_topic;
         const TopicQos the_qos;
     };
-} // namespace provizio::dds
+}  // namespace provizio::dds
 
-#endif // DDS_TOPIC
+#endif  // DDS_TOPIC

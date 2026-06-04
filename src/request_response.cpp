@@ -57,8 +57,8 @@ namespace provizio::dds::detail
                       "guid_size must be dividable by sizeof(std::uint32_t)");
         static_assert(sizeof(std::array<std::uint32_t, size_in_uints>) == sizeof(the_guid), "Sizes mismatch");
 
-        std::array<std::uint32_t, size_in_uints> plain_guid;  // NOLINT: Initialized next line
-        std::memcpy(plain_guid.data(), &the_guid, guid_size); // NOLINT: memcpy is required here
+        std::array<std::uint32_t, size_in_uints> plain_guid;   // NOLINT: Initialized next line
+        std::memcpy(plain_guid.data(), &the_guid, guid_size);  // NOLINT: memcpy is required here
 
         constexpr std::size_t prime_1 = 7;
         constexpr std::size_t prime_2 = 31;
@@ -71,4 +71,4 @@ namespace provizio::dds::detail
 
         return hash;
     }
-} // namespace provizio::dds::detail
+}  // namespace provizio::dds::detail

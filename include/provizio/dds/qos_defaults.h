@@ -15,8 +15,8 @@
 #ifndef DDS_QOS_DEFAULTS
 #define DDS_QOS_DEFAULTS
 
-#include <fastdds/rtps/resources/ResourceManagement.h>
-#include <fastrtps/qos/QosPolicies.h>
+#include <fastdds/dds/core/policy/QosPolicies.hpp>
+#include <fastdds/rtps/attributes/ResourceManagement.hpp>
 
 #include "provizio/dds/common.h"
 
@@ -55,7 +55,7 @@ namespace provizio::dds
          * @see
          * https://fast-dds.docs.eprosima.com/en/latest/fastdds/api_reference/rtps/resources/MemoryManagementPolicy.html
          */
-        static constexpr auto memory_policy = eprosima::fastrtps::rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
+        static constexpr auto memory_policy = eprosima::fastdds::rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
     };
 
     /**
@@ -67,6 +67,6 @@ namespace provizio::dds
      * @brief Sentinel value for history_depth / max_history_depth parameters: force VOLATILE durability (no history).
      */
     constexpr std::int32_t no_history = 0;
-} // namespace provizio::dds
+}  // namespace provizio::dds
 
-#endif // DDS_QOS_DEFAULTS
+#endif  // DDS_QOS_DEFAULTS

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code and other AI agents when working with
 
 ## Project Overview
 
-provizio_dds is a C++17/Python DDS communication library built on eProsima Fast-DDS (v2.14.2). It provides RAII-based pub/sub and request/response abstractions compatible with ROS 2 (Humble+ for pub/sub, Jazzy+ for request/response). Licensed under Apache 2.0.
+provizio_dds is a C++17/Python DDS communication library built on eProsima Fast-DDS (v3.6.x). It provides RAII-based pub/sub and request/response abstractions compatible with ROS 2 (Humble+ for pub/sub, Jazzy+ for request/response). Licensed under Apache 2.0.
 
 ## Quality Standards
 
@@ -67,7 +67,7 @@ sudo ./install_dependencies.sh [PYTHON=OFF|ON] [STATIC_ANALYSIS=OFF|ON]
 
 Two shared libraries are produced:
 
-- **provizio_dds_types** — Generated DDS type support code from IDLs (`provizio_dds_idls` repo, fetched via CMake FetchContent). Links to `fastrtps` and `fastcdr`.
+- **provizio_dds_types** — Generated DDS type support code from IDLs (`provizio_dds_idls` repo, fetched via CMake FetchContent). Links to `fastdds` and `fastcdr`.
 - **provizio_dds** — The main library with RAII wrappers. Links to `provizio_dds_types`.
 
 ### Core C++ API (include/provizio/dds/)
@@ -101,7 +101,7 @@ Python bindings require SWIG 4.0+ and are generated from Fast-DDS-python + provi
 - `PROVIZIO_DDS_API` macro in `common.h`: `__declspec(dllexport)` when building, `__declspec(dllimport)` when consuming. Must be applied to all non-template public symbols.
 - `PROVIZIO_DDS_EXPORTS` / `PROVIZIO_DDS_TYPES_EXPORTS` are set via CMake `DEFINE_SYMBOL` property per target.
 - `EPROSIMA_ALL_DYN_LINK` enables `__declspec(dllimport)` for eProsima symbols; `EPROSIMA_ALL_NO_LIB` disables MSVC auto-linking `#pragma comment(lib, ...)`.
-- MSVC uses versioned library names (e.g., `fastrtps-2.14.lib`).
+- MSVC uses versioned library names (e.g., `fastdds-3.6.lib`).
 - Python extension modules use `.pyd` on Windows (vs `.so` on Linux/macOS). Each `.pyd` links against a specific `pythonXY.dll`, so every minor Python version needs its own build.
 
 ### Dependency Management
@@ -125,8 +125,8 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
 | `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS` | OFF | Disable Provizio coding standards (clang-tidy, formatting) |
 | `STATIC_ANALYSIS` | OFF | Enable clang-tidy static analysis (requires coding standards checks enabled; not supported on macOS+clang) |
 | `INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS` | OFF | Linux: use versioned .so names to avoid runtime conflicts |
-| `FAST_DDS_VERSION` | "v2.14.2" | Fast-DDS Git tag to build from source |
-| `FAST_CDR_VERSION` | "2.2" | Fast-CDR major.minor version for Windows versioned library naming (must match FAST_DDS_VERSION bundle) |
+| `FAST_DDS_VERSION` | "v3.6.1" | Fast-DDS Git tag to build from source |
+| `FAST_CDR_VERSION` | "2.3" | Fast-CDR major.minor version for Windows versioned library naming (must match FAST_DDS_VERSION bundle) |
 | `DONT_INSTALL_STDCPP_LIBS` | ON | When installing from prebuilt binaries, skip standard C++ libraries |
 
 ## Git Workflow

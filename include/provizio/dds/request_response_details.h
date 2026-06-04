@@ -24,7 +24,6 @@
 #include <exception>
 #include <functional>
 #include <future>
-#include <iostream>
 #include <limits>
 #include <mutex>
 #include <queue>
@@ -32,12 +31,14 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
-#include <fastdds/rtps/common/SampleIdentity.h>
+#include <fastdds/rtps/common/SampleIdentity.hpp>
 
 #include "provizio/dds/common.h"
 #include "provizio/dds/function_traits.h"
 #include "provizio/dds/ignore_request.h"
+#include "provizio/dds/logging.h"
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/subscriber.h"
 
@@ -87,7 +88,7 @@ namespace provizio::dds::detail
 
     template <typename response_pub_sub_type>
     using on_response_function_type =
-        std::function<void(typename response_pub_sub_type::type, const eprosima::fastrtps::rtps::SampleIdentity &)>;
+        std::function<void(typename response_pub_sub_type::type, const eprosima::fastdds::rtps::SampleIdentity &)>;
 
     /**
      * @brief Thread-safe storage for a single response value.
@@ -145,12 +146,12 @@ namespace provizio::dds::detail
          * @brief Enqueue a new request for processing.
          */
         void handle_request(typename request_pub_sub_type::type request,
-                            const eprosima::fastrtps::rtps::SampleIdentity &identity);
+                            const eprosima::fastdds::rtps::SampleIdentity &identity);
 
       private:
         void process_requests();
 
-        using queued_request = std::pair<typename request_pub_sub_type::type, eprosima::fastrtps::rtps::SampleIdentity>;
+        using queued_request = std::pair<typename request_pub_sub_type::type, eprosima::fastdds::rtps::SampleIdentity>;
 
         const std::size_t max_queue_size;
         const handle_request_function_type handle_request_function;
@@ -193,7 +194,7 @@ namespace provizio::dds::detail
          * @brief Submits a request whose response is produced asynchronously.
          */
         void handle_request(const typename request_pub_sub_type::type &request,
-                            const eprosima::fastrtps::rtps::SampleIdentity &identity);
+                            const eprosima::fastdds::rtps::SampleIdentity &identity);
 
       private:
         using future_type = typename function_traits<handle_request_function_type>::return_type;
@@ -207,7 +208,7 @@ namespace provizio::dds::detail
         std::mutex mutex;
         bool stop{false};
         std::condition_variable cv;
-        std::vector<std::pair<future_type, eprosima::fastrtps::rtps::SampleIdentity>> futures;
+        std::vector<std::pair<future_type, eprosima::fastdds::rtps::SampleIdentity>> futures;
         std::thread handler_thread;
     };
 
@@ -240,7 +241,7 @@ namespace provizio::dds::detail
 
     template <typename response_type> struct request_context
     {
-        using sample_identity = eprosima::fastrtps::rtps::SampleIdentity;
+        using sample_identity = eprosima::fastdds::rtps::SampleIdentity;
 
         /**
          * @brief Propagates an exception to the shared response, if it is still alive.
@@ -419,8 +420,9 @@ namespace provizio::dds::detail
               typename sfinae_placeholder>
     void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
                          sfinae_placeholder>::handle_request(typename request_pub_sub_type::type request,
-                                                             const eprosima::fastrtps::rtps::SampleIdentity &identity)
+                                                             const eprosima::fastdds::rtps::SampleIdentity &identity)
     {
+        bool queue_full = false;
         {
             const std::lock_guard<std::mutex> lock{requests_queue_mutex};
             if (requests_queue.size() < max_queue_size)
@@ -429,8 +431,15 @@ namespace provizio::dds::detail
             }
             else
             {
-                std::cerr << requests_queue_full_error_message << std::endl;
+                queue_full = true;
             }
+        }
+        // Logged outside the lock: the user-supplied log callback may call back
+        // into provizio_dds APIs, so emitting under requests_queue_mutex risks
+        // deadlock / unbounded blocking on a hot publish path.
+        if (queue_full)
+        {
+            log_error() << requests_queue_full_error_message;
         }
         cv.notify_all();
     }
@@ -499,24 +508,34 @@ namespace provizio::dds::detail
     void request_handler<request_pub_sub_type, response_pub_sub_type, handle_request_function_type,
                          std::enable_if_t<returns_future<handle_request_function_type>::value>>::
         handle_request(const typename request_pub_sub_type::type &request,
-                       const eprosima::fastrtps::rtps::SampleIdentity &identity)
+                       const eprosima::fastdds::rtps::SampleIdentity &identity)
     {
-        const std::lock_guard<std::mutex> lock{mutex};
-        if (futures.size() < max_queue_size)
+        bool queue_full = false;
         {
-            try
+            const std::lock_guard<std::mutex> lock{mutex};
+            if (futures.size() < max_queue_size)
             {
-                // Handler may throw ignore_request before returning a future
-                futures.emplace_back(handle_request_function(request), identity);
+                try
+                {
+                    // Handler may throw ignore_request before returning a future
+                    futures.emplace_back(handle_request_function(request), identity);
+                }
+                catch (const ignore_request &)
+                {
+                    // Silently drop
+                }
             }
-            catch (const ignore_request &)
+            else
             {
-                // Silently drop
+                queue_full = true;
             }
         }
-        else
+        // Logged outside the lock: the user-supplied log callback may call back
+        // into provizio_dds APIs, so emitting under mutex risks deadlock /
+        // unbounded blocking on a hot publish path.
+        if (queue_full)
         {
-            std::cerr << requests_queue_full_error_message << std::endl;
+            log_error() << requests_queue_full_error_message;
         }
     }
 
@@ -658,7 +677,7 @@ namespace provizio::dds::detail
                 }
 
                 std::unique_lock<std::mutex> lock{mutex};
-                matched = true; // It's OK even if there was an timeout|stop|error as error is already set then
+                matched = true;  // It's OK even if there was an timeout|stop|error as error is already set then
                 request_deferred_mutex_prelocked();
                 return matched;
             });
@@ -758,6 +777,6 @@ namespace provizio::dds::detail
         return stop;
     }
 
-} // namespace provizio::dds::detail
+}  // namespace provizio::dds::detail
 
-#endif // DDS_REQUEST_RESPONSE_DETAILS
+#endif  // DDS_REQUEST_RESPONSE_DETAILS

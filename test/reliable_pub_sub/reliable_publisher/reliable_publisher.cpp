@@ -18,7 +18,7 @@
 
 #include "provizio/dds/publisher.h"
 
-#include <std_msgs/msg/StringPubSubTypes.h>
+#include <std_msgs/msg/StringPubSubTypes.hpp>
 
 int main()
 {
@@ -59,7 +59,7 @@ int main()
 
         if (!was_matched)
         {
-            std::cerr << "reliable_publisher: Never published due to no subscribers matched in time" << std::endl;
+            std::cerr << "reliable_publisher: Never published due to no subscribers matched in time" << '\n';
             return 1;
         }
     }
@@ -71,7 +71,7 @@ int main()
 
     if (!published)
     {
-        std::cerr << "reliable_publisher: Matched, but publishing failed" << std::endl;
+        std::cerr << "reliable_publisher: Matched, but publishing failed" << '\n';
         return 1;
     }
 
@@ -81,11 +81,11 @@ int main()
     if (!unmatched)
     {
         std::cerr << "reliable_publisher: Though published successfully, the subscriber hasn't unmatched in time"
-                  << std::endl;
+                  << '\n';
         return 1;
     }
 
-    std::cout << "reliable_publisher: Success" << std::endl;
+    std::cout << "reliable_publisher: Success" << '\n';
 
     return 0;
 }

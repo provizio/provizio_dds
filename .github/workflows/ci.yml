@@ -4,6 +4,14 @@ on:
   workflow_dispatch:
   pull_request:
 
+# Cancel any in-progress run for the same PR (or, for workflow_dispatch,
+# the same ref) when a new run starts. Without this, every push to a
+# feature branch racks up parallel runs on stale commits — wastes runners
+# and lets the auto-committed bin-cache jobs land on top of force-pushes.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-cache:
     name: Build bin cache (C++ only)
@@ -427,6 +435,17 @@ jobs:
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DPYTHON_BINDINGS=${{matrix.with_python}} -DENABLE_TESTS=ON -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON -DENABLE_ROS_TESTS=OFF
       - name: Build
         run: cmake --build build -- -j 16
+      - name: Setup legacy provizio_dds 1.10.1 venv for cross-version compat
+        if: matrix.with_python == 'ON'
+        shell: bash
+        run: |
+          # Cross-version interop test against the deployed-fleet 1.10.1
+          # baseline. test/python/setup_legacy_provizio_dds_venv.sh is
+          # cross-platform via OSTYPE detection; on the Windows runner it
+          # picks the Scripts/python.exe layout. Failure here is fatal in
+          # CI to keep the cross-version matrix from silently skipping.
+          venv_python=$(./test/python/setup_legacy_provizio_dds_venv.sh)
+          echo "PROVIZIO_DDS_LEGACY_PYTHON=${venv_python}" >> "${GITHUB_ENV}"
       - name: Test
         run: cd build && ctest --output-on-failure
 
@@ -479,6 +498,22 @@ jobs:
           except Exception as e:
               print('ERROR:', type(e).__name__, e)
           "
+      - name: Setup legacy provizio_dds 1.10.1 venv for cross-version compat
+        # Skip on Python 3.8 — the legacy provizio_dds 1.10.1 source build
+        # via pip fails before any output on the EOL'd Python 3.8 Windows
+        # toolchain (WinError 2 from the venv bootstrap). The matching
+        # CMake guard in test/python/CMakeLists.txt drops
+        # cross_version_compat_test from the registered set on this combo,
+        # so the test step doesn't try to run it. Python 3.9+ stays on.
+        if: matrix.python-version != '3.8'
+        shell: bash
+        run: |
+          # Cross-version interop test against the deployed-fleet 1.10.1
+          # baseline. The bash script is cross-platform; under Git Bash on
+          # the Windows runner it builds the venv at Scripts/python.exe.
+          # PYTHON_BINDINGS is always ON in this job, so no gating needed.
+          venv_python=$(./test/python/setup_legacy_provizio_dds_venv.sh)
+          echo "PROVIZIO_DDS_LEGACY_PYTHON=${venv_python}" >> "${GITHUB_ENV}"
       - name: Test
         run: cd build && ctest --output-on-failure
 

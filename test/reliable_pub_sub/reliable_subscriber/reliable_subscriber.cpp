@@ -18,7 +18,7 @@
 
 #include "provizio/dds/subscriber.h"
 
-#include <std_msgs/msg/StringPubSubTypes.h>
+#include <std_msgs/msg/StringPubSubTypes.hpp>
 
 int main()
 {
@@ -56,11 +56,11 @@ int main()
         if (!string.empty())
         {
             std::cerr << "reliable_subscriber: Despite receiving a message: " << string << ", ever_matched is false"
-                      << std::endl;
+                      << '\n';
         }
         else
         {
-            std::cerr << "reliable_subscriber: Never matched a publisher" << std::endl;
+            std::cerr << "reliable_subscriber: Never matched a publisher" << '\n';
         }
         return 1;
     }
@@ -68,11 +68,11 @@ int main()
     if (string != expected_value)
     {
         std::cerr << "reliable_subscriber: Though a publisher was matched, " << expected_value << " was expected but "
-                  << (string.empty() ? "nothing" : string) << " was received!" << std::endl;
+                  << (string.empty() ? "nothing" : string) << " was received!" << '\n';
         return 1;
     }
 
-    std::cout << "reliable_subscriber: Success" << std::endl;
+    std::cout << "reliable_subscriber: Success" << '\n';
 
     return 0;
 }

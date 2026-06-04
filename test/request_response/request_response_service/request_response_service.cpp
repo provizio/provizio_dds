@@ -20,8 +20,8 @@
 
 #include "provizio/dds/request_response.h"
 
-#include <std_msgs/msg/Int32PubSubTypes.h>
-#include <std_msgs/msg/Int64PubSubTypes.h>
+#include <std_msgs/msg/Int32PubSubTypes.hpp>
+#include <std_msgs/msg/Int64PubSubTypes.hpp>
 
 int main(int argc, char *argv[])
 {
@@ -33,7 +33,7 @@ int main(int argc, char *argv[])
     constexpr std::chrono::seconds end_sleep{4};
     // Optional argument: "serial_requests" => use default QoS durability (no history),
     // otherwise keep transient local with depth = requests_expected
-    const bool serial_requests = (argc >= 2 && std::string(argv[1]) == "serial_requests"); // NOLINT
+    const bool serial_requests = (argc >= 2 && std::string(argv[1]) == "serial_requests");  // NOLINT
     const std::int32_t max_history_depth =
         serial_requests ? provizio::dds::use_default_qos_durability : requests_expected;
 
@@ -43,7 +43,7 @@ int main(int argc, char *argv[])
 
     auto domain_participant = provizio::dds::make_domain_participant(domain_id);
 
-    std::cout << log_prefix << "Waiting for requests..." << std::endl;
+    std::cout << log_prefix << "Waiting for requests..." << '\n';
     auto service = provizio::dds::make_service<std_msgs::msg::Int32PubSubType, std_msgs::msg::Int64PubSubType>(
         domain_participant, service_name,
         [&](const std_msgs::msg::Int32 &request) {
@@ -51,7 +51,7 @@ int main(int argc, char *argv[])
 
             const std::int64_t value = static_cast<std::int64_t>(request.data()) * request.data();
 
-            std::cout << log_prefix << "Processing request " << request.data() << " => " << value << std::endl;
+            std::cout << log_prefix << "Processing request " << request.data() << " => " << value << '\n';
             std::this_thread::sleep_for(std::chrono::milliseconds{value});
 
             response.data(value);
@@ -68,7 +68,7 @@ int main(int argc, char *argv[])
                 lock.unlock();
             }
 
-            std::cout << log_prefix << "Response sent (" << request.data() << " => " << value << ")" << std::endl;
+            std::cout << log_prefix << "Response sent (" << request.data() << " => " << value << ")" << '\n';
             return response;
         },
         max_history_depth);
@@ -76,13 +76,13 @@ int main(int argc, char *argv[])
     std::unique_lock<std::mutex> lock{mutex};
     if (!condition_variable.wait_for(lock, total_timeout, [&]() { return got_requests >= requests_expected; }))
     {
-        std::cerr << log_prefix << "Timeout! Got " << got_requests << " requests so far" << std::endl;
+        std::cerr << log_prefix << "Timeout! Got " << got_requests << " requests so far" << '\n';
         return 1;
     }
 
     // Make sure to deliver the last response
     std::this_thread::sleep_for(end_sleep);
 
-    std::cout << log_prefix << "Successfully sent all the responses" << std::endl;
+    std::cout << log_prefix << "Successfully sent all the responses" << '\n';
     return 0;
 }
