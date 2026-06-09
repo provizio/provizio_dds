@@ -48,6 +48,26 @@ add_test(NAME request_response_concurrent_requests_serial_service COMMAND
     "\"$<TARGET_FILE:request_response_concurrent_requests>\""
 )
 
+# service_client (created in advance; many requests, each returning its own future_response): reuse the
+# existing x^2 services. Consecutive requests after an explicit wait_for_service():
+add_test(NAME request_response_service_client COMMAND
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"$<TARGET_FILE:request_response_service>\" serial_requests"
+    "\"$<TARGET_FILE:request_response_service_client>\""
+)
+# Parallel requests fired immediately (exercises the auto-defer-until-matched path):
+add_test(NAME request_response_concurrent_requests_service_client COMMAND
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"$<TARGET_FILE:request_response_service>\""
+    "\"$<TARGET_FILE:request_response_concurrent_requests_service_client>\""
+)
+# Parallel requests against an async service, with mid-flight future_response destruction:
+add_test(NAME request_response_concurrent_service_client COMMAND
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"$<TARGET_FILE:request_response_concurrent_service>\" 7"
+    "\"$<TARGET_FILE:request_response_concurrent_service_client>\""
+)
+
 add_test(NAME request_response_dual_service_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "\"$<TARGET_FILE:request_response_dual_service>\""
@@ -71,6 +91,9 @@ if(WIN32)
     set_tests_properties(request_response PROPERTIES TIMEOUT 60)
     set_tests_properties(
         request_response_concurrent_requests_serial_service
+        request_response_service_client
+        request_response_concurrent_requests_service_client
+        request_response_concurrent_service_client
         request_response_dual_service_test
         PROPERTIES TIMEOUT 60)
     set_tests_properties(
@@ -83,6 +106,9 @@ if(WIN32)
         request_response_reliability
         request_response_reliability_single_service
         request_response_concurrent_requests_serial_service
+        request_response_service_client
+        request_response_concurrent_requests_service_client
+        request_response_concurrent_service_client
         request_response_dual_service_test
         request_response_ignore
         request_response_ignore_async
@@ -92,6 +118,9 @@ else()
     set_tests_properties(request_response PROPERTIES TIMEOUT 30)
     set_tests_properties(
         request_response_concurrent_requests_serial_service
+        request_response_service_client
+        request_response_concurrent_requests_service_client
+        request_response_concurrent_service_client
         request_response_dual_service_test
         PROPERTIES TIMEOUT 30)
     set_tests_properties(

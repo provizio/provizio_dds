@@ -62,6 +62,16 @@ subscriber = provizio_dds.Subscriber(
     provizio_dds.String,
     on_message,
     on_matched,
+    # Use an explicit (eager) reader rather than the match-publisher default. This test
+    # verifies DATA DELIVERY under heavy congestion, not discovery latency. The
+    # match-publisher default defers DataReader creation until the writer is discovered,
+    # which serializes discovery into two round-trips (discover writer -> build reader ->
+    # match); under extreme congestion (75% load) that tail latency can exceed the match
+    # window and flake. An eager reader matches via a single parallel SEDP exchange,
+    # keeping this delivery test deterministic. BEST_EFFORT restores the historical
+    # default for this test; the match-publisher default is covered by
+    # match_publisher_default_test.
+    reliability_kind=provizio_dds.BEST_EFFORT_RELIABILITY_QOS,
 )
 
 print(f"{name} {test_time()}: Waiting till matched...")

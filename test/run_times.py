@@ -29,6 +29,20 @@ import sys
 import subprocess
 import time
 
+# Real-time, kill-safe logging: this runner is long-lived (one process for all N
+# iterations), so its own stdout -- block-buffered when CTest captures it through a
+# pipe -- would otherwise be flushed only at exit, piling every "Iteration #i:" header
+# up at the end of the log, detached from the per-iteration child output it labels.
+# Line-buffer our own streams so each header lands in real time, and export
+# PYTHONUNBUFFERED so every spawned child (inherited via the Popen/call calls below)
+# flushes immediately too -- that way a child's output survives even a SIGKILL on timeout.
+os.environ["PYTHONUNBUFFERED"] = "1"
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
 # Unset ROS environment variables to avoid interference (cross-platform equivalent of unset_ros.sh)
 ament = os.environ.get("AMENT_PREFIX_PATH", "")
 if ament:

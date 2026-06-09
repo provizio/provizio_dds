@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import asyncio
+import sys
 import provizio_dds
 
 log_prefix = "python_request_response_dual_service: "
@@ -88,6 +89,6 @@ async def main():
     return rc
 
 
-exit(asyncio.run(main()))
+sys.exit(asyncio.run(main()))
 
 

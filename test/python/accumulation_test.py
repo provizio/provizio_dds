@@ -94,6 +94,7 @@ def test_accumulate_move_no_extrinsics():
         provizio_dds.accumulation.RigidTransform(ego_pos_1, no_rotation),
     )
 
+    _wait_for_accumulated_points(accumulator, 3)
     accumulated_points_local_frame_relative = (
         accumulator.get_points_local_frame_relative()
     )
@@ -178,6 +179,7 @@ def test_accumulate_move_simple_extrinsics():
         ),
     )
 
+    _wait_for_accumulated_points(accumulator, 3)
     accumulated_points_local_frame_relative = (
         accumulator.get_points_local_frame_relative()
     )
@@ -964,6 +966,47 @@ def publish_pc2(
     assert publisher.publish(message), "Failed to publish a PointCloud2 message"
 
 
+def _wait_until_matched(*publishers, timeout_sec=15.0):
+    """Block until each publisher has at least one matched subscriber.
+
+    With the match-publisher reader default, the accumulator's subscribers are
+    DEFERRED: the DataReader is created only after a writer is discovered, then matches
+    ~1 s later. A fixed sleep before a one-shot publish therefore races that match and
+    can silently drop early samples — a RELIABLE writer does not deliver a sample to a
+    reader that matched after the write (default VOLATILE durability). Waiting for the
+    real match keeps these one-shot-publish tests deterministic, mirroring the C++
+    tests' get_num_matched / publish_and_wait_for gating."""
+    for publisher in publishers:
+        assert (
+            publisher.get_num_matched_subscribers(timeout_sec, 0.0) > 0
+        ), f"accumulation_test: a subscriber failed to match within {timeout_sec}s"
+
+
+def _wait_for_accumulated_points(accumulator, expected, timeout_sec=10.0):
+    """Wait until the accumulator holds at least ``expected`` points.
+
+    In the DDS-fed tests the point-cloud writer is ASYNCHRONOUS and (with the
+    match-publisher default) the accumulator's reader is RELIABLE, so a one-shot publish
+    is delivered and processed a short time AFTER publish() returns — reading the count
+    immediately would race that delivery. Waiting for the count avoids that race; a
+    timeout here therefore indicates real sample loss rather than mere latency. For the
+    synchronous (non-DDS) tests the points are already accumulated, so this returns at
+    once."""
+    deadline = time.monotonic() + timeout_sec
+    while (
+        len(accumulator.get_points_local_frame_relative()) < expected
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.02)
+    # Fail here with a clear cause on timeout (real sample loss, per the docstring) rather
+    # than letting it surface later as a less-direct count-mismatch assertion at the caller.
+    actual = len(accumulator.get_points_local_frame_relative())
+    assert actual >= expected, (
+        f"timed out after {timeout_sec}s waiting for {expected} accumulated points, "
+        f"got {actual} (likely sample loss)"
+    )
+
+
 def test_accumulate_dds_simple():
     localization_topic = "rt/test_localization_topic"
     pointcloud2_topic = "rt/test_pointcloud2_topic"
@@ -1012,13 +1055,14 @@ def test_accumulate_dds_simple():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
-    # (stable-match settling window), longer under CI load. The old 0.3 s
-    # window was borderline on slow runners — a publish in the not-yet-
-    # matched window is silently dropped by BEST_EFFORT readers, which
-    # is the default for DDSPointCloudsAccumulator's subscriber.
-    # 2 s is conservative and keeps these tests deterministic.
-    time.sleep(2.0)
+    # Wait until EVERY publisher in this test actually has a matched subscriber before
+    # the one-shot publishes below. With the match-publisher reader default the
+    # accumulator's subscribers are DEFERRED (the DataReader is created only once a
+    # writer is discovered, then matches ~1 s later), so a fixed sleep would race the
+    # match and silently drop early samples. Each publisher is awaited independently:
+    # reader match order is NOT publisher creation order, so it is not safe to wait on
+    # one and assume the rest matched. Mirrors the C++ tests' get_num_matched gating.
+    _wait_until_matched(localization_publisher, pc2_publisher)
     publish_odometry(
         localization_publisher,
         provizio_dds.accumulation.RigidTransform(ego_pos_0, no_rotation),
@@ -1040,6 +1084,7 @@ def test_accumulate_dds_simple():
         provizio_dds.accumulation.RigidTransform(ego_pos_now, no_rotation),
     )
 
+    _wait_for_accumulated_points(accumulator, 3)
     accumulated_points_local_frame_relative = (
         accumulator.get_points_local_frame_relative()
     )
@@ -1144,13 +1189,14 @@ def test_accumulate_dds_simple_extrinsics():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
-    # (stable-match settling window), longer under CI load. The old 0.3 s
-    # window was borderline on slow runners — a publish in the not-yet-
-    # matched window is silently dropped by BEST_EFFORT readers, which
-    # is the default for DDSPointCloudsAccumulator's subscriber.
-    # 2 s is conservative and keeps these tests deterministic.
-    time.sleep(2.0)
+    # Wait until EVERY publisher in this test actually has a matched subscriber before
+    # the one-shot publishes below. With the match-publisher reader default the
+    # accumulator's subscribers are DEFERRED (the DataReader is created only once a
+    # writer is discovered, then matches ~1 s later), so a fixed sleep would race the
+    # match and silently drop early samples. Each publisher is awaited independently:
+    # reader match order is NOT publisher creation order, so it is not safe to wait on
+    # one and assume the rest matched. Mirrors the C++ tests' get_num_matched gating.
+    _wait_until_matched(extrinsics_publisher, localization_publisher, pc2_publisher)
     publish_extrinsics(
         extrinsics_publisher,
         provizio_dds.accumulation.RigidTransform(radar_extrinsics_pos, no_rotation),
@@ -1178,6 +1224,7 @@ def test_accumulate_dds_simple_extrinsics():
         provizio_dds.accumulation.RigidTransform(ego_pos_now, no_rotation),
     )
 
+    _wait_for_accumulated_points(accumulator, 3)
     accumulated_points_local_frame_relative = (
         accumulator.get_points_local_frame_relative()
     )
@@ -1340,13 +1387,14 @@ def test_accumulate_dds_simple_extrinsics_including_localization():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
-    # (stable-match settling window), longer under CI load. The old 0.3 s
-    # window was borderline on slow runners — a publish in the not-yet-
-    # matched window is silently dropped by BEST_EFFORT readers, which
-    # is the default for DDSPointCloudsAccumulator's subscriber.
-    # 2 s is conservative and keeps these tests deterministic.
-    time.sleep(2.0)
+    # Wait until EVERY publisher in this test actually has a matched subscriber before
+    # the one-shot publishes below. With the match-publisher reader default the
+    # accumulator's subscribers are DEFERRED (the DataReader is created only once a
+    # writer is discovered, then matches ~1 s later), so a fixed sleep would race the
+    # match and silently drop early samples. Each publisher is awaited independently:
+    # reader match order is NOT publisher creation order, so it is not safe to wait on
+    # one and assume the rest matched. Mirrors the C++ tests' get_num_matched gating.
+    _wait_until_matched(radar_extrinsics_publisher, localization_extrinsics_publisher, localization_publisher, pc2_publisher)
     publish_extrinsics(
         radar_extrinsics_publisher,
         provizio_dds.accumulation.RigidTransform(
@@ -1395,6 +1443,7 @@ def test_accumulate_dds_simple_extrinsics_including_localization():
         frame_id=localization_frame_id,
     )
 
+    _wait_for_accumulated_points(accumulator, 3)
     accumulated_points_local_frame_relative = (
         accumulator.get_points_local_frame_relative()
     )
@@ -1487,16 +1536,18 @@ def test_accumulate_dds_no_localization_no_extrinsics():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
-    # (stable-match settling window), longer under CI load. The old 0.3 s
-    # window was borderline on slow runners — a publish in the not-yet-
-    # matched window is silently dropped by BEST_EFFORT readers, which
-    # is the default for DDSPointCloudsAccumulator's subscriber.
-    # 2 s is conservative and keeps these tests deterministic.
-    time.sleep(2.0)
+    # Wait until EVERY publisher in this test actually has a matched subscriber before
+    # the one-shot publishes below. With the match-publisher reader default the
+    # accumulator's subscribers are DEFERRED (the DataReader is created only once a
+    # writer is discovered, then matches ~1 s later), so a fixed sleep would race the
+    # match and silently drop early samples. Each publisher is awaited independently:
+    # reader match order is NOT publisher creation order, so it is not safe to wait on
+    # one and assume the rest matched. Mirrors the C++ tests' get_num_matched gating.
+    _wait_until_matched(pc2_publisher)
     publish_pc2(pc2_publisher, [point_0], radar_id)
     publish_pc2(pc2_publisher, [point_1, point_2], radar_id)
 
+    _wait_for_accumulated_points(accumulator, 3)
     accumulated_points_local_frame_relative = (
         accumulator.get_points_local_frame_relative()
     )
@@ -1572,13 +1623,14 @@ def test_accumulate_dds_no_localization_with_extrinsics():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
-    # (stable-match settling window), longer under CI load. The old 0.3 s
-    # window was borderline on slow runners — a publish in the not-yet-
-    # matched window is silently dropped by BEST_EFFORT readers, which
-    # is the default for DDSPointCloudsAccumulator's subscriber.
-    # 2 s is conservative and keeps these tests deterministic.
-    time.sleep(2.0)
+    # Wait until EVERY publisher in this test actually has a matched subscriber before
+    # the one-shot publishes below. With the match-publisher reader default the
+    # accumulator's subscribers are DEFERRED (the DataReader is created only once a
+    # writer is discovered, then matches ~1 s later), so a fixed sleep would race the
+    # match and silently drop early samples. Each publisher is awaited independently:
+    # reader match order is NOT publisher creation order, so it is not safe to wait on
+    # one and assume the rest matched. Mirrors the C++ tests' get_num_matched gating.
+    _wait_until_matched(extrinsics_publisher, pc2_publisher)
     publish_extrinsics(
         extrinsics_publisher,
         provizio_dds.accumulation.RigidTransform(radar_extrinsics_pos, no_rotation),
@@ -1588,6 +1640,7 @@ def test_accumulate_dds_no_localization_with_extrinsics():
     publish_pc2(pc2_publisher, [point_0], radar_id)
     publish_pc2(pc2_publisher, [point_1, point_2], radar_id)
 
+    _wait_for_accumulated_points(accumulator, 3)
     accumulated_points_local_frame_relative = (
         accumulator.get_points_local_frame_relative()
     )
@@ -1698,13 +1751,14 @@ def test_accumulate_dds_nav_sat_fix_localization():
         reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
     )
 
-    # Fast-DDS 3.x's endpoint-matching handshake takes ~1 s by default
-    # (stable-match settling window), longer under CI load. The old 0.3 s
-    # window was borderline on slow runners — a publish in the not-yet-
-    # matched window is silently dropped by BEST_EFFORT readers, which
-    # is the default for DDSPointCloudsAccumulator's subscriber.
-    # 2 s is conservative and keeps these tests deterministic.
-    time.sleep(2.0)
+    # Wait until EVERY publisher in this test actually has a matched subscriber before
+    # the one-shot publishes below. With the match-publisher reader default the
+    # accumulator's subscribers are DEFERRED (the DataReader is created only once a
+    # writer is discovered, then matches ~1 s later), so a fixed sleep would race the
+    # match and silently drop early samples. Each publisher is awaited independently:
+    # reader match order is NOT publisher creation order, so it is not safe to wait on
+    # one and assume the rest matched. Mirrors the C++ tests' get_num_matched gating.
+    _wait_until_matched(localization_publisher, pc2_publisher)
     publish_nav_sat_fix(
         localization_publisher,
         ego_fix_0,
@@ -1726,6 +1780,7 @@ def test_accumulate_dds_nav_sat_fix_localization():
         ego_fix_now,
     )
 
+    _wait_for_accumulated_points(accumulator, 3)
     accumulated_points_local_frame_relative = (
         accumulator.get_points_local_frame_relative()
     )

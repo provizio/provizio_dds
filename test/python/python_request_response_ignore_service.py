@@ -16,6 +16,7 @@
 
 import time
 import threading
+import sys
 import provizio_dds
 
 log_prefix = "python_request_response_ignore_service: "
@@ -78,4 +79,4 @@ def main():
     return 0
 
 
-exit(main())
+sys.exit(main())

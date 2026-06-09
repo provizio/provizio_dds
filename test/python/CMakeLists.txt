@@ -95,12 +95,54 @@ add_test(NAME python_request_response_async COMMAND
 )
 set_tests_properties(python_request_response_async PROPERTIES TIMEOUT 30)
 
+# ServiceClient (Python): created in advance, many requests each returning its own awaitable. Reuse the
+# existing x^2 services. Consecutive requests after an explicit wait_for_service():
+add_test(NAME python_request_response_service_client COMMAND
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_client.py"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_request_response_service_client PROPERTIES TIMEOUT 90)
+
+# Many parallel requests (asyncio.gather) against the async service:
+add_test(NAME python_request_response_concurrent_service_client COMMAND
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_concurrent.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_concurrent_service_client.py"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_request_response_concurrent_service_client PROPERTIES TIMEOUT 90)
+
+# Cross-compat: Python ServiceClient against the C++ service.
+add_test(NAME python_service_client_cpp_service COMMAND
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"$<TARGET_FILE:request_response_service>\" serial_requests"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_client.py"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_service_client_cpp_service PROPERTIES TIMEOUT 90)
+
+# Cross-compat: C++ service_client against the Python service.
+add_test(NAME cpp_service_client_python_service COMMAND
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
+    "\"$<TARGET_FILE:request_response_service_client>\""
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(cpp_service_client_python_service PROPERTIES TIMEOUT 90)
+
 # Add inter-iteration delay to let the OS release DDS resources between rapid
 # participant create/destroy cycles.
 set(PYTHON_RELIABILITY_DELAY_ARGS "--delay" "0.5")
 
+# Per-iteration harness timeout: kept above the client's own 30s request timeout
+# (python_request_response_reliability_client.py) so a stalled iteration reaches the
+# client's self-diagnostic ("Timeout waiting for response") and clean exit first, rather
+# than being SIGKILLed mid-request with no usable log. Purely a backstop for a fully hung
+# process -- healthy iterations complete in ~1-3s.
 add_test(NAME python_request_response_reliability COMMAND
-    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" ${PYTHON_RELIABILITY_DELAY_ARGS} "--timeout" "15" "128"
+    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" ${PYTHON_RELIABILITY_DELAY_ARGS} "--timeout" "40" "128"
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_service.py \"\" {i} 1 {i}"
     "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py \"\" {i} {i}"
@@ -251,6 +293,64 @@ foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
     endif()
 endforeach()
 
+# Discovered-endpoints / type-registry suite — Python mirror of the C++
+# test/discovered_endpoints/ subcommands.
+set(_PYTHON_DISCOVERED_ENDPOINTS_TEST_NAMES)
+foreach(_de_case type_registry discovers_writer kind_filter constructor_callback callback_receives_participant survives_reset unregister)
+    add_test(NAME python_discovered_endpoints_${_de_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        ./python_discovered_endpoints_test.py ${_de_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    list(APPEND _PYTHON_DISCOVERED_ENDPOINTS_TEST_NAMES python_discovered_endpoints_${_de_case})
+    # Deterministic subcommand (type_registry) finishes in milliseconds; the
+    # DDS-discovery ones have an internal 15s wait. `unregister` chains three
+    # such waits sequentially (pre-unregister, the control participant observing
+    # the post-unregister publisher, then post-re-register), so it gets double
+    # the ceiling to keep overhead margin under that 3x worst case on loaded
+    # runners.
+    if(_de_case STREQUAL "type_registry")
+        set_tests_properties(python_discovered_endpoints_${_de_case} PROPERTIES TIMEOUT 15)
+    elseif(_de_case STREQUAL "unregister")
+        set_tests_properties(python_discovered_endpoints_${_de_case} PROPERTIES TIMEOUT 90)
+    else()
+        set_tests_properties(python_discovered_endpoints_${_de_case} PROPERTIES TIMEOUT 45)
+    endif()
+endforeach()
+
+# Match-publisher reader-reliability default — Python mirror of the C++
+# test/match_publisher_default/ subcommands. A default-reliability subscriber
+# defers creating its DataReader until a matching writer is discovered, then
+# adopts that writer's reliability; an explicit reliability builds eagerly. Each
+# subcommand is its own ctest entry so per-case failure stays isolated — same
+# pattern as python_discovered_endpoints_*. Every case either resolves a real
+# cross-participant match (internal 15s wait) or, for the deferral case, returns
+# near-instantly; the DDS ceiling covers all of them.
+set(_PYTHON_MATCH_PUBLISHER_TEST_NAMES)
+foreach(_mp_case deferral adopts_reliable adopts_best_effort explicit_best_effort explicit_reliable participant_dropped heterogeneous_rederive)
+    add_test(NAME python_match_publisher_default_${_mp_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        ./python_match_publisher_default_test.py ${_mp_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    list(APPEND _PYTHON_MATCH_PUBLISHER_TEST_NAMES python_match_publisher_default_${_mp_case})
+    set_tests_properties(python_match_publisher_default_${_mp_case} PROPERTIES TIMEOUT 45)
+endforeach()
+
+# Crash-safety of throwing user callbacks (Python mirror of the C++
+# test/callback_exceptions/ suite): a raising user callback must be reported
+# through the configurable logger and must NOT abort the process / silently stop a
+# service. Each subcommand is its own ctest entry.
+foreach(_cbe_case on_data on_has_publisher_changed on_has_subscriber_changed service_sync service_async)
+    add_test(NAME python_callback_exceptions_${_cbe_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        ./python_callback_exceptions_test.py ${_cbe_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    list(APPEND _PYTHON_CALLBACK_EXCEPTIONS_TEST_NAMES python_callback_exceptions_${_cbe_case})
+    set_tests_properties(python_callback_exceptions_${_cbe_case} PROPERTIES TIMEOUT 45)
+endforeach()
+
 # Env-var resolution cases — each forces a fresh process so the
 # function-local cache in _resolve_env_once observes the configured
 # env value on its first (and only) call. Mirrors the C++ env_recovery_*
@@ -344,8 +444,13 @@ if(WIN32)
         python_request_response_ignore_async
         PROPERTIES TIMEOUT 60)
 else()
-    set_tests_properties(python_pub_python_sub PROPERTIES TIMEOUT 20)
-    set_tests_properties(python_pub_python_sub_type_reuse PROPERTIES TIMEOUT 20)
+    # These pub/sub tests spend ~10s in a fixed publish loop and create several
+    # network-recovery-enabled participants. The ROS2-compatibility CI containers
+    # (especially the Debug/clang configs) run roughly 2x slower, so the previous
+    # 20s budget was too tight and flaked with spurious ***Timeout. 40s still
+    # detects a genuine hang/regression while tolerating the slower containers.
+    set_tests_properties(python_pub_python_sub PROPERTIES TIMEOUT 40)
+    set_tests_properties(python_pub_python_sub_type_reuse PROPERTIES TIMEOUT 40)
     set_tests_properties(
         python_request_response_ignore
         python_request_response_ignore_async
@@ -355,6 +460,9 @@ endif()
 if(WIN32)
     set(PYTHON_TEST_NAMES
         ${_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV}
+        ${_PYTHON_DISCOVERED_ENDPOINTS_TEST_NAMES}
+        ${_PYTHON_MATCH_PUBLISHER_TEST_NAMES}
+        ${_PYTHON_CALLBACK_EXCEPTIONS_TEST_NAMES}
         python_pub_python_sub python_pub_python_sub_type_reuse
         python_pub_cpp_sub cpp_pub_python_sub
         python_request_response python_request_response_async
@@ -364,6 +472,8 @@ if(WIN32)
         python_request_cpp_service python_request_cpp_response_concurrent_requests_serial_service
         python_request_cpp_service_concurrent python_service_cpp_client
         python_serial_service_cpp_concurrent_requests python_service_cpp_requests_concurrent
+        python_request_response_service_client python_request_response_concurrent_service_client
+        python_service_client_cpp_service cpp_service_client_python_service
         pointcloud2_test python_publisher_no_leaks_test python_subscriber_no_leaks_test
         python_stop_subscriber_test accumulation_test
         legacy_api_compat_test

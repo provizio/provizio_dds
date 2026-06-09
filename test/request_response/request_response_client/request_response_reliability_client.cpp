@@ -23,20 +23,28 @@
 
 #include <std_msgs/msg/Int32PubSubTypes.hpp>
 
-constexpr const char *log_prefix = "request_response_reliability_client: ";
-
-std::string timestamp()
+namespace
 {
-    constexpr double ms_in_s = 1000.0;
-    static auto initial = std::chrono::steady_clock::now();
+    constexpr const char *log_prefix = "request_response_reliability_client: ";
 
-    return "[" +
-           std::to_string(static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                 std::chrono::steady_clock::now() - initial)
-                                                 .count()) /
-                          ms_in_s) +
-           "] ";
-}
+    // Captured at process start (static initialisation), so the timestamps below are relative
+    // to the process start rather than the first timestamp() call. This keeps waits that precede
+    // the first log line (random startup delay, participant creation, discovery) visible in the
+    // deltas. steady_clock::now() is noexcept.
+    const auto process_start_time = std::chrono::steady_clock::now();
+
+    std::string timestamp()
+    {
+        constexpr double ms_in_s = 1000.0;
+
+        return "[" +
+               std::to_string(static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                     std::chrono::steady_clock::now() - process_start_time)
+                                                     .count()) /
+                              ms_in_s) +
+               "] ";
+    }
+}  // namespace
 
 // Arguments: test_name_postfix value [domain_id]
 int main(int argc, char *argv[])
