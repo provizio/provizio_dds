@@ -6,3 +6,5 @@ Testing/
 *.egg-info/
 .*swp
 .claude/settings.local.json
+build_verify/
+__pycache__/
