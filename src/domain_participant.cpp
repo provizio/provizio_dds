@@ -18,24 +18,32 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "provizio/dds/detail/network_recovery_coordinator.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/logging.h"
 #include "provizio/dds/network_recovery.h"
 #include "provizio/dds/topic.h"
+#include <fastdds/dds/core/status/StatusMask.hpp>
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
+#include <fastdds/dds/domain/DomainParticipantListener.hpp>
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
 #include <fastdds/dds/topic/Topic.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
 #include <fastdds/dds/topic/qos/TopicQos.hpp>
 #include <fastdds/rtps/attributes/BuiltinTransports.hpp>
+#include <fastdds/rtps/builtin/data/PublicationBuiltinTopicData.hpp>
+#include <fastdds/rtps/builtin/data/SubscriptionBuiltinTopicData.hpp>
+#include <fastdds/rtps/reader/ReaderDiscoveryStatus.hpp>
+#include <fastdds/rtps/writer/WriterDiscoveryStatus.hpp>
 
 namespace provizio::dds
 {
@@ -47,6 +55,32 @@ namespace provizio::dds
         const eprosima::fastdds::dds::Duration_t lease_duration_announcement_period{1, 0};  // NOLINT: Doesn't throw
         constexpr std::uint32_t num_initial_discovery_announcements = 200;
 
+        // Default UDP socket send/recv buffer ceiling (16 MiB). Large enough that a
+        // multi-MB sample's fragments don't overflow the receive socket buffer (which
+        // would drop fragments and stall reliable delivery); the OS clamps it to
+        // net.core.rmem_max / wmem_max (raise those for headroom past the ~208 KB
+        // default). Override via PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE (bytes) to tune or
+        // lower it on memory-constrained ARM targets.
+        constexpr std::uint32_t default_udp_socket_buffer_size = 16U * 1024U * 1024U;
+
+        std::uint32_t resolve_udp_socket_buffer_size()
+        {
+            const char *const env = std::getenv("PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE");  // NOLINT: getenv required
+            if (env != nullptr && *env != '\0')
+            {
+                char *end = nullptr;
+                const std::uint64_t parsed = std::strtoull(env, &end, 10);  // NOLINT: C numeric parse
+                if (end != nullptr && *end == '\0' && parsed > 0U &&
+                    parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+                {
+                    return static_cast<std::uint32_t>(parsed);
+                }
+                log_error() << "ignoring invalid PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE='" << env << "'; using default "
+                            << default_udp_socket_buffer_size;
+            }
+            return default_udp_socket_buffer_size;
+        }
+
         // Name of the env variable Fast-DDS reads to locate its XML profiles file.
         // Hardcoded here because Fast-DDS no longer exposes this name as a public
         // constant. Keep provizio_dds.py's _DomainParticipant.xml_profiles_env_variable
@@ -54,10 +88,221 @@ namespace provizio::dds
         constexpr const char *const default_fastdds_env_variable = "FASTDDS_DEFAULT_PROFILES_FILE";
     }  // namespace
 
-    domain_participant::domain_participant(const DomainId_t the_domain_id, const network_recovery_mode mode)
+    namespace detail
+    {
+        // Forwards Fast-DDS DomainParticipantListener discovery events to a
+        // domain_participant::on_discovered_endpoint_callback. Owned by
+        // domain_participant and created + attached eagerly in its constructor
+        // (it also drives the match-publisher deferred-subscriber default, so it
+        // cannot be lazy); the optional user callback rides on the same listener.
+        class discovery_listener_impl final : public eprosima::fastdds::dds::DomainParticipantListener
+        {
+          public:
+            using callback_type = domain_participant::on_discovered_endpoint_callback;
+
+            // The owner reference is stable for the entire lifetime of this
+            // listener: the listener is a member of `owner` and torn down only
+            // by ~domain_participant. Across network-recovery resets only the
+            // underlying Fast-DDS DomainParticipant is swapped — the
+            // provizio::dds::domain_participant C++ object stays the same, so
+            // the reference remains valid.
+            explicit discovery_listener_impl(domain_participant &owner) noexcept : owner(owner)
+            {
+            }
+
+            void set_callback(callback_type new_callback, endpoint_kind new_kinds)
+            {
+                const std::lock_guard<std::mutex> lock{callback_mutex};
+                callback = std::move(new_callback);
+                active_kinds = new_kinds;
+            }
+
+            void on_data_writer_discovery(eprosima::fastdds::dds::DomainParticipant * /*participant*/,
+                                          eprosima::fastdds::rtps::WriterDiscoveryStatus reason,
+                                          const eprosima::fastdds::dds::PublicationBuiltinTopicData &info,
+                                          bool &should_be_ignored) override
+            {
+                // Purely observational listener: never ask Fast-DDS to ignore a
+                // discovered endpoint. (Fast-DDS already pre-initialises this to
+                // false at the call site before invoking the listener; we set it
+                // explicitly to keep the "never ignore" intent clear.)
+                should_be_ignored = false;
+                bool discovered = false;
+                switch (reason)
+                {
+                case eprosima::fastdds::rtps::WriterDiscoveryStatus::DISCOVERED_WRITER:
+                    discovered = true;
+                    break;
+                case eprosima::fastdds::rtps::WriterDiscoveryStatus::REMOVED_WRITER:
+                    discovered = false;
+                    break;
+                default:
+                    // CHANGED_QOS_WRITER / IGNORED_WRITER — not relevant to a
+                    // "is data flowing on this topic?" subscriber.
+                    return;
+                }
+                invoke(info, endpoint_kind::data_writer, discovered);
+            }
+
+            void on_data_reader_discovery(eprosima::fastdds::dds::DomainParticipant * /*participant*/,
+                                          eprosima::fastdds::rtps::ReaderDiscoveryStatus reason,
+                                          const eprosima::fastdds::dds::SubscriptionBuiltinTopicData &info,
+                                          bool &should_be_ignored) override
+            {
+                // Observational only — never request the endpoint be ignored.
+                should_be_ignored = false;
+                bool discovered = false;
+                switch (reason)
+                {
+                case eprosima::fastdds::rtps::ReaderDiscoveryStatus::DISCOVERED_READER:
+                    discovered = true;
+                    break;
+                case eprosima::fastdds::rtps::ReaderDiscoveryStatus::REMOVED_READER:
+                    discovered = false;
+                    break;
+                default:
+                    return;
+                }
+                invoke(info, endpoint_kind::data_reader, discovered);
+            }
+
+          private:
+            // info_type is Fast-DDS's Publication/SubscriptionBuiltinTopicData;
+            // both expose topic_name / type_name with a throwing to_string(), and
+            // both carry reliability / durability QoS policies as public members
+            // (offered for a DataWriter, requested for a DataReader).
+            template <typename info_type> void invoke(const info_type &info, endpoint_kind kind, bool discovered)
+            {
+                // Wrap the ENTIRE body — the info.*.to_string() conversions, the
+                // std::function copy, the lock acquisition, the internal deferred-
+                // subscriber resolution, and the user callback — because anything
+                // that escapes this method into the Fast-DDS discovery thread
+                // triggers std::terminate. to_string() and std::function's copy
+                // constructor can allocate (std::bad_alloc); it isn't only the user
+                // callback that can throw.
+                try
+                {
+                    // Convert the topic name at most once per call: it is needed by the internal
+                    // deferred-subscriber resolution (writers) and again by the user callback, and
+                    // to_string() allocates on the Fast-DDS discovery thread for every event. Lazy so a
+                    // data_reader event with no user callback still performs zero conversions; the
+                    // conversion stays inside this try so a bad_alloc from it cannot escape the thread.
+                    bool topic_name_converted = false;
+                    std::string topic_name_str;
+                    const auto topic_name = [&]() -> const std::string & {
+                        if (!topic_name_converted)
+                        {
+                            topic_name_str = info.topic_name.to_string();
+                            topic_name_converted = true;
+                        }
+                        return topic_name_str;
+                    };
+
+                    // INTERNAL FIRST, unconditionally: a discovered remote DataWriter
+                    // resolves any match-publisher subscribers parked on its topic
+                    // (adopt the writer's offered reliability). This must run even when
+                    // no user on_discovered_endpoint callback is registered and even if
+                    // the user filtered out data_writer events — the deferred-subscriber
+                    // default depends on it. resolve_deferred_for_writer only touches
+                    // deferred_mutex-guarded state and launches each parked subscriber's
+                    // own build thread; it never builds an endpoint on this discovery
+                    // thread (which would deadlock against a concurrent reset).
+                    if (kind == endpoint_kind::data_writer)
+                    {
+                        if (discovered)
+                        {
+                            owner.resolve_deferred_for_writer(topic_name(), info.reliability.kind);
+                        }
+                        else
+                        {
+                            // REMOVED_WRITER: maintain the per-reliability live-writer count so the
+                            // adopted reliability is re-derived / dropped as writers leave. The removed
+                            // writer's offered reliability is carried on the same discovery info.
+                            owner.on_writer_removed(topic_name(), info.reliability.kind);
+                        }
+                    }
+
+                    // Snapshot under the lock so a concurrent set_callback
+                    // can't swap the function out mid-call.
+                    callback_type local_callback;
+                    endpoint_kind local_kinds{endpoint_kind::data_writer};
+                    {
+                        const std::lock_guard<std::mutex> lock{callback_mutex};
+                        local_callback = callback;
+                        local_kinds = active_kinds;
+                    }
+                    if (!local_callback || !any(local_kinds & kind))
+                    {
+                        return;
+                    }
+                    // Convert type_name only now that the callback is known to fire (topic_name()
+                    // reuses the at-most-once conversion above), inside this try so a bad_alloc from
+                    // the conversion can't escape into the discovery thread. The reliability /
+                    // durability kinds are plain enum reads off the discovery info — offered for a
+                    // DataWriter, requested for a DataReader — forwarded so a recording bridge can
+                    // match QoS per topic.
+                    local_callback(owner, topic_name(), info.type_name.to_string(), kind, discovered,
+                                   info.reliability.kind, info.durability.kind);
+                }
+                catch (const std::exception &exception)
+                {
+                    // A throwing user callback, or any internal allocation failure
+                    // (string conversion / std::function copy), must not propagate
+                    // out into the Fast-DDS discovery thread. Log and swallow,
+                    // mirroring the Python side. The logging path itself allocates
+                    // (std::ostringstream growth) and can throw std::bad_alloc under
+                    // memory pressure, so it is wrapped too — nothing may escape here.
+                    try
+                    {
+                        log_error() << "on_discovered_endpoint dispatch threw: " << exception.what();
+                    }
+                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+                    {
+                    }
+                }
+                catch (...)
+                {
+                    try
+                    {
+                        log_error() << "on_discovered_endpoint dispatch threw a non-std::exception";
+                    }
+                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+                    {
+                    }
+                }
+            }
+
+            domain_participant &owner;
+            mutable std::mutex callback_mutex;
+            callback_type callback;
+            endpoint_kind active_kinds{endpoint_kind::data_writer};
+        };
+    }  // namespace detail
+
+    domain_participant::domain_participant(const DomainId_t the_domain_id, const network_recovery_mode mode,
+                                           on_discovered_endpoint_callback initial_discovery_callback,
+                                           const endpoint_kind initial_discovery_kinds, const transport_mode transport)
         : domain_id(the_domain_id), recovery_enabled(resolve_network_recovery_enabled(mode)),
           registered_topics_mutex(std::make_shared<std::mutex>())
     {
+        // Install the discovery listener EAGERLY, BEFORE create_fastdds_participant,
+        // so Fast-DDS attaches it at participant-creation time and it sees every
+        // discovery event from the very first SEDP exchange. This is now mandatory
+        // (not opt-in): the listener also drives the match-publisher subscriber
+        // default — a discovered remote DataWriter resolves the deferred reader of
+        // any subscriber parked on that topic (see resolve_deferred_for_writer).
+        // Missing the first writer event would leave such a subscriber waiting
+        // forever, so the listener can no longer be lazily installed only when a
+        // user callback is registered. The optional user on_discovered_endpoint
+        // callback rides on the SAME listener; when none is passed the listener
+        // still runs but its user-callback slot is empty (a cheap enum-read + map
+        // lookup per discovery event).
+        discovery_listener = std::make_unique<detail::discovery_listener_impl>(*this);
+        if (initial_discovery_callback)
+        {
+            discovery_listener->set_callback(std::move(initial_discovery_callback), initial_discovery_kinds);
+        }
+
         if (auto *const file_path = std::getenv(default_fastdds_env_variable))  // NOLINT: getenv required
         {
             used_xml_profile = std::filesystem::exists(file_path) && !std::filesystem::is_directory(file_path);
@@ -76,24 +321,40 @@ namespace provizio::dds
             cached_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod =
                 lease_duration_announcement_period;
 
-#if defined(_MSC_VER) || defined(__APPLE__)
-            // Disable shared memory transport on Windows and macOS unless the user
-            // has explicitly configured transports via FASTDDS_BUILTIN_TRANSPORTS.
-            // Fast-DDS's bundled Boost.Interprocess has a known bug where shared
-            // memory segments and named semaphores from a previous DDS participant
-            // are not cleaned up promptly. On Windows this causes assertion failures
-            // in boost/interprocess/sync/windows/semaphore.hpp when a new participant
-            // is created. On macOS, the default system-wide shared memory limits
-            // (kern.sysv.shmmni=32) are quickly exhausted when creating participants
-            // across multiple domain IDs, causing participant creation to hang
-            // indefinitely. UDPv4-only transport avoids this issue with no practical
-            // performance impact for the typical single-host or cross-network DDS use
-            // cases this library targets.
+            // Transport tuning (skipped entirely when FASTDDS_BUILTIN_TRANSPORTS hands
+            // control to the user). Two things happen here:
+            //
+            //   1. Enlarge the UDP socket send/recv buffers so a large sample (camera
+            //      frame, point cloud) that fragments into many datagrams isn't dropped
+            //      when the receive buffer overflows — the dominant lever for reliable
+            //      large-data delivery. It's a ceiling, clamped by the OS to
+            //      net.core.rmem_max / wmem_max. Applied on every platform and in BOTH
+            //      transport modes, because the UDP path carries any cross-host peer
+            //      regardless of shared memory.
+            //   2. Choose shared-memory vs UDP-only. SHM (zero-copy for same-host
+            //      same-version peers) is on by default on Linux. It is force-disabled on
+            //      Windows/macOS because Fast-DDS's bundled Boost.Interprocess leaks SHM
+            //      segments/named semaphores between participants — causing assertion
+            //      failures on Windows (boost/interprocess/sync/windows/semaphore.hpp) and
+            //      system-wide shm-limit (kern.sysv.shmmni) exhaustion hangs on macOS. It
+            //      is also disabled on any platform when transport_mode::udp_only is
+            //      requested (e.g. a recorder bridging mismatched Fast-DDS major versions,
+            //      where cross-major SHM negotiation degrades large-data throughput).
             if (!std::getenv("FASTDDS_BUILTIN_TRANSPORTS"))  // NOLINT: getenv required
             {
-                cached_qos.setup_transports(eprosima::fastdds::rtps::BuiltinTransports::UDPv4);
-            }
+                const bool platform_allows_shm =
+#if defined(_MSC_VER) || defined(__APPLE__)
+                    false;  // Windows/macOS: Boost.Interprocess cleanup bug — UDP-only.
+#else
+                    true;
 #endif
+                const bool use_shared_memory = platform_allows_shm && (transport != transport_mode::udp_only);
+                eprosima::fastdds::rtps::BuiltinTransportsOptions transport_options;
+                transport_options.sockets_buffer_size = resolve_udp_socket_buffer_size();
+                cached_qos.setup_transports(use_shared_memory ? eprosima::fastdds::rtps::BuiltinTransports::DEFAULT
+                                                              : eprosima::fastdds::rtps::BuiltinTransports::UDPv4,
+                                            transport_options);
+            }
         }
 
         participant = create_fastdds_participant();
@@ -117,12 +378,104 @@ namespace provizio::dds
     eprosima::fastdds::dds::DomainParticipant *domain_participant::create_fastdds_participant()
     {
         auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
-        return participant_factory->create_participant(
-            domain_id, used_xml_profile ? PARTICIPANT_QOS_DEFAULT : cached_qos, nullptr);
+        // Pass the (possibly null) discovery listener to Fast-DDS at create
+        // time so it's attached BEFORE the new participant starts internal
+        // discovery — no window during which discovery events arrive without
+        // a listener to deliver them. Concurrency: this function runs only
+        // (a) from the constructor (single-threaded — no other thread holds a
+        // reference yet) and (b) from trigger_network_recovery_reset which
+        // holds reset_mutex exclusive, blocking any concurrent
+        // on_discovered_endpoint (which takes it shared). So reading
+        // discovery_listener.get() here is safe without discovery_listener_mutex.
+        // StatusMask::none() — we never use the Fast-DDS *status* callbacks
+        // on this listener; discovery callbacks fire regardless of the mask.
+        // Attach the listener whenever it exists. It is now created eagerly at
+        // construction and stays attached for the participant's whole life because
+        // it drives the match-publisher deferred-subscriber default — not just the
+        // optional user callback. (It is a member always present after construction;
+        // the && guard is belt-and-braces for the brief pre-init window.) A user
+        // on_discovered_endpoint(unregister) clears only the user callback, leaving
+        // the listener attached for internal use, so attachment no longer gates on
+        // whether a user callback is installed.
+        auto *const listener = discovery_listener ? discovery_listener.get() : nullptr;
+        return participant_factory->create_participant(domain_id,
+                                                       used_xml_profile ? PARTICIPANT_QOS_DEFAULT : cached_qos,
+                                                       listener, eprosima::fastdds::dds::StatusMask::none());
+    }
+
+    void domain_participant::on_discovered_endpoint(on_discovered_endpoint_callback callback, endpoint_kind kinds)
+    {
+        // reset_mutex shared keeps the underlying Fast-DDS participant pointer
+        // stable for the (un)install set_listener call. The reset path takes it
+        // exclusive, so an in-flight reset will simply finish first.
+        const std::shared_lock<std::shared_mutex> reset_lock{reset_mutex};
+        const std::lock_guard<std::mutex> listener_lock{discovery_listener_mutex};
+
+        if (!callback)
+        {
+            // Unregister the USER callback only: clear the stored callback so any
+            // in-flight (or about-to-fire) user dispatch becomes a no-op. Do NOT
+            // detach the listener from Fast-DDS — it is now installed eagerly and
+            // permanently to drive the match-publisher deferred-subscriber default
+            // (a discovered writer must still resolve parked subscribers even with
+            // no user callback). The listener object also outlives any unregister
+            // until ~domain_participant for the same use-after-free reason as
+            // before: Fast-DDS' callback dispatch is not synchronous with
+            // set_listener, so a stale dispatch can still arrive — but it now just
+            // reads the empty user callback (after doing the cheap internal resolve)
+            // and returns.
+            if (discovery_listener)
+            {
+                discovery_listener->set_callback({}, kinds);
+            }
+            return;
+        }
+
+        if (!discovery_listener)
+        {
+            // Defensive: the listener is created eagerly in the constructor, so this
+            // branch is normally dead. Recreate it if somehow absent.
+            discovery_listener = std::make_unique<detail::discovery_listener_impl>(*this);
+        }
+        discovery_listener->set_callback(std::move(callback), kinds);
+
+        // The listener is already attached to Fast-DDS from participant creation
+        // (eager install), so re-attaching here is redundant in the common case;
+        // keep it for the defensive recreate branch above and as a harmless no-op
+        // otherwise.
+        if (participant != nullptr)
+        {
+            participant->set_listener(discovery_listener.get(), eprosima::fastdds::dds::StatusMask::none());
+        }
+    }
+
+    bool domain_participant::is_known_type(const std::string &type_name) const
+    {
+        const std::lock_guard<std::mutex> lock{registered_types_mutex};
+        return registered_types.find(type_name) != registered_types.end();
+    }
+
+    std::vector<std::string> domain_participant::known_types() const
+    {
+        const std::lock_guard<std::mutex> lock{registered_types_mutex};
+        std::vector<std::string> names;
+        names.reserve(registered_types.size());
+        for (const auto &entry : registered_types)
+        {
+            names.push_back(entry.first);
+        }
+        return names;
     }
 
     domain_participant::~domain_participant()
     {
+        // No deferred-subscriber worker to stop here: each match-mode subscriber owns
+        // its own std::async build (subscriber_handle::build_future) and joins it in its
+        // destructor. Every endpoint holds a strong shared_ptr to this participant, so
+        // ~domain_participant only runs after every endpoint is gone — i.e. after every
+        // deferred build has already been joined and every subscriber has deregistered
+        // from the deferred registry below.
+
         {
             // Make sure neither of registered topic handles that are still alive won't try to unregister themselves
             // on destruction
@@ -265,6 +618,215 @@ namespace provizio::dds
                         endpoints.end());
     }
 
+    void domain_participant::register_deferred_subscriber(const std::string &topic_name,
+                                                          detail::resettable_endpoint *handle)
+    {
+        if (handle == nullptr)
+        {
+            return;
+        }
+
+        // Called from subscriber_handle::build_state, which already holds reset_mutex
+        // (shared). deferred_mutex is taken here as a leaf — order reset→deferred. The
+        // build thread (run_deferred_build) never holds deferred_mutex while taking
+        // reset_mutex, so there is no inversion (see the lock-order note on the members
+        // in domain_participant.h).
+        const std::lock_guard<std::mutex> lock{deferred_mutex};
+
+        // Park a NON-owning back-reference BEFORE dispatching, even when a writer was already
+        // discovered. Parking is what lets a FAILED build (e.g. create_datareader returns null
+        // under resource exhaustion) be retried by the next discovered writer instead of leaving
+        // the subscriber inactive until the next reset — a successful build deregisters itself
+        // (build_deferred_locked → deregister_deferred_subscriber). Idempotent per (topic, handle):
+        // a network-recovery reset re-runs build_state for a still-unresolved subscriber, so skip
+        // an already-parked handle rather than accumulate duplicates (which would grow
+        // deferred_subscribers across resets and cause redundant dispatch).
+        auto range = deferred_subscribers.equal_range(topic_name);
+        bool already_parked = false;
+        for (auto it = range.first; it != range.second; ++it)
+        {
+            if (it->second == handle)
+            {
+                already_parked = true;
+                break;
+            }
+        }
+        if (!already_parked)
+        {
+            deferred_subscribers.emplace(topic_name, handle);
+        }
+
+        const auto cached = discovered_writer_reliability.find(topic_name);
+        if (cached != discovered_writer_reliability.end())
+        {
+            // Writer already discovered on this topic before the subscriber registered: dispatch
+            // the build immediately (closes the writer-before-subscriber race) in addition to
+            // parking. start_deferred_build only spawns the subscriber's own std::async build
+            // thread; the actual build re-takes the locks in the canonical order, off this thread.
+            handle->start_deferred_build(cached->second.adopted);
+        }
+        // Otherwise the handle waits parked until resolve_deferred_for_writer fires for this topic.
+    }
+
+    void domain_participant::deregister_deferred_subscriber(const std::string &topic_name,
+                                                            detail::resettable_endpoint *handle)
+    {
+        // Called from ~subscriber_handle under the SAME deferred_mutex that
+        // resolve_deferred_for_writer / register_deferred_subscriber use to reach a parked
+        // handle, so once this returns the discovery thread can no longer dispatch the
+        // dying subscriber. A handle that was already dispatched (and thus already erased)
+        // is simply not found — harmless.
+        const std::lock_guard<std::mutex> lock{deferred_mutex};
+        auto range = deferred_subscribers.equal_range(topic_name);
+        for (auto it = range.first; it != range.second;)
+        {
+            if (it->second == handle)
+            {
+                it = deferred_subscribers.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
+    void domain_participant::resolve_deferred_for_writer(
+        const std::string &topic_name, const eprosima::fastdds::dds::ReliabilityQosPolicyKind reliability)
+    {
+        // Runs on the Fast-DDS discovery thread. Touches only deferred_mutex-guarded
+        // state and launches each parked subscriber's own build thread — it never builds
+        // an endpoint here (that would deadlock against a concurrent reset on this very
+        // thread). Holding deferred_mutex across the dispatch keeps each parked raw
+        // pointer valid: ~subscriber_handle takes the same mutex to deregister, so it
+        // cannot free a handle mid-dispatch.
+        const std::lock_guard<std::mutex> lock{deferred_mutex};
+
+        // Match-first: the FIRST writer to appear on an otherwise-writer-less topic fixes the
+        // adopted reliability; while it (and others of its kind) remain a later heterogeneous
+        // writer does not change it. A fresh entry has an empty live_counts map (on_writer_removed
+        // erases emptied entries), so "was the topic writer-less?" is exactly live_counts.empty().
+        auto &state = discovered_writer_reliability[topic_name];
+        const bool topic_was_writerless = state.live_counts.empty();
+        // Track this writer toward the topic's per-reliability live-writer count, so the adopted
+        // value can be re-derived / dropped as writers are removed (see on_writer_removed).
+        ++state.live_counts[reliability];
+        if (topic_was_writerless)
+        {
+            state.adopted = reliability;
+        }
+        // Resolve against the adopted reliability (what every parked and any future subscriber on
+        // this topic will adopt), not necessarily this writer's.
+        const auto effective = state.adopted;
+
+        // Spawn each parked subscriber's deferred build. Subscribers are NOT erased here: a build
+        // that FAILS (e.g. create_datareader returns null under resource exhaustion) leaves the
+        // subscriber parked so the next discovered writer on this topic retries it, instead of the
+        // subscriber staying inactive until the next network-recovery reset. A subscriber whose
+        // build SUCCEEDS deregisters itself (build_deferred_locked → deregister_deferred_subscriber)
+        // so it is not re-dispatched. start_deferred_build only relaunches once a prior build has
+        // completed, so repeated writer events while a build is in flight (or after one already
+        // succeeded, in the brief window before it deregisters) are cheap no-ops, not duplicate builds.
+        auto range = deferred_subscribers.equal_range(topic_name);
+        for (auto it = range.first; it != range.second; ++it)
+        {
+            it->second->start_deferred_build(effective);
+        }
+    }
+
+    void domain_participant::on_writer_removed(const std::string &topic_name,
+                                               const eprosima::fastdds::dds::ReliabilityQosPolicyKind reliability)
+    {
+        // Runs on the Fast-DDS discovery thread; only touches deferred_mutex-guarded state.
+        const std::lock_guard<std::mutex> lock{deferred_mutex};
+
+        const auto state_it = discovered_writer_reliability.find(topic_name);
+        if (state_it == discovered_writer_reliability.end())
+        {
+            // A REMOVED without a matching DISCOVERED we counted — nothing to do.
+            return;
+        }
+        auto &state = state_it->second;
+
+        const auto count_it = state.live_counts.find(reliability);
+        if (count_it == state.live_counts.end())
+        {
+            // A REMOVED for a reliability kind we never counted on this topic — nothing to do.
+            return;
+        }
+        if (--count_it->second == 0)
+        {
+            state.live_counts.erase(count_it);
+        }
+
+        if (state.live_counts.empty())
+        {
+            // Last writer on this topic (of any kind) is gone: drop the entry so a match-mode
+            // subscriber created later defers for a fresh writer instead of adopting a stale
+            // value (and so the registry can't grow without bound as topics churn).
+            discovered_writer_reliability.erase(state_it);
+            return;
+        }
+
+        // Writers remain. If no live writer still offers the adopted reliability, re-derive it
+        // from a still-live kind — otherwise a subscriber created now would adopt a reliability
+        // that matches none of the remaining writers (e.g. RELIABLE adopted while only a
+        // BEST_EFFORT writer is left, which a RELIABLE reader silently fails to match). Match-first
+        // is preserved while the writer that fixed the value is alive; this only fires once it is
+        // gone. Any remaining kind is a valid choice — pick an arbitrary one (live_counts is an
+        // unordered_map, so begin() is unspecified, which is fine here).
+        if (state.live_counts.find(state.adopted) == state.live_counts.end())
+        {
+            state.adopted = state.live_counts.begin()->first;
+        }
+    }
+
+    void domain_participant::run_deferred_build(detail::resettable_endpoint *handle,
+                                                const eprosima::fastdds::dds::ReliabilityQosPolicyKind resolved)
+    {
+        // Runs on the std::async thread spawned by subscriber_handle::start_deferred_build.
+        // Lock order matches register_endpoint's initial build — registration_mutex
+        // (serialize against resets) then reset_mutex — but reset_mutex is taken
+        // EXCLUSIVELY here, unlike register_endpoint's shared acquire. The reason:
+        // build_deferred_locked → build_state mutates state that is ALREADY user-visible
+        // (data_reader, subscriber, the_topic, built_against_generation), while
+        // get_guid() / get_num_matched_publishers() read those members under reset_mutex
+        // SHARED. The initial build can use a shared lock because the handle hasn't
+        // escaped to the caller yet, so nothing reads it concurrently; the deferred build
+        // runs long after make_subscriber returned, so it must exclude those concurrent
+        // readers to avoid a data race on the swapped-in reader. This mirrors the reset
+        // path, which rebuilds endpoints under the same exclusive lock.
+        // build_deferred_locked → build_state uses the _locked register_topic variant and
+        // the participant ref we pass, so it does NOT re-acquire either lock. The handle is
+        // kept alive by the subscriber, which waits on its build_future in ~subscriber_handle
+        // before tearing down — so `handle` is valid for the whole of this call.
+        try
+        {
+            const std::lock_guard<std::mutex> reg_lock{registration_mutex};
+            const std::unique_lock<std::shared_mutex> reset_lock{reset_mutex};
+            if (participant != nullptr)
+            {
+                handle->build_deferred_locked(*participant, resolved);
+            }
+            // else: a network-recovery recreate failed and the participant is dead. Skip —
+            // the eventual reset rebuilds every endpoint (re-deferring this one, which then
+            // re-registers and is resolved again from the cache).
+        }
+        catch (const std::exception &exception)
+        {
+            log_error() << "deferred match-publisher subscriber build failed on domain " << domain_id << ": "
+                        << exception.what()
+                        << "; this subscriber stays inactive (get_num_matched_publishers returns 0) until the "
+                           "next discovered writer on its topic retries the build (or a network-recovery reset "
+                           "rebuilds it)";
+        }
+        catch (...)
+        {
+            log_error() << "deferred match-publisher subscriber build threw a non-std::exception on domain "
+                        << domain_id;
+        }
+    }
+
     void domain_participant::trigger_network_recovery_reset()
     {
         if (!recovery_enabled)
@@ -272,152 +834,189 @@ namespace provizio::dds
             return;
         }
 
-        // Serialize against new endpoint registrations for the whole reset. With
-        // this in place, no endpoint can be registered while we are tearing down
-        // and rebuilding the participant — so we never have to worry about
-        // "endpoint exists but state is built against the old participant we just
-        // destroyed".
-        const std::lock_guard<std::mutex> reg_lock{registration_mutex};
-
-        // Phase 1: snapshot the registered endpoints.
+        // Declared OUTSIDE the locked block below so this snapshot is destroyed only AFTER
+        // both lifecycle locks are released. A match-mode subscriber whose last strong
+        // reference is this snapshot would otherwise be destroyed while we still hold
+        // registration_mutex, and ~subscriber_handle joins an in-flight deferred build that
+        // itself needs registration_mutex → self-deadlock on this thread. Letting the
+        // snapshot destruct after the block closes keeps that teardown lock-free. (Early
+        // returns inside the block are fine: the block-scope locks unwind before this
+        // function-scope vector does.)
         std::vector<std::shared_ptr<detail::resettable_endpoint>> live_endpoints;
         {
-            const std::lock_guard<std::mutex> lock{endpoints_mutex};
-            live_endpoints.reserve(endpoints.size());
-            for (const auto &weak : endpoints)
+            // Serialize against new endpoint registrations for the whole reset. With
+            // this in place, no endpoint can be registered while we are tearing down
+            // and rebuilding the participant — so we never have to worry about
+            // "endpoint exists but state is built against the old participant we just
+            // destroyed".
+            const std::lock_guard<std::mutex> reg_lock{registration_mutex};
+
+            // Phase 1: snapshot the registered endpoints.
             {
-                if (auto strong = weak.lock())
+                const std::lock_guard<std::mutex> lock{endpoints_mutex};
+                live_endpoints.reserve(endpoints.size());
+                for (const auto &weak : endpoints)
                 {
-                    live_endpoints.push_back(std::move(strong));
-                }
-            }
-        }
-
-        // Phase 2: detach listener callbacks WITHOUT the lifecycle lock held. A
-        // user callback that re-enters provizio APIs (e.g. publish() on a sibling
-        // publisher) can still acquire reset_mutex shared at this point and run
-        // to completion, so the drain wait does not deadlock. After this phase
-        // returns, no Fast-DDS listener callback owned by us is in flight.
-        for (const auto &endpoint : live_endpoints)
-        {
-            endpoint->detach_for_reset();
-        }
-
-        // Phase 3: acquire the lifecycle lock exclusively. Other threads
-        // holding the shared lock (publish, get_guid, ~publisher_handle,
-        // register_topic, register_type, etc.) will let us in once they
-        // finish — this acquire is bounded by the longest in-flight shared
-        // holder.
-        const std::unique_lock<std::shared_mutex> reset_lock{reset_mutex};
-
-        // Phase 4: tear down endpoints against the old participant.
-        //
-        // If a prior reset left us in the dead state (create_participant
-        // failed on the rebuild path → participant == nullptr), skip the
-        // endpoint teardown / topic-map-clear / delete_contained_entities
-        // entirely. The contained Fast-DDS objects were already freed by
-        // the previous reset's delete_contained_entities, and the endpoint
-        // handles' built_against_generation no longer matches the current
-        // generation — their next teardown_state call would also be a
-        // no-op via the generation check. Just fall through to the
-        // create_fastdds_participant retry below.
-        if (participant != nullptr)
-        {
-            for (const auto &endpoint : live_endpoints)
-            {
-                endpoint->on_participant_reset(*participant);
-            }
-
-            // Topic registry references the OLD participant — drop all topic handles.
-            // The released topics are no-ops on the new participant because their
-            // destructor reaches back into the cached topics map; we need to clear
-            // both that map and any still-strong topic references before destroying
-            // the participant.
-            {
-                const std::lock_guard<std::mutex> lock{*registered_topics_mutex};
-                for (auto &topic_pair : registered_topics)
-                {
-                    auto handle = topic_pair.second.lock();
-                    if (handle)
+                    if (auto strong = weak.lock())
                     {
-                        handle->release_mutex_prelocked();
+                        live_endpoints.push_back(std::move(strong));
                     }
                 }
-                registered_topics.clear();
             }
 
-            // Destroy old participant.
-            participant->delete_contained_entities();
-            DomainParticipantFactory::get_instance()->delete_participant(participant);
-            participant = nullptr;
-        }
-
-        // Refresh Fast-DDS's process-wide interface cache before recreating.
-        // This is the WHOLE point of the reset on a network change: without
-        // it, the new participant would use the same stale interface set
-        // that the now-destroyed one bound to (the cache is initialised
-        // once in SystemInfo's constructor and not refreshed on any
-        // subsequent participant creation). See network_recovery.h's
-        // docstring on refresh_fastdds_interface_cache for the full
-        // rationale.
-        refresh_fastdds_interface_cache();
-
-        // Create new participant with the SAME QoS as the original.
-        participant = create_fastdds_participant();
-        if (participant == nullptr)
-        {
-            log_error() << "failed to recreate participant on domain " << domain_id
-                        << "; endpoints left in torn-down state";
-            // Bump generation anyway so any in-flight teardown observing the
-            // mismatch skips its Fast-DDS-side deletes (the contained entities
-            // were freed by delete_contained_entities above).
-            generation.fetch_add(1, std::memory_order_acq_rel);
-            return;
-        }
-
-        // Bump generation BEFORE rebuilding endpoints so on_new_participant_started
-        // captures the new value when it sets the endpoint's built-against marker.
-        generation.fetch_add(1, std::memory_order_acq_rel);
-
-        // Re-register every type the old participant knew so endpoints rebuilt
-        // by on_new_participant_started() can create their topics against the
-        // new participant. The TypeSupport handles themselves are still valid;
-        // only the participant-side registration is participant-scoped.
-        // Log non-OK return codes — a rare failure here (e.g. OOM) would
-        // otherwise surface only later as an opaque "create_datawriter
-        // returned nullptr" when an endpoint tries to use the type.
-        {
-            const std::lock_guard<std::mutex> lock{registered_types_mutex};
-            for (auto &type_pair : registered_types)
+            // Phase 2: detach the endpoint listener callbacks WITHOUT the lifecycle lock
+            // held. A user callback that re-enters provizio APIs (e.g. publish() on a
+            // sibling publisher) can still acquire reset_mutex shared at this point and run
+            // to completion, so the drain wait does not deadlock. After this phase returns,
+            // no endpoint (publisher/subscriber) listener callback owned by us is in flight.
+            // The participant-level discovery listener is deliberately NOT drained here: it
+            // stays installed on the old participant and is quiesced instead by the
+            // delete_participant() call in Phase 4, which stops and joins Fast-DDS's
+            // discovery thread. That is sufficient because the only owner state its
+            // callbacks mutate (discovered_writer_reliability) is guarded by deferred_mutex.
+            for (const auto &endpoint : live_endpoints)
             {
-                if (participant->register_type(type_pair.second) != RETCODE_OK)
+                endpoint->detach_for_reset();
+            }
+
+            // Phase 3: acquire the lifecycle lock exclusively. Other threads
+            // holding the shared lock (publish, get_guid, ~publisher_handle,
+            // register_topic, register_type, etc.) will let us in once they
+            // finish — this acquire is bounded by the longest in-flight shared
+            // holder.
+            const std::unique_lock<std::shared_mutex> reset_lock{reset_mutex};
+
+            // Phase 4: tear down endpoints against the old participant.
+            //
+            // If a prior reset left us in the dead state (create_participant
+            // failed on the rebuild path → participant == nullptr), skip the
+            // endpoint teardown / topic-map-clear / delete_contained_entities
+            // entirely. The contained Fast-DDS objects were already freed by
+            // the previous reset's delete_contained_entities, and the endpoint
+            // handles' built_against_generation no longer matches the current
+            // generation — their next teardown_state call would also be a
+            // no-op via the generation check. Just fall through to the
+            // create_fastdds_participant retry below.
+            if (participant != nullptr)
+            {
+                for (const auto &endpoint : live_endpoints)
                 {
-                    log_error() << "type re-registration failed on domain " << domain_id << " for type '"
-                                << type_pair.first << "'";
+                    endpoint->on_participant_reset(*participant);
+                }
+
+                // Topic registry references the OLD participant — drop all topic handles.
+                // The released topics are no-ops on the new participant because their
+                // destructor reaches back into the cached topics map; we need to clear
+                // both that map and any still-strong topic references before destroying
+                // the participant.
+                {
+                    const std::lock_guard<std::mutex> lock{*registered_topics_mutex};
+                    for (auto &topic_pair : registered_topics)
+                    {
+                        auto handle = topic_pair.second.lock();
+                        if (handle)
+                        {
+                            handle->release_mutex_prelocked();
+                        }
+                    }
+                    registered_topics.clear();
+                }
+
+                // Destroy old participant.
+                participant->delete_contained_entities();
+                DomainParticipantFactory::get_instance()->delete_participant(participant);
+                participant = nullptr;
+            }
+
+            // Drop the match-publisher discovery cache: it tracked writers seen by the
+            // now-destroyed participant. The new participant re-discovers currently-present
+            // writers and repopulates it from scratch, so clearing here prevents the per-reliability
+            // writer counts from inflating across resets (the old participant's writers never fire
+            // REMOVED_WRITER) — which would otherwise pin the adopted reliability and grow the
+            // registry without bound. No participant exists in this window, so no discovery event can
+            // race the clear; deferred_mutex is a leaf taken after the registration + reset locks
+            // we already hold.
+            {
+                const std::lock_guard<std::mutex> deferred_lock{deferred_mutex};
+                discovered_writer_reliability.clear();
+            }
+
+            // Refresh Fast-DDS's process-wide interface cache before recreating.
+            // This is the WHOLE point of the reset on a network change: without
+            // it, the new participant would use the same stale interface set
+            // that the now-destroyed one bound to (the cache is initialised
+            // once in SystemInfo's constructor and not refreshed on any
+            // subsequent participant creation). See network_recovery.h's
+            // docstring on refresh_fastdds_interface_cache for the full
+            // rationale.
+            refresh_fastdds_interface_cache();
+
+            // Create new participant with the SAME QoS as the original.
+            participant = create_fastdds_participant();
+            if (participant == nullptr)
+            {
+                log_error() << "failed to recreate participant on domain " << domain_id
+                            << "; endpoints left in torn-down state";
+                // Bump generation anyway so any in-flight teardown observing the
+                // mismatch skips its Fast-DDS-side deletes (the contained entities
+                // were freed by delete_contained_entities above).
+                generation.fetch_add(1, std::memory_order_acq_rel);
+                return;
+            }
+
+            // Bump generation BEFORE rebuilding endpoints so on_new_participant_started
+            // captures the new value when it sets the endpoint's built-against marker.
+            generation.fetch_add(1, std::memory_order_acq_rel);
+
+            // Re-register every type the old participant knew so endpoints rebuilt
+            // by on_new_participant_started() can create their topics against the
+            // new participant. The TypeSupport handles themselves are still valid;
+            // only the participant-side registration is participant-scoped.
+            // Log non-OK return codes — a rare failure here (e.g. OOM) would
+            // otherwise surface only later as an opaque "create_datawriter
+            // returned nullptr" when an endpoint tries to use the type.
+            {
+                const std::lock_guard<std::mutex> lock{registered_types_mutex};
+                for (auto &type_pair : registered_types)
+                {
+                    if (participant->register_type(type_pair.second) != RETCODE_OK)
+                    {
+                        log_error() << "type re-registration failed on domain " << domain_id << " for type '"
+                                    << type_pair.first << "'";
+                    }
                 }
             }
-        }
 
-        // Phase 5: rebuild child endpoints against the new participant.
-        for (const auto &endpoint : live_endpoints)
-        {
-            try
+            // Phase 5: rebuild child endpoints against the new participant.
+            for (const auto &endpoint : live_endpoints)
             {
-                endpoint->on_new_participant_started(*participant);
+                try
+                {
+                    endpoint->on_new_participant_started(*participant);
+                }
+                catch (const std::exception &exception)
+                {
+                    log_error() << "endpoint rebuild failed on domain " << domain_id << ": " << exception.what()
+                                << "; this endpoint stays inactive (publish/take return failure) until the next "
+                                   "network-recovery reset rebuilds it";
+                }
             }
-            catch (const std::exception &exception)
-            {
-                log_error() << "endpoint rebuild failed on domain " << domain_id << ": " << exception.what()
-                            << "; this endpoint stays inactive (publish/take return failure) until the next "
-                               "network-recovery reset rebuilds it";
-            }
-        }
+        }  // close the registration_mutex / reset_mutex scope BEFORE live_endpoints destructs
     }
 
-    std::shared_ptr<domain_participant> make_domain_participant(const DomainId_t domain_id,
-                                                                const network_recovery_mode recovery_mode)
+    std::shared_ptr<domain_participant> make_domain_participant(
+        const DomainId_t domain_id, const network_recovery_mode recovery_mode,
+        domain_participant::on_discovered_endpoint_callback initial_discovery_callback,
+        const endpoint_kind initial_discovery_kinds, const transport_mode transport)
     {
-        auto participant = std::make_shared<domain_participant>(domain_id, recovery_mode);
+        // A plain shared_ptr: the participant owns no threads of its own (each match-mode
+        // subscriber owns its deferred-build std::async and joins it in its own destructor),
+        // so there is no worker to join on teardown and thus no need for the previous
+        // two-control-block ownership trick. The participant outlives its endpoints because
+        // every publisher / subscriber holds a strong shared_ptr to it, so ~domain_participant
+        // runs only after they are all gone.
+        auto participant = std::make_shared<domain_participant>(
+            domain_id, recovery_mode, std::move(initial_discovery_callback), initial_discovery_kinds, transport);
         if (resolve_network_recovery_enabled(recovery_mode))
         {
             detail::network_recovery_coordinator::instance().register_participant(participant);
