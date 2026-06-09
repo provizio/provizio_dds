@@ -15,6 +15,7 @@
 #ifndef DDS_REQUEST_RESPONSE_DETAILS
 #define DDS_REQUEST_RESPONSE_DETAILS
 
+#include <algorithm>
 #include <array>
 #include <assert.h>
 #include <chrono>
@@ -25,7 +26,9 @@
 #include <functional>
 #include <future>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -59,7 +62,7 @@ namespace provizio::dds::detail
     inline constexpr const char request_suffix[] = "Request";
     inline constexpr const char response_suffix[] = "Reply";
     inline constexpr const char requests_queue_full_error_message[] =
-        "provizio_dds: The service requests queue is full! A request will be dropped.";
+        "The service requests queue is full! A request will be dropped.";
 
     /**
      * @brief Converts history depth QoS into a bounded request queue size.
@@ -104,6 +107,11 @@ namespace provizio::dds::detail
      * @brief Lightweight client capable of sending requests and receiving responses.
      */
     template <typename request_pub_sub_type, typename response_pub_sub_type> class service_client_basic;
+
+    /**
+     * @brief Routes responses received on one response DataReader to the matching pending request.
+     */
+    template <typename response_type> class response_router;
 
     /**
      * @brief Hash functor for `guid` to be used in unordered containers.
@@ -320,13 +328,21 @@ namespace provizio::dds::detail
          * @param stable_matches_period Additional settling window that the match count must remain stable for before
          * sending the first request (0 skips the extra wait). Useful when there are multiple sensors in the network, so
          * we make sure to match all of them prior to sending the request.
-         * @param service_match_timeout Maximum time to wait for publisher/subscriber matching (0 waits indefinitely).
+         * @param service_match_timeout Maximum time for the whole readiness wait — endpoint matching AND the
+         * post-match settling window (see @c stable_matches_period); 0 waits indefinitely. A finite value should
+         * comfortably exceed @c stable_matches_period, or it can expire before settling completes.
+         * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS) applied to the
+         * request DataWriter and response DataReader; std::nullopt keeps the current default.
+         * @param endpoint_history_depth KEEP_LAST history depth for the request/response endpoints;
+         * use_default_history_depth keeps the current default.
          */
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
                              const std::string &response_topic_name,
                              handle_response_function_type handle_response_function,
                              std::chrono::milliseconds stable_matches_period,
-                             std::chrono::milliseconds service_match_timeout);
+                             std::chrono::milliseconds service_match_timeout,
+                             std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+                             std::int32_t endpoint_history_depth = use_default_history_depth);
         template <typename handle_response_function_type>
         /**
          * @brief Builds a client using a logical service name (topics are inferred).
@@ -336,12 +352,20 @@ namespace provizio::dds::detail
          * @param stable_matches_period Additional settling window that the match count must remain stable for before
          * sending the first request (0 skips the extra wait). Useful when there are multiple sensors in the network, so
          * we make sure to match all of them prior to sending the request.
-         * @param service_match_timeout Maximum time to wait for publisher/subscriber matching (0 waits indefinitely).
+         * @param service_match_timeout Maximum time for the whole readiness wait — endpoint matching AND the
+         * post-match settling window (see @c stable_matches_period); 0 waits indefinitely. A finite value should
+         * comfortably exceed @c stable_matches_period, or it can expire before settling completes.
+         * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS) applied to the
+         * request DataWriter and response DataReader; std::nullopt keeps the current default.
+         * @param endpoint_history_depth KEEP_LAST history depth for the request/response endpoints;
+         * use_default_history_depth keeps the current default.
          */
         service_client_basic(std::shared_ptr<domain_participant> participant, const std::string &service_name,
                              handle_response_function_type handle_response_function,
                              std::chrono::milliseconds stable_matches_period,
-                             std::chrono::milliseconds service_match_timeout);
+                             std::chrono::milliseconds service_match_timeout,
+                             std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+                             std::int32_t endpoint_history_depth = use_default_history_depth);
 
         /**
          * @brief Destructor stops the background readiness wait and joins its future to ensure clean shutdown.
@@ -358,6 +382,19 @@ namespace provizio::dds::detail
         void request(typename request_pub_sub_type::type &request_data,
                      const std::shared_ptr<request_context<typename response_pub_sub_type::type>> &context);
 
+        /**
+         * @brief Blocks until the request DataWriter and response DataReader are matched and have been
+         * stable for stable_matches_period, bounded by timeout (0 = wait indefinitely). Returns true once
+         * ready, false on timeout, client shutdown, or a prior error. Performs a live poll, so it includes
+         * the settling window (all currently-present services on the topic discovered).
+         *
+         * Stability is NOT guaranteed under sustained churn: to avoid blocking indefinitely while the match
+         * count keeps changing, settling is hard-capped at 4x stable_matches_period measured from the first
+         * match. Once that cap elapses the call returns ready even if matches are still changing — so a
+         * caller should not treat a true return as a strict "no further matches will appear" guarantee.
+         */
+        bool wait_for_service(std::chrono::milliseconds timeout, std::chrono::milliseconds stable_matches_period);
+
       private:
         using deferred_request = std::pair<typename request_pub_sub_type::type,
                                            std::shared_ptr<request_context<typename response_pub_sub_type::type>>>;
@@ -366,6 +403,8 @@ namespace provizio::dds::detail
                                         request_context<typename response_pub_sub_type::type> &context);
         void request_deferred_mutex_prelocked();
         bool stopped() const;
+        bool wait_for_matched_and_settled(std::chrono::milliseconds timeout,
+                                          std::chrono::milliseconds stable_matches_period);
 
         /** @brief Minimal waiting time for stable match checking. */
         static constexpr std::chrono::milliseconds min_wait_for_stable_matches_period{50};
@@ -378,6 +417,78 @@ namespace provizio::dds::detail
         std::future<bool> wait_till_matched_future;
         std::shared_ptr<data_publisher<request_pub_sub_type>> publisher;
         std::shared_ptr<subscriber_handle<response_pub_sub_type>> subscriber;
+    };
+
+    /**
+     * @brief Routes responses received on a single response DataReader to the matching pending request,
+     * enabling many concurrent in-flight requests over one request/response endpoint pair (used by
+     * service_client).
+     *
+     * Every request from a given client shares that client's response-reader GUID but is published with a
+     * distinct request sequence number, so a response's related_sample_identity uniquely identifies the
+     * request it answers. First reply wins (mirrors the one-shot request()).
+     *
+     * @tparam response_type The concrete response message type.
+     */
+    template <typename response_type> class response_router
+    {
+      public:
+        /** @brief Registers a pending request; first prunes contexts whose future_response was dropped. */
+        void add(std::shared_ptr<request_context<response_type>> context)
+        {
+            const std::lock_guard<std::mutex> lock{mutex};
+            prune_abandoned_mutex_held();
+            contexts.emplace_back(std::move(context));
+        }
+
+        /** @brief Delivers a received response to the first matching pending request, then forgets it. */
+        void dispatch(const response_type &data, const SampleInfo &info)
+        {
+            std::shared_ptr<request_context<response_type>> matched;
+            {
+                const std::lock_guard<std::mutex> lock{mutex};
+                // Reap contexts whose future_response was dropped, so a stream of responses keeps the set
+                // bounded even when the caller never adds further requests.
+                prune_abandoned_mutex_held();
+                for (auto it = contexts.begin(); it != contexts.end(); ++it)
+                {
+                    const std::lock_guard<std::mutex> context_lock{(*it)->mutex};
+                    if ((*it)->identity == info.related_sample_identity)
+                    {
+                        matched = *it;
+                        contexts.erase(it);
+                        break;
+                    }
+                }
+            }
+            if (matched)
+            {
+                auto response = matched->response.lock();
+                if (response)
+                {
+                    const std::lock_guard<std::mutex> lock{response->mutex()};
+                    if (!response->is_set_mutex_prelocked())
+                    {
+                        response->set_mutex_prelocked(data);
+                    }
+                }
+            }
+        }
+
+      private:
+        /** @brief Drops contexts whose future_response (and thus response_data) has been destroyed. The
+         * caller must hold @c mutex. Keeps the set bounded to genuinely-outstanding requests. */
+        void prune_abandoned_mutex_held()
+        {
+            contexts.erase(std::remove_if(contexts.begin(), contexts.end(),
+                                          [](const std::shared_ptr<request_context<response_type>> &candidate) {
+                                              return candidate->response.expired();
+                                          }),
+                           contexts.end());
+        }
+
+        std::mutex mutex;
+        std::vector<std::shared_ptr<request_context<response_type>>> contexts;
     };
 
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type,
@@ -439,7 +550,13 @@ namespace provizio::dds::detail
         // deadlock / unbounded blocking on a hot publish path.
         if (queue_full)
         {
-            log_error() << requests_queue_full_error_message;
+            try
+            {
+                log_error() << requests_queue_full_error_message;
+            }
+            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+            {
+            }
         }
         cv.notify_all();
     }
@@ -465,6 +582,32 @@ namespace provizio::dds::detail
                 catch (const ignore_request &)
                 {
                     // Silently drop the request
+                }
+                catch (const std::exception &exception)
+                {
+                    // A throwing handler must not escape this handler thread — it would
+                    // std::terminate the process and stop the service. Report it through the
+                    // configurable logger (we are outside requests_queue_mutex here, so the
+                    // user log callback may safely re-enter provizio_dds) and keep the thread
+                    // alive for the next request. The logging itself can allocate/throw, so
+                    // guard it too — nothing may escape this handler thread.
+                    try
+                    {
+                        log_error() << "service request handler threw: " << exception.what() << "; request dropped";
+                    }
+                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+                    {
+                    }
+                }
+                catch (...)
+                {
+                    try
+                    {
+                        log_error() << "service request handler threw a non-std::exception; request dropped";
+                    }
+                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+                    {
+                    }
                 }
                 lock.lock();
             }
@@ -511,6 +654,7 @@ namespace provizio::dds::detail
                        const eprosima::fastdds::rtps::SampleIdentity &identity)
     {
         bool queue_full = false;
+        std::string handler_error;
         {
             const std::lock_guard<std::mutex> lock{mutex};
             if (futures.size() < max_queue_size)
@@ -524,6 +668,34 @@ namespace provizio::dds::detail
                 {
                     // Silently drop
                 }
+                catch (const std::exception &exception)
+                {
+                    // The handler's synchronous part runs on the Fast-DDS reception
+                    // thread; a throw must not escape into Fast-DDS (it would
+                    // std::terminate the process). Capture here, log outside the lock.
+                    // Formatting the message can itself allocate/throw, so guard it —
+                    // drop the message rather than let an allocation failure escape.
+                    try
+                    {
+                        handler_error =
+                            std::string{"service request handler threw: "} + exception.what() + "; request dropped";
+                    }
+                    catch (...)  // NOLINT(bugprone-empty-catch): a formatting failure must not escape
+                    {
+                        handler_error.clear();
+                    }
+                }
+                catch (...)
+                {
+                    try
+                    {
+                        handler_error = "service request handler threw a non-std::exception; request dropped";
+                    }
+                    catch (...)  // NOLINT(bugprone-empty-catch): a formatting failure must not escape
+                    {
+                        handler_error.clear();
+                    }
+                }
             }
             else
             {
@@ -533,9 +705,27 @@ namespace provizio::dds::detail
         // Logged outside the lock: the user-supplied log callback may call back
         // into provizio_dds APIs, so emitting under mutex risks deadlock /
         // unbounded blocking on a hot publish path.
+        // Best-effort logging only: this still runs on the Fast-DDS reception thread, so a
+        // std::bad_alloc from the streaming logger must not escape into Fast-DDS.
+        if (!handler_error.empty())
+        {
+            try
+            {
+                log_error() << handler_error;
+            }
+            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+            {
+            }
+        }
         if (queue_full)
         {
-            log_error() << requests_queue_full_error_message;
+            try
+            {
+                log_error() << requests_queue_full_error_message;
+            }
+            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+            {
+            }
         }
     }
 
@@ -552,6 +742,7 @@ namespace provizio::dds::detail
                 return;
             }
 
+            std::vector<std::string> handler_errors;
             for (std::size_t i = futures.size(); i > 0; --i)
             {
                 auto future_iterator = futures.begin() + (i - 1);
@@ -565,8 +756,54 @@ namespace provizio::dds::detail
                     {
                         // Silently drop the request
                     }
+                    catch (const std::exception &exception)
+                    {
+                        // The async handler's future resolved to an exception; it must
+                        // not escape this handler thread (std::terminate). Capture here,
+                        // log outside the lock below. Formatting/storing the message can
+                        // itself allocate/throw, so guard it — drop the message rather than
+                        // let an allocation failure escape.
+                        try
+                        {
+                            handler_errors.emplace_back(std::string{"service request handler threw: "} +
+                                                        exception.what() + "; request dropped");
+                        }
+                        catch (...)  // NOLINT(bugprone-empty-catch): a formatting failure must not escape
+                        {
+                        }
+                    }
+                    catch (...)
+                    {
+                        try
+                        {
+                            handler_errors.emplace_back(
+                                "service request handler threw a non-std::exception; request dropped");
+                        }
+                        catch (...)  // NOLINT(bugprone-empty-catch): a formatting failure must not escape
+                        {
+                        }
+                    }
                     futures.erase(future_iterator);
                 }
+            }
+
+            // Logged outside the lock: the user log callback may re-enter provizio_dds.
+            if (!handler_errors.empty())
+            {
+                lock.unlock();
+                for (const auto &message : handler_errors)
+                {
+                    // Best-effort: a std::bad_alloc from the streaming logger must not
+                    // escape this handler thread.
+                    try
+                    {
+                        log_error() << message;
+                    }
+                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+                    {
+                    }
+                }
+                lock.lock();
             }
         }
     }
@@ -632,52 +869,29 @@ namespace provizio::dds::detail
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, handle_response_function_type handle_response_function,
-        const std::chrono::milliseconds stable_matches_period, const std::chrono::milliseconds service_match_timeout)
-        : publisher(make_publisher<request_pub_sub_type>(participant, request_topic_name, RELIABLE_RELIABILITY_QOS)),
+        const std::chrono::milliseconds stable_matches_period, const std::chrono::milliseconds service_match_timeout,
+        std::optional<DurabilityQosPolicyKind> durability_kind, const std::int32_t endpoint_history_depth)
+        : publisher(make_publisher<request_pub_sub_type>(participant, request_topic_name, RELIABLE_RELIABILITY_QOS,
+                                                         endpoint_history_depth, durability_kind)),
           subscriber(make_subscriber<response_pub_sub_type>(
-              participant, response_topic_name, std::move(handle_response_function), RELIABLE_RELIABILITY_QOS))
+              participant, response_topic_name, std::move(handle_response_function), RELIABLE_RELIABILITY_QOS,
+              endpoint_history_depth, durability_kind))
     {
+        // Establish readiness in the background so requests issued before matching auto-defer and
+        // flush once ready. The settle-poll itself lives in wait_for_matched_and_settled() (shared
+        // with the public wait_for_service()).
         wait_till_matched_future =
             std::async(std::launch::async, [this, stable_matches_period, service_match_timeout]() {
-                // Wait for the publisher and subscriber to have the same amount of matches across a period as a way to
-                // establish connection to one or more services on the topic
-                const auto timeout_point = std::chrono::steady_clock::now() + service_match_timeout;
-                const auto check_period =
-                    stable_matches_period.count() > 0 ? stable_matches_period : min_wait_for_stable_matches_period;
-                while (!stopped())
+                const bool ready = wait_for_matched_and_settled(service_match_timeout, stable_matches_period);
+                const std::lock_guard<std::mutex> lock{mutex};
+                if (!ready && !stop && !error)
                 {
-                    const auto remaining_timeout = service_match_timeout.count() == 0
-                                                       ? service_match_timeout
-                                                       : std::max(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                                      timeout_point - std::chrono::steady_clock::now()),
-                                                                  std::chrono::milliseconds{0});
-                    auto matched_subscribers = std::async(std::launch::async, [&] {
-                        return publisher->get_num_matched_subscribers(remaining_timeout, check_period);
-                    });
-                    auto matched_publishers = std::async(std::launch::async, [&] {
-                        return subscriber->get_num_matched_publishers(remaining_timeout, check_period);
-                    });
-                    int num_matched_subscribers = matched_subscribers.get();
-                    if (num_matched_subscribers > 0 && num_matched_subscribers == matched_publishers.get())
-                    {
-                        // Same number of matched endpoints in both the publisher and the subscriber, we're good to
-                        // proceed
-                        break;
-                    }
-
-                    if (service_match_timeout.count() != 0 && remaining_timeout.count() <= 0)
-                    {
-                        std::unique_lock<std::mutex> lock{mutex};
-                        error = std::make_exception_ptr(timeout_exception{"Service matching timed out"});
-                        break;
-                    }
-
-                    // To avoid too heavy CPU load
-                    std::this_thread::sleep_for(min_wait_for_stable_matches_period);
+                    // A finite service_match_timeout elapsed before matching+settling completed.
+                    error = std::make_exception_ptr(timeout_exception{
+                        "Service readiness wait timed out (endpoints must match and then stay stable for the "
+                        "settling window)"});
                 }
-
-                std::unique_lock<std::mutex> lock{mutex};
-                matched = true;  // It's OK even if there was an timeout|stop|error as error is already set then
+                matched = true;  // OK even on timeout|stop|error: error is already set in those cases.
                 request_deferred_mutex_prelocked();
                 return matched;
             });
@@ -688,10 +902,11 @@ namespace provizio::dds::detail
     service_client_basic<request_pub_sub_type, response_pub_sub_type>::service_client_basic(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
         handle_response_function_type handle_response_function, const std::chrono::milliseconds stable_matches_period,
-        const std::chrono::milliseconds service_match_timeout)
+        const std::chrono::milliseconds service_match_timeout, std::optional<DurabilityQosPolicyKind> durability_kind,
+        const std::int32_t endpoint_history_depth)
         : service_client_basic(std::move(participant), request_prefix + service_name + request_suffix,
                                response_prefix + service_name + response_suffix, std::move(handle_response_function),
-                               stable_matches_period, service_match_timeout)
+                               stable_matches_period, service_match_timeout, durability_kind, endpoint_history_depth)
     {
     }
 
@@ -775,6 +990,98 @@ namespace provizio::dds::detail
     {
         const std::lock_guard<std::mutex> lock{mutex};
         return stop;
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    bool service_client_basic<request_pub_sub_type, response_pub_sub_type>::wait_for_matched_and_settled(
+        const std::chrono::milliseconds timeout, const std::chrono::milliseconds stable_matches_period)
+    {
+        // Mirrors ROS 2 rmw_fastrtps' rmw_service_server_is_available (request DataWriter and response
+        // DataReader both matched, in equal numbers), then holds for a settling window. Fast-DDS fires the
+        // writer-side and reader-side match callbacks independently and with potentially large asynchronous
+        // skew; publishing before the *service's* request reader is live drops the request (that reader is
+        // VOLATILE for ROS 2 interop and does not receive samples published before it matched). The settle
+        // also lets additional services on the same service name be discovered (provizio routes multiple
+        // sensors over one service name, filtered by frame_id) so the request reaches all of them. To avoid
+        // waiting indefinitely under churn, cap the settle at settle_cap_multiplier x the window after the
+        // first match. Match counts are instantaneous snapshots. Returns true once matched+settled, false on
+        // timeout (finite timeout), client stop, or a concurrently-set error (e.g. the background readiness
+        // task's own finite timeout firing mid-wait); does not mutate error/matched.
+        constexpr int settle_cap_multiplier = 4;
+        const auto settle = stable_matches_period;
+        const auto settle_cap = settle * settle_cap_multiplier;
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        const bool has_timeout = timeout.count() != 0;
+
+        int prev_subscribers = -1;
+        int prev_publishers = -1;
+        auto last_change = std::chrono::steady_clock::now();
+        bool have_first_match = false;
+        auto first_match = std::chrono::steady_clock::now();
+
+        while (!stopped())
+        {
+            {
+                // The background readiness task sets `error` without setting `stop` when a finite
+                // service_match_timeout elapses; bail here too so a wait_for_service() call already inside
+                // this loop returns false rather than reporting a ready service the now-errored client can
+                // no longer issue requests against.
+                const std::lock_guard<std::mutex> lock{mutex};
+                if (error)
+                {
+                    return false;
+                }
+            }
+
+            const int subscribers =
+                publisher->get_num_matched_subscribers(std::chrono::milliseconds{0}, std::chrono::milliseconds{0});
+            const int publishers =
+                subscriber->get_num_matched_publishers(std::chrono::milliseconds{0}, std::chrono::milliseconds{0});
+            const auto now = std::chrono::steady_clock::now();
+
+            if (subscribers != prev_subscribers || publishers != prev_publishers)
+            {
+                last_change = now;
+                prev_subscribers = subscribers;
+                prev_publishers = publishers;
+            }
+
+            if (subscribers > 0 && publishers > 0 && subscribers == publishers)
+            {
+                if (!have_first_match)
+                {
+                    have_first_match = true;
+                    first_match = now;
+                }
+                if (settle.count() <= 0 || (now - last_change) >= settle || (now - first_match) >= settle_cap)
+                {
+                    return true;
+                }
+            }
+
+            if (has_timeout && now >= deadline)
+            {
+                return false;
+            }
+
+            std::this_thread::sleep_for(min_wait_for_stable_matches_period);
+        }
+
+        return false;  // client stopped
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    bool service_client_basic<request_pub_sub_type, response_pub_sub_type>::wait_for_service(
+        const std::chrono::milliseconds timeout, const std::chrono::milliseconds stable_matches_period)
+    {
+        {
+            const std::lock_guard<std::mutex> lock{mutex};
+            if (error)
+            {
+                return false;  // already interrupted or a prior (finite) construction timeout fired
+            }
+        }
+        return wait_for_matched_and_settled(timeout, stable_matches_period);
     }
 
 }  // namespace provizio::dds::detail
