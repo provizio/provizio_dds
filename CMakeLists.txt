@@ -34,6 +34,14 @@ set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, wi
 set(ENABLE_TESTS OFF CACHE BOOL "Defines whether tests are built and enabled")
 set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be generated")
 set(PYTHON_PACKAGES_INSTALL_DIR "" CACHE STRING "Defines an install directory for Python artifacts (or use default if empty)")
+if(PYTHON_PACKAGES_INSTALL_DIR)
+    # Normalize to forward slashes. An absolute destination is baked verbatim into
+    # the generated cmake_install.cmake, so a native Windows path with backslashes
+    # (e.g. "D:\a\...") is re-parsed there as a quoted string and rejected with
+    # "Invalid character escape" on sequences like \a, aborting `cmake --install`.
+    # Forward slashes are valid path separators on every platform CMake supports.
+    string(REPLACE "\\" "/" PYTHON_PACKAGES_INSTALL_DIR "${PYTHON_PACKAGES_INSTALL_DIR}")
+endif()
 set(IGNORE_BIN_CACHE OFF CACHE BOOL "Enable to force build from sources instead of using prebuilt cache")
 set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binaries, skip standard C++ libraries")
 set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
