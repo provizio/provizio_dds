@@ -29,7 +29,7 @@ int main(int argc, char *argv[])
     const std::string service_name{"provizio_dds_test_request_response"};
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr int requests_expected = 5;
-    constexpr std::chrono::seconds total_timeout{30};
+    constexpr std::chrono::seconds total_timeout{30 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
     constexpr std::chrono::seconds end_sleep{4};
     // Optional argument: "serial_requests" => use the default request-queue depth,
     // otherwise cap the request queue at requests_expected

@@ -31,7 +31,7 @@ int main()
     const std::string service_name{"provizio_dds_test_request_response_ignore"};
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr int requests_expected = 5;
-    constexpr std::chrono::seconds total_timeout{30};
+    constexpr std::chrono::seconds total_timeout{30 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
     constexpr std::chrono::seconds end_sleep{4};
 
     std::mutex mutex;

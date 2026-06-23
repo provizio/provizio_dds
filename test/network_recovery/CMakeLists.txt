@@ -95,3 +95,6 @@ _nr_add_test(network_recovery_reentrant_listener_during_reset
     ARGS reentrant_listener_during_reset TIMEOUT ${_NR_TIMEOUT_DDS})
 _nr_add_test(network_recovery_concurrent_make_publisher_during_reset
     ARGS concurrent_make_publisher_during_reset TIMEOUT ${_NR_TIMEOUT_DDS})
+
+# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+provizio_dds_scale_test_timeouts()

@@ -485,3 +485,6 @@ if(WIN32)
     set_tests_properties(${PYTHON_TEST_NAMES} PROPERTIES ENVIRONMENT
         "PATH=${PROVIZIO_DDS_TEST_PATH}")
 endif(WIN32)
+
+# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+provizio_dds_scale_test_timeouts()

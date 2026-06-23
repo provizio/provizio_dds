@@ -298,6 +298,13 @@ else(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
     if(STATIC_ANALYSIS)
         message(WARNING "STATIC_ANALYSIS setting doesn't have any effect when DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS is ON")
     endif(STATIC_ANALYSIS)
+    # The runtime sanitizers are wired through coding_standards' StandardConfig (it sets the -fsanitize
+    # flags). With the standards checks disabled StandardConfig never runs, so ENABLE_ASAN / ENABLE_TSAN
+    # / ENABLE_MSAN silently produce an UNinstrumented build — warn rather than mislead.
+    if(ENABLE_ASAN OR ENABLE_TSAN OR ENABLE_MSAN)
+        message(WARNING "ENABLE_ASAN/ENABLE_TSAN/ENABLE_MSAN have no effect when DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS is ON: "
+            "the sanitizer flags come from coding_standards, which is not loaded. The build will NOT be instrumented.")
+    endif(ENABLE_ASAN OR ENABLE_TSAN OR ENABLE_MSAN)
 endif(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
 
 if(WIN32)
@@ -322,15 +329,43 @@ if(WIN32)
     )
 endif(WIN32)
 
-# Disable runtime analysis tools
-if(CMAKE_CXX_FLAGS)
-    message(WARNING "Runtime analysis tools will be disabled due to known issues in Fast-DDS")
+# Runtime sanitizers are driven by provizio/coding_standards (StandardConfig.cmake): ENABLE_ASAN
+# (defaulted on in Debug), ENABLE_TSAN or ENABLE_MSAN, which append the matching -fsanitize flags to
+# CMAKE_CXX_FLAGS / CMAKE_C_FLAGS. They were historically force-disabled here due to issues in older
+# Fast-DDS; those are now handled at runtime via suppression files (see test/sanitizers/, applied
+# through ASAN_OPTIONS / UBSAN_OPTIONS / TSAN_OPTIONS) rather than by disabling, so on GCC/Clang the
+# flags are honored.
+set(PROVIZIO_DDS_SANITIZER_FLAGS "")
+string(REGEX MATCHALL "-fsanitize=[A-Za-z,]+" _provizio_dds_san_tokens "${CMAKE_CXX_FLAGS}")
+if(MSVC)
+    # coding_standards emits GCC/Clang `-fsanitize=` syntax unconditionally, which MSVC's cl.exe
+    # rejects; strip it on Windows (sanitizer builds here target Linux/macOS only). Mirrors the
+    # original force-disable that kept Windows Debug builds working.
     set(ENABLE_ASAN FALSE)
     set(ENABLE_TSAN FALSE)
     set(ENABLE_MSAN FALSE)
-    set(CMAKE_CXX_FLAGS "")
-    set(CMAKE_C_FLAGS "")
-endif(CMAKE_CXX_FLAGS)
+    string(REGEX REPLACE " *-fsanitize=[A-Za-z,]+" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    string(REGEX REPLACE " *-fsanitize=[A-Za-z,]+" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+elseif(PYTHON_BINDINGS AND _provizio_dds_san_tokens)
+    # The instrumented provizio_dds / Fast-DDS / Fast-CDR shared libraries are dlopen'd by an
+    # UNINSTRUMENTED Python interpreter, which cannot resolve the sanitizer runtime symbols
+    # (e.g. __ubsan_vptr_type_cache, __asan_*) and fails at import. Build the Python-binding
+    # configuration uninstrumented; the C++ sanitizer coverage comes from the PYTHON_BINDINGS=OFF Debug
+    # jobs that build the identical library from source.
+    message(STATUS "PYTHON_BINDINGS is ON: disabling runtime sanitizers (an uninstrumented Python interpreter cannot load instrumented modules)")
+    set(ENABLE_ASAN FALSE)
+    set(ENABLE_TSAN FALSE)
+    set(ENABLE_MSAN FALSE)
+    string(REGEX REPLACE " *-fsanitize=[A-Za-z,]+" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    string(REGEX REPLACE " *-fsanitize=[A-Za-z,]+" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+elseif(_provizio_dds_san_tokens)
+    # GCC/Clang (Linux/macOS), no Python bindings: honor the active sanitizer and capture just its
+    # -fsanitize flags so the Fast-DDS and foonathan_memory sub-builds — separate ExternalProjects that
+    # do NOT inherit CMAKE_CXX_FLAGS — are instrumented too; a half-instrumented stack misses real
+    # races AND reports false ones.
+    string(REPLACE ";" " " PROVIZIO_DDS_SANITIZER_FLAGS "${_provizio_dds_san_tokens}")
+    message(STATUS "Runtime sanitizer active (coding_standards): ${PROVIZIO_DDS_SANITIZER_FLAGS}; instrumenting foonathan_memory and Fast-DDS to match")
+endif()
 
 if(HAS_BIN_CACHE)
     message(STATUS "Prebuilt binaries are located and will be used...")
@@ -474,6 +509,9 @@ else(HAS_BIN_CACHE)
             set(_FOONATHAN_BUILD_TYPE "Release")
         endif()
         set(_FOONATHAN_CMAKE_ARGS -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}" "-DCMAKE_BUILD_TYPE=${_FOONATHAN_BUILD_TYPE}")
+        if(PROVIZIO_DDS_SANITIZER_FLAGS)
+            list(APPEND _FOONATHAN_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}" "-DCMAKE_C_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}")
+        endif()
         execute_process(
             COMMAND "${CMAKE_COMMAND}" ${_FOONATHAN_CMAKE_ARGS}
             WORKING_DIRECTORY "${FOONATHAN_MEMORY_DIR}"
@@ -501,6 +539,9 @@ else(HAS_BIN_CACHE)
         set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules")
         if(NOT WIN32)
             list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
+        endif()
+        if(PROVIZIO_DDS_SANITIZER_FLAGS)
+            list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}" "-DCMAKE_C_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}")
         endif()
         # OpenSSL is always available here (find_package REQUIRED above)
 

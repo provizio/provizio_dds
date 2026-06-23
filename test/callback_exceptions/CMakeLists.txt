@@ -41,3 +41,6 @@ foreach(_case on_data on_has_publisher_changed service_handler)
         set_tests_properties(callback_exceptions_${_case} PROPERTIES TIMEOUT ${_CBE_TIMEOUT})
     endif()
 endforeach()
+
+# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+provizio_dds_scale_test_timeouts()

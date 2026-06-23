@@ -65,3 +65,6 @@ foreach(_case type_registry visit_known_type discovers_writer kind_filter constr
         set_tests_properties(discovered_endpoints_${_case} PROPERTIES TIMEOUT ${_de_timeout})
     endif()
 endforeach()
+
+# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+provizio_dds_scale_test_timeouts()

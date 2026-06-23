@@ -34,7 +34,7 @@ try
 {
     const std::string service_name{"provizio_dds_test_request_response"};
     constexpr provizio::dds::DomainId_t domain_id = 14;
-    constexpr std::chrono::seconds timeout{30};
+    constexpr std::chrono::seconds timeout{30 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
 
     // x and x^2 pairs; expected value 0 means "fire the request but don't validate the response".
     const std::array<std::pair<std::int32_t, std::int64_t>, 7> expected_request_response_pairs{

@@ -29,6 +29,36 @@ if(WIN32)
     string(APPEND PROVIZIO_DDS_TEST_PATH "\;${_SYSTEM_PATH_ESCAPED}")
 endif(WIN32)
 
+# Sanitizer builds run several times slower, so scale every test's TIMEOUT accordingly — but ONLY
+# when a sanitizer is active; uninstrumented builds keep their original (tight, regression-catching)
+# timeouts. PROVIZIO_DDS_SANITIZER_FLAGS is set by the top-level CMakeLists from the active
+# coding_standards sanitizer. Each test subdirectory calls provizio_dds_scale_test_timeouts() at its
+# end — a parent directory cannot modify a subdirectory's test properties, so the scaling must run in
+# the directory where the tests were registered — and it multiplies the TIMEOUT of every test there.
+set(PROVIZIO_DDS_TEST_TIMEOUT_SCALE 1)
+if(PROVIZIO_DDS_SANITIZER_FLAGS)
+    set(PROVIZIO_DDS_TEST_TIMEOUT_SCALE 5)
+endif()
+# Expose the scale to test SOURCE too: some tests have their own internal "wait for an async DDS
+# operation to complete" deadlines (e.g. wait_for_service / wait_for(response)) that the outer CTest
+# TIMEOUT scaling below does not cover. Those tests multiply ONLY such completion deadlines by this
+# macro — never deliberate delays or negative ("must not happen within T") windows. Defined for every
+# test target (value 1 unless a sanitizer is active) so the source never needs an #ifndef fallback.
+add_compile_definitions(PROVIZIO_DDS_TEST_TIMEOUT_SCALE=${PROVIZIO_DDS_TEST_TIMEOUT_SCALE})
+function(provizio_dds_scale_test_timeouts)
+    if(NOT PROVIZIO_DDS_TEST_TIMEOUT_SCALE GREATER 1)
+        return()
+    endif()
+    get_property(_provizio_dds_tests DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY TESTS)
+    foreach(_provizio_dds_test ${_provizio_dds_tests})
+        get_property(_provizio_dds_to TEST "${_provizio_dds_test}" PROPERTY TIMEOUT)
+        if(_provizio_dds_to)
+            math(EXPR _provizio_dds_nto "${_provizio_dds_to} * ${PROVIZIO_DDS_TEST_TIMEOUT_SCALE}")
+            set_property(TEST "${_provizio_dds_test}" PROPERTY TIMEOUT "${_provizio_dds_nto}")
+        endif()
+    endforeach()
+endfunction()
+
 add_subdirectory(simplest_pub_sub)
 add_subdirectory(pub_sub_type_reuse)
 add_subdirectory(reliable_pub_sub)

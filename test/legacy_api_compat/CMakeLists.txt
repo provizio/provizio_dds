@@ -26,3 +26,6 @@ if(WIN32)
 else()
     set_tests_properties(legacy_api_compat_cpp_test PROPERTIES TIMEOUT 10)
 endif()
+
+# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+provizio_dds_scale_test_timeouts()

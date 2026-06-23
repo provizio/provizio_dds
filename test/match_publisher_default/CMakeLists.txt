@@ -47,3 +47,6 @@ foreach(_case deferral adopts_reliable adopts_best_effort explicit_best_effort e
         set_tests_properties(match_publisher_default_${_case} PROPERTIES TIMEOUT ${_MP_TIMEOUT})
     endif()
 endforeach()
+
+# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+provizio_dds_scale_test_timeouts()

@@ -32,7 +32,7 @@ try
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr std::chrono::seconds time_to_match{5};
     constexpr std::chrono::milliseconds timeout{
-        10000};  // DDS entity matching can be slow on some platforms (e.g. Windows)
+        10000 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};  // DDS entity matching can be slow on some platforms (e.g. Windows)
 
     // These are x and x^2 pairs, except of those with expected values of 0 which means we want to interrupt the
     // requests and make sure all behaves well

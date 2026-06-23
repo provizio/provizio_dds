@@ -234,6 +234,15 @@ jobs:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: OFF
+      # Run the "takes long by design" reliability request/response stress tests (128 rapid
+      # create/destroy iterations) only in Release. In Debug, coding_standards auto-enables ASan, under
+      # which each iteration runs several times slower; on the slower runners (notably the jetson ARM
+      # self-hosted runner) that stretched timing intermittently trips Fast-DDS's known asymmetric-matching
+      # "Timeout waiting for request/response" limitation (volatile request/response endpoints) — a flake,
+      # not a regression. Excluding them in Debug removes that noise without losing coverage: the
+      # non-stress request_response tests still exercise the path under ASan in Debug, and the reliability
+      # tests still run in Release. (The dedicated TSan job, test-nix-tsan, excludes them for the same reason.)
+      PROVIZIO_DDS_CTEST_EXCLUDE: ${{ matrix.build_type == 'Debug' && 'reliability' || '' }}
     steps:
       - uses: actions/checkout@v4
       # Remove any stale venv left by build-cache-python-arm on shared self-hosted runners
@@ -241,6 +250,33 @@ jobs:
       - run: rm -rf /tmp/provizio_dds.venv
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
+      - run: .github/workflows/test.sh
+
+  # ThreadSanitizer. ASan/UBSan/LSan come for free on the Debug matrix above (coding_standards enables
+  # them in Debug and the whole stack — provizio_dds, foonathan_memory, Fast-DDS — is built from source
+  # with the flags). TSan is mutually exclusive with ASan, so it gets its own Debug+clang job here.
+  test-nix-tsan:
+    name: Test (ThreadSanitizer)
+    runs-on: ${{matrix.runner}}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest]
+        cc: [clang]
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: OFF
+      ENABLE_ROS_TESTS: OFF
+      # Skip the long "takes long by design" reliability stress tests under TSan (see test.sh).
+      PROVIZIO_DDS_CTEST_EXCLUDE: reliability
+    steps:
+      - uses: actions/checkout@v4
+      - run: rm -rf /tmp/provizio_dds.venv
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "OFF" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
+      # TSan's shadow-memory mapping can fail under the high ASLR entropy of newer kernels
+      # ("FATAL: ThreadSanitizer: unexpected memory mapping"); lower mmap randomization so it
+      # initializes. Best-effort — harmless where the kernel default is already low enough.
+      - run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=TRUE -DPYTHON_BINDINGS=OFF -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
 
   test-nix-python-versions:
@@ -354,6 +390,12 @@ jobs:
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: OFF
       IGNORE_BIN_CACHE: TRUE
+      # Skip the reliability request/response stress tests in Debug (coding_standards auto-enables ASan
+      # there): under ASan they run several times slower and intermittently trip Fast-DDS's known
+      # asymmetric-matching "Timeout waiting for request/response" flake on slower runners, without adding
+      # coverage the non-stress request_response tests (still run under ASan) and the Release reliability
+      # runs don't. See the test-nix job for the full rationale.
+      PROVIZIO_DDS_CTEST_EXCLUDE: ${{ matrix.build_type == 'Debug' && 'reliability' || '' }}
     steps:
       - uses: actions/checkout@v4
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}" /usr/
@@ -403,7 +445,12 @@ jobs:
       - run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${PYTHON_BINDINGS}" "${STATIC_ANALYSIS}"
       - run: .github/workflows/sudo.sh apt install -y ros-${{matrix.ros}}-demo-nodes-cpp
-      - run: bash -c "source /opt/ros/${{matrix.ros}}/setup.bash && .github/workflows/build.sh -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DSTATIC_ANALYSIS=${STATIC_ANALYSIS} -DPYTHON_BINDINGS=${PYTHON_BINDINGS} -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}"
+      # Coding-standards checks are disabled here (incl. the ASan that StandardConfig auto-enables in
+      # Debug): the ros:* container toolchains ship clang/gcc WITHOUT the compiler-rt sanitizer runtime
+      # (libclang_rt.asan*), so an instrumented Debug build fails at the CMake compiler check. This job
+      # verifies ROS 2 wire interop, not coding standards — the -Werror / clang-tidy / sanitizer gates
+      # run on the test-nix and test-nix-tsan jobs, which use toolchains that have the runtime.
+      - run: bash -c "source /opt/ros/${{matrix.ros}}/setup.bash && .github/workflows/build.sh -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON -DSTATIC_ANALYSIS=${STATIC_ANALYSIS} -DPYTHON_BINDINGS=${PYTHON_BINDINGS} -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}"
       - run: bash -c "source /opt/ros/${{matrix.ros}}/setup.bash && .github/workflows/test.sh"
 
   # Build-only check: catches compile errors early without waiting for the full

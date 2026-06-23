@@ -25,3 +25,6 @@ if(WIN32)
 else()
     set_tests_properties(simplest_pub_sub PROPERTIES TIMEOUT 20)
 endif()
+
+# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+provizio_dds_scale_test_timeouts()

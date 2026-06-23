@@ -128,3 +128,6 @@ else()
         request_response_ignore_async
         PROPERTIES TIMEOUT 30)
 endif()
+
+# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+provizio_dds_scale_test_timeouts()
