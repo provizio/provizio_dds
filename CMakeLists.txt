@@ -537,6 +537,15 @@ else(HAS_BIN_CACHE)
             set(_FAST_DDS_BUILD_TYPE "Release")
         endif()
         set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules")
+        # Fast-DDS turns on CMAKE_COMPILE_WARNING_AS_ERROR (its own -Werror / MSVC /WX) for every build
+        # except TSan. As a vendored third-party dependency, its internal warnings must never gate our
+        # CI: newer toolchains warn on code we don't own (e.g. macos-latest's Apple clang flags a
+        # -Wnonnull in Fast-DDS's own TypeObjectRegistry.cpp). Tell the sub-build's CMake to ignore
+        # CMAKE_COMPILE_WARNING_AS_ERROR (overrides the project's set(); CMake >= 3.24). provizio_dds's
+        # own build is a separate CMake invocation and keeps its -Werror.
+        if(NOT CMAKE_VERSION VERSION_LESS "3.24")
+            list(APPEND FAST_DDS_CMAKE_ARGS "--compile-no-warning-as-error")
+        endif()
         if(NOT WIN32)
             list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
         endif()
