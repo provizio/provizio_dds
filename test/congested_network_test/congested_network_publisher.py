@@ -52,7 +52,10 @@ publisher = provizio_dds.Publisher(
     topic,
     provizio_dds.StringPubSubType,
     on_matched,
-    history_depth=5, # To deliver up to 5 messages to late matchers thus improving reliability
+    history_depth=5,  # KEEP_LAST(5)
+    # History no longer implies durability (it was untied), so request TRANSIENT_LOCAL
+    # explicitly to keep delivering the last messages to late matchers, improving reliability.
+    durability_kind=provizio_dds.TRANSIENT_LOCAL_DURABILITY_QOS,
 )
 
 message = provizio_dds.String()

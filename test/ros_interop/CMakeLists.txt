@@ -78,3 +78,6 @@ if(ENABLE_ROS_TESTS)
 else(ENABLE_ROS_TESTS)
     message(STATUS "Excluding ROS-interoperability tests as ENABLE_ROS_TESTS is OFF")
 endif(ENABLE_ROS_TESTS)
+
+# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+provizio_dds_scale_test_timeouts()

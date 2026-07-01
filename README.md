@@ -24,7 +24,7 @@ built-in data types.
 - Git
 - C++ 17 compiler (gcc, clang, or MSVC)
 - libssl-dev (OpenSSL development headers)
-- When Fast-DDS installation is present it will be used, otherwise downloaded and built automatically
+- eProsima Fast-DDS 3.x (provizio_dds builds against the Fast-DDS 3.x API): when a Fast-DDS installation is present it will be used, otherwise it's downloaded and built automatically. Existing 1.10.x sources keep compiling — the migration is source-compatible — but note the `FASTRTPS_DEFAULT_PROFILES_FILE` environment variable was renamed to `FASTDDS_DEFAULT_PROFILES_FILE` (see [XML Profiles](#xml-profiles)).
 
 **C++ (Windows):**
 
@@ -139,7 +139,7 @@ python -m pip install -v git+https://github.com/provizio/provizio_dds.git
 
 ```C++
 #include "provizio/dds/publisher.h"
-#include <std_msgs/msg/StringPubSubTypes.h>
+#include <std_msgs/msg/StringPubSubTypes.hpp>
 
 int main()
 {
@@ -186,8 +186,11 @@ For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/
 
 **Notes:**
 
-- Publishers support configurable reliability QoS (BEST_EFFORT or RELIABLE). See `provizio::dds::make_publisher` (C++) or `provizio_dds.Publisher` (Python) for parameters.
-- Publishers support configurable durability QoS and optional history depth: keep default durability by passing `-1` (no changes), pass `0` to force VOLATILE durability (no history), or pass a positive value to enable TRANSIENT_LOCAL durability (KEEP_LAST with the given depth). See headers/Python docs for details.
+- Publishers support configurable reliability QoS (BEST_EFFORT or RELIABLE; RELIABLE by default). See `provizio::dds::make_publisher` (C++) or `provizio_dds.Publisher` (Python) for parameters.
+- Durability and history depth are now configured **independently** (they used to be a single combined parameter):
+  - `durability_kind` selects the DDS durability QoS — pass `TRANSIENT_LOCAL_DURABILITY_QOS` for late-joiner delivery or `VOLATILE_DURABILITY_QOS` to force volatile. Leave it unset (`std::nullopt` in C++, omit / `None` in Python) to keep the Fast-DDS / XML-profile default.
+  - `history_depth` controls the KEEP_LAST history depth only. Pass `use_default_history_depth` (`-1`; `USE_DEFAULT_HISTORY_DEPTH` in Python), or any non-positive value, to keep the default depth (the per-type default where one exists — see the large-data note below — otherwise Fast-DDS's default); pass a positive value for an explicit KEEP_LAST depth.
+- Large-sample types (`sensor_msgs::msg::Image`, `CompressedImage`, `MultiEchoLaserScan`, `PointCloud2`, and `nav_msgs::msg::OccupancyGrid`) default to **ASYNCHRONOUS** publishing with a small **KEEP_LAST(4)** history, so a multi-megabyte write hands off to the participant's async sender thread and a momentarily slow consumer doesn't drop frames. These are writer-local defaults and do not affect reader/writer matching or ROS 2 interoperability.
 - You can optionally receive subscriber match/unmatch notifications. See `provizio::dds::make_publisher` (C++) or `provizio_dds.Publisher` (Python) for parameters.
 
 ## Receiving Data
@@ -196,7 +199,7 @@ For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/
 
 ```C++
 #include "provizio/dds/subscriber.h"
-#include <std_msgs/msg/StringPubSubTypes.h>
+#include <std_msgs/msg/StringPubSubTypes.hpp>
 #include <iostream>
 
 int main()
@@ -237,9 +240,76 @@ For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/
 **Notes:**
 
 - The data callback can take either one argument (the data) or two (data and `SampleInfo`). Both are supported in C++ and Python bindings.
-- Subscribers support configurable reliability QoS (BEST_EFFORT or RELIABLE). See `provizio::dds::make_subscriber` (C++) or `provizio_dds.Subscriber` (Python) for parameters.
-- Subscribers support configurable durability QoS and optional history depth: keep default durability by passing `-1` (no changes), pass `0` to force VOLATILE durability (no history), or pass a positive value to enable TRANSIENT_LOCAL durability (KEEP_LAST with the given depth). See headers/Python docs for details.
+- **By default a subscriber adopts the discovered publisher's reliability.** Rather than creating its DataReader eagerly, it defers creation until a matching remote DataWriter is discovered on its topic, then builds the reader with that writer's offered reliability (the first-discovered writer's reliability is adopted while it stays live; if it later leaves and only a differently-configured writer remains, a newly-created default subscriber re-derives the reliability from a still-live writer so it still matches — while an already-built reader keeps its own reliability for its lifetime). A default subscriber is therefore automatically reliable against a RELIABLE publisher and best-effort against a best-effort one, with no configuration and without the reliability mismatch that would otherwise prevent matching. Pass an explicit `reliability_kind` (`BEST_EFFORT_RELIABILITY_QOS` / `RELIABLE_RELIABILITY_QOS`) to opt out and get an eagerly-created reader with that fixed reliability (the previous behaviour).
+- Durability and history depth are configured **independently** (as for publishers above): `durability_kind` selects the durability QoS (unset keeps the default), and `max_history_depth` controls only the KEEP_LAST history depth (`-1` / non-positive keeps the default depth; a positive value sets an explicit depth).
 - You can optionally receive publisher match/unmatch notifications. See `provizio::dds::make_subscriber` (C++) or `provizio_dds.Subscriber` (Python) for parameters.
+
+## Discovering Endpoints and Known Types
+
+For tools that don't know their topic list up front — recorders, bridges, monitors — the domain participant can report remote DDS endpoints as they appear and disappear on the network, and tell you which message types the process is able to handle.
+
+Register an `on_discovered_endpoint` callback and it fires whenever a remote endpoint of the requested kind(s) is discovered or removed. The callback receives the topic name, the wire-format type name, the endpoint kind (data writer / data reader), whether it appeared or disappeared, and the endpoint's reliability and durability QoS — enough for a recording bridge to create a matching reader/writer per topic. `is_known_type` / `known_types` let the callback filter the stream down to the types it can actually deserialise.
+
+**C++ Example:**
+
+```C++
+#include "provizio/dds/domain_participant.h"
+#include <iostream>
+
+int main()
+{
+    // Installing the callback at construction (rather than calling
+    // on_discovered_endpoint() afterwards) guarantees no endpoint already on
+    // the network is missed — the listener is attached before discovery starts.
+    auto participant = provizio::dds::make_domain_participant(
+        0,                                                        // DDS domain id
+        provizio::dds::network_recovery_mode::env_var_controlled, // Network auto-recovery
+        [](provizio::dds::domain_participant &participant, const std::string &topic_name,
+           const std::string &type_name, provizio::dds::endpoint_kind /*kind*/, bool discovered,
+           eprosima::fastdds::dds::ReliabilityQosPolicyKind reliability,
+           eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
+            // Only react to types this process can actually deserialise
+            if (discovered && participant.is_known_type(type_name))
+            {
+                const bool reliable = reliability == eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS;
+                std::cout << (reliable ? "reliable" : "best-effort") << " publisher on " << topic_name
+                          << " (" << type_name << ")\n";
+            }
+        });
+
+    std::cin.get(); // Wait for any user input
+    return 0;
+}
+```
+
+By default the callback fires for remote DataWriters only (the right choice for a recorder). Pass `provizio::dds::endpoint_kind::data_writer | provizio::dds::endpoint_kind::data_reader` as the following argument to receive both.
+
+**Python Example:**
+
+```Python
+import provizio_dds
+
+def on_endpoint(participant, topic_name, type_name, kind, discovered, reliability, durability):
+    # Only react to types this process can deserialise
+    if discovered and participant.is_known_type(type_name):
+        reliable = reliability == provizio_dds.RELIABLE_RELIABILITY_QOS
+        print(f"{'reliable' if reliable else 'best-effort'} publisher on {topic_name} ({type_name})")
+
+# Install at construction to avoid missing endpoints already on the network
+participant = provizio_dds.make_domain_participant(initial_discovery_callback=on_endpoint)
+
+input("Press Enter to continue...")
+```
+
+You can also register, replace, or unregister (with an empty / `None` callback) the handler after construction via `participant.on_discovered_endpoint(callback, kinds)` — at the cost of a tiny race window for endpoints discovered before the call.
+
+**Notes:**
+
+- The callback runs on the Fast-DDS discovery thread. Keep it short, don't block, and don't create endpoints or re-register the callback from inside it — filter and enqueue, then do the real work on your own thread.
+- It survives network-recovery resets: the listener is re-attached to the recreated participant automatically.
+- For C++ callers that want to construct a typed publisher/subscriber for a discovered type without hard-coding it, the build generates a `provizio::dds::visit_known_type<Visitor>(type_name, visitor)` dispatcher that routes a runtime type-name string to a templated visitor instantiated for every type shipped by `provizio_dds_idls`. See [cmake/known_types_dispatcher.h.in](cmake/known_types_dispatcher.h.in).
+
+For details see [include/provizio/dds/domain_participant.h](include/provizio/dds/domain_participant.h).
 
 ## Network Auto-Recovery
 
@@ -300,6 +370,38 @@ Recognised values (case-insensitive): `on` / `1` / `true` / `yes` to enable, `of
 
 For details see [include/provizio/dds/network_recovery.h](include/provizio/dds/network_recovery.h).
 
+## Transport Selection
+
+By default a participant uses the platform's standard transports: shared memory plus UDPv4 on Linux, and UDPv4 only on Windows/macOS (where shared memory is disabled to avoid a Boost.Interprocess cleanup bug). On every platform the UDP transport is tuned with enlarged (16 MiB) socket buffers so reliable delivery of large samples — camera frames, point clouds — works across hosts without extra configuration.
+
+Pass `transport_mode::udp_only` (C++) / `TransportMode.UDP_ONLY` (Python) to `make_domain_participant` to disable shared memory on every platform. This helps when a participant bridges mismatched Fast-DDS major versions (e.g. a recorder relaying 2.x publishers), where cross-major shared-memory negotiation can degrade large-sample throughput.
+
+```C++
+#include "provizio/dds/domain_participant.h"
+
+// Platform default — SHM + UDP on Linux, UDP-only on Windows/macOS:
+auto participant_default = provizio::dds::make_domain_participant();
+
+// UDP-only on every platform:
+auto participant_udp_only = provizio::dds::make_domain_participant(
+    0, provizio::dds::network_recovery_mode::env_var_controlled, {},
+    provizio::dds::endpoint_kind::data_writer, provizio::dds::transport_mode::udp_only);
+```
+
+```Python
+import provizio_dds
+
+# Platform default:
+participant_default = provizio_dds.make_domain_participant()
+
+# UDP-only on every platform:
+participant_udp_only = provizio_dds.make_domain_participant(transport=provizio_dds.TransportMode.UDP_ONLY)
+```
+
+The large-sample message types listed under [Publishing Data](#publishing-data) additionally default to asynchronous publishing with a small KEEP_LAST history, which complements the enlarged socket buffers for high-throughput data.
+
+For details see [include/provizio/dds/domain_participant.h](include/provizio/dds/domain_participant.h).
+
 ## Logging
 
 provizio_dds emits diagnostic messages from background threads (network-recovery monitor, coalescer, participant reset) as well as from a few error paths in the request/response code. By default, info and warning messages go to `std::cout` and errors go to `std::cerr`, all prefixed with `[provizio_dds]`. To route the output into your application's logging system, install a callback:
@@ -332,6 +434,8 @@ def on_log(level, message):
 provizio_dds.set_log_callback(on_log)
 ```
 
+Exceptions thrown from any user-supplied callback — data handlers, publisher/subscriber match notifications, the endpoint-discovery callback — are caught at the library boundary and reported through this log callback (at error level) instead of propagating into the Fast-DDS background threads, where an uncaught exception would terminate the process. Your callbacks can therefore throw without crashing the application, though handling errors within them is still preferable.
+
 For details see [include/provizio/dds/logging.h](include/provizio/dds/logging.h) and [python/network_recovery.py](python/network_recovery.py).
 
 ## Request/Response
@@ -344,7 +448,7 @@ The library provides a lightweight request/response API built on top of DDS topi
 
 ```C++
 #include "provizio/dds/request_response.h"
-#include <std_msgs/msg/StringPubSubTypes.h>
+#include <std_msgs/msg/StringPubSubTypes.hpp>
 #include <chrono>
 #include <iostream>
 
@@ -390,13 +494,85 @@ async def main():
 asyncio.run(main())
 ```
 
+### Reusable Client (`service_client`)
+
+`request(...)` is a one-shot helper: it creates a fresh client, waits for matching, sends a single request, and tears the client down. To issue **many requests** — especially concurrently — create a `service_client` once, up front. It matches the service(s) in the background (so it is ready by the time you need it) and supports many in-flight requests at once, each returning its own future. Optionally call `wait_for_service(...)` to block until the service(s) are ready before sending; like `request(...)`, that readiness wait includes a settling window, so all services sharing the topic (e.g. multiple sensors keyed by `frame_id`) are discovered first.
+
+**C++ Example:**
+
+```C++
+#include "provizio/dds/request_response.h"
+#include <std_msgs/msg/StringPubSubTypes.hpp>
+#include <chrono>
+#include <iostream>
+#include <vector>
+
+int main()
+{
+    auto participant = provizio::dds::make_domain_participant();
+    auto client = provizio::dds::make_service_client<std_msgs::msg::StringPubSubType,
+                                                      std_msgs::msg::StringPubSubType>(
+        participant, "echo_service");
+
+    // Optional: block until the service(s) are ready (includes the settling window).
+    client->wait_for_service(std::chrono::seconds{5});
+
+    // Many requests, each returning its own future_response; all may be in flight at once.
+    std::vector<provizio::dds::future_response<std_msgs::msg::StringPubSubType,
+                                               std_msgs::msg::StringPubSubType>> futures;
+    for (int i = 0; i < 10; ++i) {
+        std_msgs::msg::String request;
+        request.data("hello " + std::to_string(i));
+        futures.push_back(client->request(request));
+    }
+    for (auto &future : futures) {
+        if (future.wait_for(std::chrono::seconds{2}) == std::future_status::ready) {
+            std::cout << future.get().data() << std::endl;
+        }
+    }
+
+    return 0;
+}
+```
+
+**Python Example:**
+
+```Python
+import asyncio
+import provizio_dds
+
+async def main():
+    participant = provizio_dds.make_domain_participant()
+    client = provizio_dds.ServiceClient(
+        participant,
+        provizio_dds.StringPubSubType,  # request PubSub type
+        provizio_dds.StringPubSubType,  # response PubSub type
+        provizio_dds.String,            # response data type
+        service_name="echo_service",
+    )
+
+    # Optional: block until the service(s) are ready (includes the settling window).
+    await client.wait_for_service(timeout_sec=5.0)
+
+    # Many requests in flight at once; each request() is awaitable.
+    requests = []
+    for i in range(10):
+        request = provizio_dds.String()
+        request.data(f"hello {i}")
+        requests.append(client.request(request))
+    for response in await asyncio.gather(*requests):
+        print(response.data())
+
+asyncio.run(main())
+```
+
 ### Creating a Service
 
 **C++ Example:**
 
 ```C++
 #include "provizio/dds/request_response.h"
-#include <std_msgs/msg/StringPubSubTypes.h>
+#include <std_msgs/msg/StringPubSubTypes.hpp>
 #include <iostream>
 
 int main() {
@@ -451,8 +627,10 @@ service.stop()
 
 - Both synchronous and asynchronous service handlers are supported. Asynchronous handlers return `std::future` (C++) or are `async def` coroutines (Python).
 - Reliability is set to RELIABLE for response readers/writers by default. The client’s request Publisher uses default (volatile) durability, while the service’s response Publisher uses TRANSIENT_LOCAL durability with a small history (depth 10) for robust delivery (compatible with ROS 2).
+- Per-endpoint durability and history are configurable on both sides. `make_service(...)` / `provizio_dds.Service(...)` and `request(...)` accept an optional `durability_kind` and an `endpoint_history_depth` (the KEEP_LAST history depth of the underlying request/response DataWriters/DataReaders); leaving them at the defaults preserves the behaviour described above. Note that `max_history_depth` is a separate knob — it bounds the request **queue size**, not the endpoint history (`minimal_request_queue` / `MINIMAL_REQUEST_QUEUE`, i.e. `0`, selects a minimal bounded queue).
 - Before publishing the first request, a short graph-based “readiness” wait is performed to ensure endpoints are matched and stable, avoiding races immediately after discovery.
 - Optionally, the client request API lets you enforce a post-match settling window and (if desired) a finite matching timeout before the first request publish. See C++ `provizio::dds::request(..., std::chrono::milliseconds stable_matches_period = 1000ms, std::chrono::milliseconds service_match_timeout = 0ms)`, and Python `provizio_dds.request(..., stable_matches_period_sec=1.0, service_match_timeout_sec=0.0)` for the settling window control (use 0 to skip the extra wait).
+- For issuing many requests (especially concurrently), reuse a single client created up front: `provizio::dds::make_service_client(...)` (C++) or `provizio_dds.ServiceClient(...)` (Python) — see [Reusable Client](#reusable-client-service_client) above. Its `request(...)` returns a `future_response` (C++) or an awaitable (Python), supports many requests in flight at once, and `wait_for_service(timeout[, stable_matches_period])` blocks until ready (settling window included). Its endpoints default to a bounded KEEP_LAST history (depth 10, matching the service's default response history), so a burst of up to that many concurrent requests/responses is retained and the reliable writer applies back-pressure beyond it; raise `endpoint_history_depth` for higher concurrency.
 - To drop a request silently from a service handler, throw `provizio::dds::ignore_request` (C++) or raise `provizio_dds.Service.IgnoreRequest` (Python). Such requests are discarded without warnings.
 
 ### ROS 2 compatibility

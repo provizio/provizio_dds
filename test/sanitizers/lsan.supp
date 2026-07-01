@@ -1,0 +1,16 @@
+# LeakSanitizer suppressions for provizio_dds sanitizer builds (applied via LSAN_OPTIONS).
+# These suppress eProsima-owned allocations (notably Fast-DDS's process-lifetime singletons — the
+# DomainParticipantFactory, the logging infrastructure, etc.), which LSan reports as leaks at process
+# exit. That is a known property of Fast-DDS (as of nearly every C++ middleware), not a provizio_dds
+# bug, so it must not block the ASan/LSan Debug CI matrix.
+#
+# Scope note: LSan matches a suppression against any frame of the ALLOCATION stack, so a provizio_dds
+# object that is leaked but was allocated *inside* a Fast-DDS call (e.g. a DDS entity provizio_dds
+# creates and forgets to delete) would also be masked. That residual is accepted: provizio_dds owns
+# its DDS entities through RAII handles (publisher_handle / subscriber_handle) whose lifecycle bugs
+# surface through ASan's (unsuppressed) use-after-free / double-free detection, and provizio_dds's own
+# heap objects are allocated via provizio_dds frames, which these entries do not match. Keep these
+# entries as narrow as the observed Fast-DDS leak signatures require.
+leak:eprosima
+leak:libfastdds
+leak:libfastcdr

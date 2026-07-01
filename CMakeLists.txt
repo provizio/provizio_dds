@@ -34,6 +34,14 @@ set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, wi
 set(ENABLE_TESTS OFF CACHE BOOL "Defines whether tests are built and enabled")
 set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be generated")
 set(PYTHON_PACKAGES_INSTALL_DIR "" CACHE STRING "Defines an install directory for Python artifacts (or use default if empty)")
+if(PYTHON_PACKAGES_INSTALL_DIR)
+    # Normalize to forward slashes. An absolute destination is baked verbatim into
+    # the generated cmake_install.cmake, so a native Windows path with backslashes
+    # (e.g. "D:\a\...") is re-parsed there as a quoted string and rejected with
+    # "Invalid character escape" on sequences like \a, aborting `cmake --install`.
+    # Forward slashes are valid path separators on every platform CMake supports.
+    string(REPLACE "\\" "/" PYTHON_PACKAGES_INSTALL_DIR "${PYTHON_PACKAGES_INSTALL_DIR}")
+endif()
 set(IGNORE_BIN_CACHE OFF CACHE BOOL "Enable to force build from sources instead of using prebuilt cache")
 set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binaries, skip standard C++ libraries")
 set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
@@ -290,6 +298,13 @@ else(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
     if(STATIC_ANALYSIS)
         message(WARNING "STATIC_ANALYSIS setting doesn't have any effect when DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS is ON")
     endif(STATIC_ANALYSIS)
+    # The runtime sanitizers are wired through coding_standards' StandardConfig (it sets the -fsanitize
+    # flags). With the standards checks disabled StandardConfig never runs, so ENABLE_ASAN / ENABLE_TSAN
+    # / ENABLE_MSAN silently produce an UNinstrumented build — warn rather than mislead.
+    if(ENABLE_ASAN OR ENABLE_TSAN OR ENABLE_MSAN)
+        message(WARNING "ENABLE_ASAN/ENABLE_TSAN/ENABLE_MSAN have no effect when DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS is ON: "
+            "the sanitizer flags come from coding_standards, which is not loaded. The build will NOT be instrumented.")
+    endif(ENABLE_ASAN OR ENABLE_TSAN OR ENABLE_MSAN)
 endif(NOT DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS)
 
 if(WIN32)
@@ -314,15 +329,43 @@ if(WIN32)
     )
 endif(WIN32)
 
-# Disable runtime analysis tools
-if(CMAKE_CXX_FLAGS)
-    message(WARNING "Runtime analysis tools will be disabled due to known issues in Fast-DDS")
+# Runtime sanitizers are driven by provizio/coding_standards (StandardConfig.cmake): ENABLE_ASAN
+# (defaulted on in Debug), ENABLE_TSAN or ENABLE_MSAN, which append the matching -fsanitize flags to
+# CMAKE_CXX_FLAGS / CMAKE_C_FLAGS. They were historically force-disabled here due to issues in older
+# Fast-DDS; those are now handled at runtime via suppression files (see test/sanitizers/, applied
+# through ASAN_OPTIONS / UBSAN_OPTIONS / TSAN_OPTIONS) rather than by disabling, so on GCC/Clang the
+# flags are honored.
+set(PROVIZIO_DDS_SANITIZER_FLAGS "")
+string(REGEX MATCHALL "-fsanitize=[A-Za-z,]+" _provizio_dds_san_tokens "${CMAKE_CXX_FLAGS}")
+if(MSVC)
+    # coding_standards emits GCC/Clang `-fsanitize=` syntax unconditionally, which MSVC's cl.exe
+    # rejects; strip it on Windows (sanitizer builds here target Linux/macOS only). Mirrors the
+    # original force-disable that kept Windows Debug builds working.
     set(ENABLE_ASAN FALSE)
     set(ENABLE_TSAN FALSE)
     set(ENABLE_MSAN FALSE)
-    set(CMAKE_CXX_FLAGS "")
-    set(CMAKE_C_FLAGS "")
-endif(CMAKE_CXX_FLAGS)
+    string(REGEX REPLACE " *-fsanitize=[A-Za-z,]+" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    string(REGEX REPLACE " *-fsanitize=[A-Za-z,]+" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+elseif(PYTHON_BINDINGS AND _provizio_dds_san_tokens)
+    # The instrumented provizio_dds / Fast-DDS / Fast-CDR shared libraries are dlopen'd by an
+    # UNINSTRUMENTED Python interpreter, which cannot resolve the sanitizer runtime symbols
+    # (e.g. __ubsan_vptr_type_cache, __asan_*) and fails at import. Build the Python-binding
+    # configuration uninstrumented; the C++ sanitizer coverage comes from the PYTHON_BINDINGS=OFF Debug
+    # jobs that build the identical library from source.
+    message(STATUS "PYTHON_BINDINGS is ON: disabling runtime sanitizers (an uninstrumented Python interpreter cannot load instrumented modules)")
+    set(ENABLE_ASAN FALSE)
+    set(ENABLE_TSAN FALSE)
+    set(ENABLE_MSAN FALSE)
+    string(REGEX REPLACE " *-fsanitize=[A-Za-z,]+" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    string(REGEX REPLACE " *-fsanitize=[A-Za-z,]+" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+elseif(_provizio_dds_san_tokens)
+    # GCC/Clang (Linux/macOS), no Python bindings: honor the active sanitizer and capture just its
+    # -fsanitize flags so the Fast-DDS and foonathan_memory sub-builds — separate ExternalProjects that
+    # do NOT inherit CMAKE_CXX_FLAGS — are instrumented too; a half-instrumented stack misses real
+    # races AND reports false ones.
+    string(REPLACE ";" " " PROVIZIO_DDS_SANITIZER_FLAGS "${_provizio_dds_san_tokens}")
+    message(STATUS "Runtime sanitizer active (coding_standards): ${PROVIZIO_DDS_SANITIZER_FLAGS}; instrumenting foonathan_memory and Fast-DDS to match")
+endif()
 
 if(HAS_BIN_CACHE)
     message(STATUS "Prebuilt binaries are located and will be used...")
@@ -466,6 +509,9 @@ else(HAS_BIN_CACHE)
             set(_FOONATHAN_BUILD_TYPE "Release")
         endif()
         set(_FOONATHAN_CMAKE_ARGS -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}" "-DCMAKE_BUILD_TYPE=${_FOONATHAN_BUILD_TYPE}")
+        if(PROVIZIO_DDS_SANITIZER_FLAGS)
+            list(APPEND _FOONATHAN_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}" "-DCMAKE_C_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}")
+        endif()
         execute_process(
             COMMAND "${CMAKE_COMMAND}" ${_FOONATHAN_CMAKE_ARGS}
             WORKING_DIRECTORY "${FOONATHAN_MEMORY_DIR}"
@@ -491,8 +537,20 @@ else(HAS_BIN_CACHE)
             set(_FAST_DDS_BUILD_TYPE "Release")
         endif()
         set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules")
+        # Fast-DDS turns on CMAKE_COMPILE_WARNING_AS_ERROR (its own -Werror / MSVC /WX) for every build
+        # except TSan. As a vendored third-party dependency, its internal warnings must never gate our
+        # CI: newer toolchains warn on code we don't own (e.g. macos-latest's Apple clang flags a
+        # -Wnonnull in Fast-DDS's own TypeObjectRegistry.cpp). Tell the sub-build's CMake to ignore
+        # CMAKE_COMPILE_WARNING_AS_ERROR (overrides the project's set(); CMake >= 3.24). provizio_dds's
+        # own build is a separate CMake invocation and keeps its -Werror.
+        if(NOT CMAKE_VERSION VERSION_LESS "3.24")
+            list(APPEND FAST_DDS_CMAKE_ARGS "--compile-no-warning-as-error")
+        endif()
         if(NOT WIN32)
             list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
+        endif()
+        if(PROVIZIO_DDS_SANITIZER_FLAGS)
+            list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}" "-DCMAKE_C_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}")
         endif()
         # OpenSSL is always available here (find_package REQUIRED above)
 
@@ -589,12 +647,78 @@ else(HAS_BIN_CACHE)
         add_dependencies(provizio_dds_types ${FAST_DDS_DEPENDENCIES})
     endif(FAST_DDS_DEPENDENCIES)
 
-    target_include_directories(provizio_dds_types SYSTEM PUBLIC include ${PROVIZIO_DDS_IDLS_SRC_DIR} ${FAST_DDS_INCLUDE_DIRS})
+    # generated_include/ hosts headers configure_file'd from cmake/*.h.in below
+    # (e.g. provizio/dds/known_types_dispatcher.h, autogenerated from the
+    # consumed provizio_dds_idls's *PubSubTypes.hpp set). Expose it on the same
+    # PUBLIC include path as include/ so consumers see one logical
+    # provizio/dds/ namespace regardless of which headers are generated.
+    target_include_directories(provizio_dds_types SYSTEM PUBLIC
+        include
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated_include>"
+        ${PROVIZIO_DDS_IDLS_SRC_DIR}
+        ${FAST_DDS_INCLUDE_DIRS})
     target_link_libraries(provizio_dds_types PUBLIC ${FASTDDS_LIB} ${FASTCDR_LIB})
     # PROVIZIO_DDS_TYPES_EXPORTS is not currently consumed by any header macro
     # (generated IDL code uses EPROSIMA_USER_DLL_EXPORT instead), but is set for
     # forward compatibility if a PROVIZIO_DDS_TYPES_API macro is added later.
     set_target_properties(provizio_dds_types PROPERTIES DEFINE_SYMBOL "PROVIZIO_DDS_TYPES_EXPORTS")
+
+    # Generate the visit_known_type<V>() dispatcher from whichever *PubSubTypes.hpp
+    # headers the consumed provizio_dds_idls version ships, so the dispatcher
+    # auto-tracks IDL additions without a maintained hand-list. CONFIGURE_DEPENDS
+    # regenerates on next build when the set of shipped headers changes.
+    file(GLOB_RECURSE _PROVIZIO_DDS_PUBSUBTYPE_HEADERS_REL
+         RELATIVE "${PROVIZIO_DDS_IDLS_SRC_DIR}"
+         CONFIGURE_DEPENDS
+         "${PROVIZIO_DDS_IDLS_SRC_DIR}/*PubSubTypes.hpp")
+    list(SORT _PROVIZIO_DDS_PUBSUBTYPE_HEADERS_REL)
+    set(KNOWN_TYPES_INCLUDES "")
+    set(KNOWN_TYPES_DISPATCH_BRANCHES "")
+    foreach(_HDR IN LISTS _PROVIZIO_DDS_PUBSUBTYPE_HEADERS_REL)
+        # The dispatcher is generated from the *contents* of these headers (class names are
+        # read out via file(READ) below), but CONFIGURE_DEPENDS on the glob only re-runs CMake
+        # when the *set* of matching files changes — not when a header's contents change (e.g.
+        # an IDL regeneration that edits an existing header without adding/removing files). List
+        # each header as a configure dependency so a content change also triggers a reconfigure
+        # and regenerates the dispatcher, keeping incremental builds correct.
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                     "${PROVIZIO_DDS_IDLS_SRC_DIR}/${_HDR}")
+        string(APPEND KNOWN_TYPES_INCLUDES "#include <${_HDR}>\n")
+        # Namespace comes from the directory part of the path:
+        # std_msgs/msg/StringPubSubTypes.hpp -> "std_msgs::msg".
+        get_filename_component(_HDR_DIR "${_HDR}" DIRECTORY)
+        string(REPLACE "/" "::" _HDR_NAMESPACE "${_HDR_DIR}")
+        # Class names come from reading the header — one .msg header declares
+        # one `class XxxPubSubType`, one .srv header declares two
+        # (`Xxx_RequestPubSubType` + `Xxx_ResponsePubSubType`), so filename-to-
+        # classname doesn't work. The regex matches every top-level PubSubType
+        # class declaration regardless of count.
+        file(READ "${PROVIZIO_DDS_IDLS_SRC_DIR}/${_HDR}" _HDR_CONTENT)
+        string(REGEX MATCHALL "class[ \t]+[A-Za-z0-9_]+PubSubType[ \t]*:"
+               _CLASS_DECLS "${_HDR_CONTENT}")
+        foreach(_DECL IN LISTS _CLASS_DECLS)
+            string(REGEX REPLACE "class[ \t]+([A-Za-z0-9_]+PubSubType)[ \t]*:"
+                   "\\1" _CLASS_NAME "${_DECL}")
+            # Comparison is against the cached wire-format name (computed once
+            # per type by detail::known_type_wire_name), not against a literal
+            # — service types and namespace-mangled names follow conventions
+            # that aren't trivially derivable from the C++ class name, so we
+            # let the type itself answer.
+            string(APPEND KNOWN_TYPES_DISPATCH_BRANCHES
+                   "        if (type_name == detail::known_type_wire_name<::${_HDR_NAMESPACE}::${_CLASS_NAME}>()) {\n"
+                   "            std::forward<visitor>(v).template operator()<::${_HDR_NAMESPACE}::${_CLASS_NAME}>();\n"
+                   "            return true;\n"
+                   "        }\n")
+        endforeach()
+    endforeach()
+    # Modern CMake's configure_file() creates non-existent output directories, but the
+    # declared minimum here is 3.15 where that isn't guaranteed — create the directory
+    # explicitly so a clean build tree configures reliably on every supported CMake.
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated_include/provizio/dds")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/known_types_dispatcher.h.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_include/provizio/dds/known_types_dispatcher.h"
+        @ONLY)
 
     # provizio_dds library
     set(PROVIZIO_DDS_SOURCES
@@ -627,6 +751,18 @@ else(HAS_BIN_CACHE)
     endif()
     add_library(provizio_dds SHARED ${PROVIZIO_DDS_SOURCES})
     target_link_libraries(provizio_dds PUBLIC provizio_dds_types ${FASTDDS_LIB} ${FASTCDR_LIB})
+    # /bigobj is required on MSVC for any consumer translation unit that
+    # includes the generated provizio/dds/known_types_dispatcher.h — the
+    # dispatcher templates over every PubSubType the consumed
+    # provizio_dds_idls version ships and easily pushes the default
+    # 65535-section COFF object-file limit (fatal error C1128). Apply via
+    # INTERFACE on provizio_dds_types — the target whose PUBLIC include path
+    # carries the dispatcher header — so EVERY consumer that can include it gets
+    # the option transparently, whether it links provizio_dds_types directly or
+    # links provizio_dds (which links provizio_dds_types PUBLIC, propagating the
+    # option). Harmless on TUs that don't include the dispatcher; /bigobj only
+    # permits a larger object file.
+    target_compile_options(provizio_dds_types INTERFACE $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)
     set_target_properties(provizio_dds PROPERTIES DEFINE_SYMBOL "PROVIZIO_DDS_EXPORTS")
     # PROVIZIO_DDS_ENABLE_TESTS is no longer needed as a compile definition:
     # the test-only entry points on the network_recovery_coordinator are now
@@ -642,6 +778,13 @@ else(HAS_BIN_CACHE)
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
     install(DIRECTORY include/provizio DESTINATION include)
+    # The generated dispatcher header lives outside include/ (it depends on the
+    # consumed provizio_dds_idls catalogue, regenerated at configure time), but
+    # ships at the same install path consumers expect:
+    # <prefix>/include/provizio/dds/known_types_dispatcher.h.
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_include/provizio/dds/known_types_dispatcher.h"
+        DESTINATION include/provizio/dds)
     install(DIRECTORY "${PROVIZIO_DDS_IDLS_SRC_DIR}/" DESTINATION include
             FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp" PATTERN "*.ipp")
 
@@ -945,18 +1088,28 @@ else(HAS_BIN_CACHE)
             fastdds_python
         )
 
-        # Make sure Fast-DDS is built prior to SWIG code generation
+        # Make sure Fast-DDS is built (and its headers installed) before ANY SWIG code
+        # generation runs: the .i preprocessing #includes Fast-DDS/fastcdr headers, so a
+        # parallel build that starts SWIG before the libfast_dds ExternalProject has installed
+        # them fails non-deterministically with "Unable to find 'fastcdr/config.h'".
+        #
+        # UseSWIG's target layout varies by CMake version: some versions fold the generation
+        # into the <name> target, others split it into a separate <name>_swig_compilation
+        # target that runs the generation step. The two SWIG libraries here do NOT necessarily
+        # share the same layout — e.g. under CMake 4.x provizio_dds_python_types gets a
+        # _swig_compilation target while fastdds_python does not — so we must NOT infer one
+        # library's layout from the other's (the previous heuristic probed
+        # fastdds_python_swig_compilation to choose a single postfix for both, which left
+        # provizio_dds_python_types_swig_compilation ungated under CMake 4.x and raced).
+        # Attach the dependency to whichever target spelling actually exists, per library.
         if(FAST_DDS_DEPENDENCIES)
-            if(TARGET fastdds_python_swig_compilation)
-                # Older versions of CMake
-                set(SWIG_COMPILATION_POSTFIX "_swig_compilation")
-            else(TARGET fastdds_python_swig_compilation)
-                # Newer versions of CMake
-                set(SWIG_COMPILATION_POSTFIX "")
-            endif(TARGET fastdds_python_swig_compilation)
-
-            add_dependencies(fastdds_python${SWIG_COMPILATION_POSTFIX} ${FAST_DDS_DEPENDENCIES})
-            add_dependencies(provizio_dds_python_types${SWIG_COMPILATION_POSTFIX} ${FAST_DDS_DEPENDENCIES})
+            foreach(_swig_target fastdds_python provizio_dds_python_types)
+                foreach(_swig_suffix "" "_swig_compilation")
+                    if(TARGET ${_swig_target}${_swig_suffix})
+                        add_dependencies(${_swig_target}${_swig_suffix} ${FAST_DDS_DEPENDENCIES})
+                    endif()
+                endforeach()
+            endforeach()
         endif(FAST_DDS_DEPENDENCIES)
 
         # On Windows, SWIG Python modules are .pyd, not .dll

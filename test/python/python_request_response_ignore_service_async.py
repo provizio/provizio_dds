@@ -17,6 +17,7 @@
 import time
 import asyncio
 import threading
+import sys
 import provizio_dds
 
 log_prefix = "python_request_response_ignore_service_async: "
@@ -79,4 +80,4 @@ def main():
     return 0
 
 
-exit(main())
+sys.exit(main())

@@ -67,4 +67,30 @@ if grep -q '^PYTHON_BINDINGS:BOOL=ON' CMakeCache.txt; then
     fi
 fi
 
-ctest --output-on-failure
+# Sanitizer runtime options. Harmless no-ops for uninstrumented builds (the variables are simply
+# ignored), so they are always set. ASan/LSan errors are fatal — a genuine memory bug or leak must
+# fail CI. UBSan is left recoverable (it only reports) and the benign Fast-DDS finding is suppressed,
+# so known Fast-DDS issues never block the build (see test/sanitizers/ubsan.supp). detect_odr_violation
+# is off: provizio_dds and Fast-DDS share template instantiations across the .so boundary, which trips
+# false ODR reports.
+_SAN_DIR="${SCRIPT_DIR}/../../test/sanitizers"
+# LeakSanitizer is Linux-only; on macOS ASan aborts at startup ("detect_leaks is not supported on this
+# platform"), failing every test. Enable leak detection only where it is supported.
+_DETECT_LEAKS=1
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    _DETECT_LEAKS=0
+fi
+export ASAN_OPTIONS="halt_on_error=1:detect_leaks=${_DETECT_LEAKS}:detect_odr_violation=0:detect_stack_use_after_return=1:${ASAN_OPTIONS:-}"
+export LSAN_OPTIONS="suppressions=${_SAN_DIR}/lsan.supp:${LSAN_OPTIONS:-}"
+export UBSAN_OPTIONS="halt_on_error=0:print_stacktrace=1:suppressions=${_SAN_DIR}/ubsan.supp:${UBSAN_OPTIONS:-}"
+export TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1:history_size=7:suppressions=${_SAN_DIR}/tsan.supp:${TSAN_OPTIONS:-}"
+
+# Optional test exclusion (regex), used by the TSan job to skip the long "takes long by design"
+# reliability stress tests — they aren't race-finding and would run for an unreasonable time under
+# TSan's slowdown (and their deliberate internal timing is intentionally left unscaled).
+CTEST_EXTRA_ARGS=()
+if [[ -n "${PROVIZIO_DDS_CTEST_EXCLUDE:-}" ]]; then
+    CTEST_EXTRA_ARGS+=(-E "${PROVIZIO_DDS_CTEST_EXCLUDE}")
+fi
+
+ctest --output-on-failure "${CTEST_EXTRA_ARGS[@]}"

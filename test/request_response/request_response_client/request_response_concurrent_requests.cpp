@@ -31,7 +31,7 @@ try
     const std::string service_name{"provizio_dds_test_request_response"};
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr std::chrono::seconds time_to_match{3};
-    constexpr std::chrono::seconds timeout{10};
+    constexpr std::chrono::seconds timeout{10 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
 
     // These are x and x^2 pairs, except of those with expected values of 0 which means we want to interrupt the
     // requests and make sure all behaves well
@@ -85,7 +85,7 @@ try
         }
     }
 
-    std::cout << log_prefix << "Successfully complete" << '\n';
+    std::cout << log_prefix << "Successfully completed" << '\n';
 
     return 0;
 }

@@ -52,7 +52,11 @@ async def main() -> int:
 
     log_prefix = f"python_request_response_reliability_client{test_name_postfix}: "
     service_name = f"provizio_dds_test_request_response_reliability{test_name_postfix}"
-    timeout_sec = 8.0
+    # Match the C++ reliability client timeout (30s). timeout_sec bounds the WHOLE request
+    # operation (discovery + match settling + round-trip); the previous 8s was too tight in
+    # the slow ROS2-compat Debug containers (the request typically completes in ~1-3s, but
+    # worst-case discovery occasionally exceeded 8s, flaking the paired service too).
+    timeout_sec = 30.0
 
     max_wait_both_sides_ms = 1999
     wait_in_client_under_ms = 1000  # In every iteration we either postpone the client or the server, never both

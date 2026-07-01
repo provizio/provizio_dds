@@ -28,10 +28,10 @@ int main()
     constexpr const char *log_prefix = "ros_interop_service: ";
     const std::string service_name{"provizio_dds_test_ros_interop_service"};
     constexpr int requests_expected = 2;
-    constexpr std::chrono::seconds total_timeout{5};
+    constexpr std::chrono::seconds total_timeout{5 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
     constexpr std::chrono::seconds end_sleep{2};
     constexpr std::int32_t max_history_depth =
-        provizio::dds::use_default_qos_durability;  // Keep all default for ROS2 compatibility
+        provizio::dds::use_default_history_depth;  // Keep all default for ROS2 compatibility
 
     std::mutex mutex;
     std::condition_variable condition_variable;

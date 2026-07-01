@@ -29,13 +29,13 @@ int main(int argc, char *argv[])
     const std::string service_name{"provizio_dds_test_request_response"};
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr int requests_expected = 5;
-    constexpr std::chrono::seconds total_timeout{30};
+    constexpr std::chrono::seconds total_timeout{30 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
     constexpr std::chrono::seconds end_sleep{4};
-    // Optional argument: "serial_requests" => use default QoS durability (no history),
-    // otherwise keep transient local with depth = requests_expected
+    // Optional argument: "serial_requests" => use the default request-queue depth,
+    // otherwise cap the request queue at requests_expected
     const bool serial_requests = (argc >= 2 && std::string(argv[1]) == "serial_requests");  // NOLINT
     const std::int32_t max_history_depth =
-        serial_requests ? provizio::dds::use_default_qos_durability : requests_expected;
+        serial_requests ? provizio::dds::use_default_history_depth : requests_expected;
 
     std::mutex mutex;
     std::condition_variable condition_variable;

@@ -51,7 +51,8 @@ def main() -> int:
         else 14
     )
     initial_iterations = max(1, num_iterations)
-    wait_timeout = num_iterations * 3.0 + 5
+    # Match the C++ reliability service timeout (num_iterations * 3 + 30).
+    wait_timeout = num_iterations * 3.0 + 30
 
     log_prefix = f"python_request_response_reliability_service{test_name_postfix}: "
     service_name = f"provizio_dds_test_request_response_reliability{test_name_postfix}"
@@ -122,9 +123,12 @@ def main() -> int:
             return 1
 
         time.sleep(simulated_request_processing_time_sec)
+        # expected_value was advanced past the value just handled (expected_value += 1 in the
+        # handler), so the value actually processed is one less. Logging expected_value here
+        # mislabelled the line as the NEXT value.
         print(
             f"{log_prefix}{_timestamp()}Successfully processed value "
-            f"{expected_value}"
+            f"{expected_value - 1}"
         )
         return 0
     finally:

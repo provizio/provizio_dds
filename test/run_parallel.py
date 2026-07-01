@@ -31,6 +31,18 @@ import time
 
 ROS_CMD_PREFIX = "--ros:"
 
+# Real-time, kill-safe logging (mirrors run_times.py): export PYTHONUNBUFFERED *before*
+# the environment snapshots below so it is captured into both original_env and clean_env
+# and thus inherited by every launched child -- their output then survives even a SIGTERM/
+# SIGKILL. Also line-buffer our own streams so this wrapper's messages interleave with the
+# children's in real time rather than being flushed only at exit.
+os.environ["PYTHONUNBUFFERED"] = "1"
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
 # Save the original environment before any modifications
 original_env = os.environ.copy()
 

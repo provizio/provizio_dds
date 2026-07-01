@@ -24,18 +24,26 @@
 
 #include <std_msgs/msg/Int32PubSubTypes.hpp>
 
-std::string timestamp()
+namespace
 {
-    constexpr double ms_in_s = 1000.0;
-    static auto initial = std::chrono::steady_clock::now();
+    // Captured at process start (static initialisation), so the timestamps below are relative
+    // to the process start rather than the first timestamp() call. This keeps waits that precede
+    // the first log line (random startup delay, participant creation, a discovery timeout) visible
+    // in the deltas. steady_clock::now() is noexcept.
+    const auto process_start_time = std::chrono::steady_clock::now();
 
-    return "[" +
-           std::to_string(static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                 std::chrono::steady_clock::now() - initial)
-                                                 .count()) /
-                          ms_in_s) +
-           "] ";
-}
+    std::string timestamp()
+    {
+        constexpr double ms_in_s = 1000.0;
+
+        return "[" +
+               std::to_string(static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                     std::chrono::steady_clock::now() - process_start_time)
+                                                     .count()) /
+                              ms_in_s) +
+               "] ";
+    }
+}  // namespace
 
 // Arguments: test_name_postfix first_iteration_value num_iterations [domain_id]
 int main(int argc, char *argv[])
@@ -129,6 +137,10 @@ int main(int argc, char *argv[])
 
     std::this_thread::sleep_for(time_to_deliver_last_response);
 
-    std::cout << log_prefix << timestamp() << "Successfully processed value " << expected_value << '\n';
+    // expected_value was advanced past the value just handled (++expected_value in the
+    // handler), so the value actually processed is one less. Logging expected_value here
+    // mislabelled the line as the NEXT value, making interleaved multi-iteration output read
+    // as if a value was processed before it was received.
+    std::cout << log_prefix << timestamp() << "Successfully processed value " << (expected_value - 1) << '\n';
     return 0;
 }

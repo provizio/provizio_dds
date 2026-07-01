@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -36,6 +37,7 @@
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/function_traits.h"
+#include "provizio/dds/logging.h"
 #include "provizio/dds/qos_defaults.h"
 
 namespace provizio::dds
@@ -193,8 +195,11 @@ namespace provizio::dds
          * @param topic_name A DDS Topic Name
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
          * DataWriter, which makes publishing slower but more reliable
-         * @param history_depth Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history),
-         * positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth.
+         * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
+         * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value,
+         * including 0, uses the default). Durability is configured separately via durability_kind.
+         * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
+         * support); std::nullopt keeps the Fast-DDS/XML default.
          * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
          * @see provizio::dds::make_publisher
          * @see provizio::dds::make_domain_participant
@@ -204,7 +209,8 @@ namespace provizio::dds
         publisher_handle(
             std::shared_ptr<domain_participant> participant, const std::string &topic_name,
             ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind,
-            std::int32_t history_depth = use_default_qos_durability);
+            std::int32_t history_depth = use_default_history_depth,
+            std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt);
 
         /**
          * @brief Constructs a new publisher_handle with an on_matched_function invoked on subscriber match changes.
@@ -217,8 +223,11 @@ namespace provizio::dds
          * (un)matched subscriber's GUID; the bool indicates whether the change is a match (true) or unmatch (false).
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
          * DataWriter, which makes publishing slower but more reliable
-         * @param history_depth Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history),
-         * positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth.
+         * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
+         * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value,
+         * including 0, uses the default). Durability is configured separately via durability_kind.
+         * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
+         * support); std::nullopt keeps the Fast-DDS/XML default.
          * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
          * @see provizio::dds::make_publisher
          * @see provizio::dds::make_domain_participant
@@ -229,11 +238,13 @@ namespace provizio::dds
             std::shared_ptr<domain_participant> participant, const std::string &topic_name,
             on_matched_function_type on_matched_function,
             ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind,
-            std::int32_t history_depth = use_default_qos_durability);
+            std::int32_t history_depth = use_default_history_depth,
+            std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt);
 
         publisher_handle(std::shared_ptr<domain_participant> participant, const std::string &topic_name,
                          on_matched_function_type on_matched_function, std::unique_ptr<DataWriterListener> &&listener,
-                         ReliabilityQosPolicyKind reliability_kind, std::int32_t history_depth);
+                         ReliabilityQosPolicyKind reliability_kind, std::int32_t history_depth,
+                         std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt);
 
         /// @internal Called by domain_participant during network-recovery reset.
         void detach_for_reset() noexcept override;
@@ -277,7 +288,8 @@ namespace provizio::dds
         // Captured construction parameters for replay after a reset.
         std::string captured_topic_name;
         ReliabilityQosPolicyKind reliability_kind;
-        std::int32_t history_depth{use_default_qos_durability};
+        std::int32_t history_depth{use_default_history_depth};
+        std::optional<DurabilityQosPolicyKind> durability_kind;
 
         // make_publisher needs to register the freshly-constructed shared_ptr
         // with the participant; that requires reaching `participant`, which is
@@ -287,12 +299,13 @@ namespace provizio::dds
         template <typename pub_sub_type>
         friend std::shared_ptr<publisher_handle<pub_sub_type>> make_publisher(std::shared_ptr<domain_participant>,
                                                                               const std::string &,
-                                                                              ReliabilityQosPolicyKind, std::int32_t);
+                                                                              ReliabilityQosPolicyKind, std::int32_t,
+                                                                              std::optional<DurabilityQosPolicyKind>);
 
         template <typename pub_sub_type, typename matched_function_type>
         friend std::shared_ptr<publisher_handle<pub_sub_type, matched_function_type>> make_publisher(
             std::shared_ptr<domain_participant>, const std::string &, matched_function_type, ReliabilityQosPolicyKind,
-            std::int32_t);
+            std::int32_t, std::optional<DurabilityQosPolicyKind>);
     };
 
     /**
@@ -304,8 +317,11 @@ namespace provizio::dds
      * @param topic_name A DDS Topic Name
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataWriter,
      * which makes publishing slower but more reliable
-     * @param history_depth Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history),
-     * positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth.
+     * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
+     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
+     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
+     * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<publisher_handle<data_pub_sub_type>>
      * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
      * @see provizio::dds::publisher_handle
@@ -317,13 +333,14 @@ namespace provizio::dds
     std::shared_ptr<publisher_handle<data_pub_sub_type>> make_publisher(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
         ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind,
-        std::int32_t history_depth = use_default_qos_durability)
+        std::int32_t history_depth = use_default_history_depth,
+        std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt)
     {
         // shared_ptr(new T(...)) rather than make_shared so the constructor's
         // accessibility check happens in this function (a friend of
         // publisher_handle) instead of inside std::make_shared's internals.
         std::shared_ptr<publisher_handle<data_pub_sub_type>> handle{new publisher_handle<data_pub_sub_type>(
-            std::move(participant), topic_name, reliability_kind, history_depth)};
+            std::move(participant), topic_name, reliability_kind, history_depth, durability_kind)};
         // register_endpoint does the initial build_state under the lifecycle
         // lock, atomically with adding the handle to the recovery registry.
         handle->participant->register_endpoint(handle);
@@ -347,8 +364,11 @@ namespace provizio::dds
      * @c on_matched_function_type description.
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataWriter,
      * which makes publishing slower but more reliable
-     * @param history_depth Controls durability QoS: -1 keeps defaults, 0 forces VOLATILE (no history),
-     * positive values enable TRANSIENT_LOCAL with KEEP_LAST of the given depth.
+     * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
+     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
+     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
+     * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<publisher_handle<data_pub_sub_type, on_matched_function_type>>
      * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
      * @see provizio::dds::publisher_handle
@@ -361,13 +381,15 @@ namespace provizio::dds
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
         on_matched_function_type on_matched_function,
         ReliabilityQosPolicyKind reliability_kind = qos_defaults<data_pub_sub_type>::datawriter_reliability_kind,
-        std::int32_t history_depth = use_default_qos_durability)
+        std::int32_t history_depth = use_default_history_depth,
+        std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt)
     {
         // shared_ptr(new T(...)) rather than make_shared — see the comment in
         // the no-callback overload above.
         std::shared_ptr<publisher_handle<data_pub_sub_type, on_matched_function_type>> handle{
             new publisher_handle<data_pub_sub_type, on_matched_function_type>(
-                std::move(participant), topic_name, std::move(on_matched_function), reliability_kind, history_depth)};
+                std::move(participant), topic_name, std::move(on_matched_function), reliability_kind, history_depth,
+                durability_kind)};
         handle->participant->register_endpoint(handle);
         return handle;
     }
@@ -406,24 +428,52 @@ namespace provizio::dds
 
                 if constexpr (!std::is_same_v<on_matched_function_type, void *>)
                 {
-                    constexpr size_t arity = function_traits<on_matched_function_type>::arity;
-                    if constexpr (arity == 2)
+                    // A throwing user callback must not escape into the Fast-DDS listener
+                    // thread — it would std::terminate the process. Report it through the
+                    // configurable logger and continue.
+                    try
                     {
-                        if (info.current_count > 0 && info.current_count_change == info.current_count)
+                        constexpr size_t arity = function_traits<on_matched_function_type>::arity;
+                        if constexpr (arity == 2)
                         {
-                            // Just matched the first subscriber
-                            publisher.on_matched_function(publisher, true);
+                            if (info.current_count > 0 && info.current_count_change == info.current_count)
+                            {
+                                // Just matched the first subscriber
+                                publisher.on_matched_function(publisher, true);
+                            }
+                            else if (info.current_count == 0 && info.current_count_change < 0)
+                            {
+                                // Just unmatched the last subscriber
+                                publisher.on_matched_function(publisher, false);
+                            }
                         }
-                        else if (info.current_count == 0 && info.current_count_change < 0)
+                        else
                         {
-                            // Just unmatched the last subscriber
-                            publisher.on_matched_function(publisher, false);
+                            publisher.on_matched_function(publisher, info.current_count_change > 0,
+                                                          static_cast<const guid &>(info.last_subscription_handle));
                         }
                     }
-                    else
+                    catch (const std::exception &exception)
                     {
-                        publisher.on_matched_function(publisher, info.current_count_change > 0,
-                                                      static_cast<const guid &>(info.last_subscription_handle));
+                        // Guard the logging too — it can throw std::bad_alloc on stream growth,
+                        // which must not escape into the Fast-DDS listener thread.
+                        try
+                        {
+                            log_error() << "publisher on_matched callback threw: " << exception.what();
+                        }
+                        catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+                        {
+                        }
+                    }
+                    catch (...)
+                    {
+                        try
+                        {
+                            log_error() << "publisher on_matched callback threw a non-std::exception";
+                        }
+                        catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
+                        {
+                        }
                     }
                 }
             }
@@ -436,10 +486,11 @@ namespace provizio::dds
     template <typename data_pub_sub_type, typename on_matched_function_type>
     publisher_handle<data_pub_sub_type, on_matched_function_type>::publisher_handle(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
-        const ReliabilityQosPolicyKind reliability_kind, const std::int32_t history_depth)
+        const ReliabilityQosPolicyKind reliability_kind, const std::int32_t history_depth,
+        std::optional<DurabilityQosPolicyKind> durability_kind)
         : publisher_handle(std::move(participant), topic_name, nullptr,
                            std::make_unique<detail::data_writer_listener<data_pub_sub_type, void *>>(*this),
-                           reliability_kind, history_depth)
+                           reliability_kind, history_depth, durability_kind)
     {
     }
 
@@ -447,11 +498,11 @@ namespace provizio::dds
     publisher_handle<data_pub_sub_type, on_matched_function_type>::publisher_handle(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
         on_matched_function_type on_matched_function, const ReliabilityQosPolicyKind reliability_kind,
-        const std::int32_t history_depth)
+        const std::int32_t history_depth, std::optional<DurabilityQosPolicyKind> durability_kind)
         : publisher_handle(
               std::move(participant), topic_name, std::move(on_matched_function),
               std::make_unique<detail::data_writer_listener<data_pub_sub_type, on_matched_function_type>>(*this),
-              reliability_kind, history_depth)
+              reliability_kind, history_depth, durability_kind)
     {
     }
 
@@ -459,11 +510,18 @@ namespace provizio::dds
     publisher_handle<data_pub_sub_type, on_matched_function_type>::publisher_handle(
         std::shared_ptr<domain_participant> participant, const std::string &topic_name,
         on_matched_function_type on_matched_function, std::unique_ptr<DataWriterListener> &&listener,
-        const ReliabilityQosPolicyKind reliability_kind, const std::int32_t history_depth)
+        const ReliabilityQosPolicyKind reliability_kind, const std::int32_t history_depth,
+        std::optional<DurabilityQosPolicyKind> durability_kind)
+        // The handle holds a strong shared_ptr to its participant, so the participant
+        // outlives every endpoint created against it — even after the caller releases
+        // its own participant handle. register_type() must run on that stored
+        // participant, so the member is initialised first (move) and reused below via
+        // this->participant.
         : participant(std::move(participant)),
           type_support(this->participant->template register_type<data_pub_sub_type>()),
           on_matched_function(std::move(on_matched_function)), listener(std::move(listener)),
-          captured_topic_name(topic_name), reliability_kind(reliability_kind), history_depth(history_depth)
+          captured_topic_name(topic_name), reliability_kind(reliability_kind), history_depth(history_depth),
+          durability_kind(durability_kind)
     {
         // Intentionally NO build_state here. make_publisher calls
         // participant->register_endpoint(handle), which performs the initial
@@ -494,21 +552,24 @@ namespace provizio::dds
 
         DataWriterQos datawriter_qos;
         publisher->get_default_datawriter_qos(datawriter_qos);
-        if (history_depth == use_default_qos_durability)
+        // History (untied from durability): an explicit positive depth wins, else fall back to
+        // the per-type default (0 = leave the Fast-DDS default). KEEP_LAST only — durability is
+        // configured independently below, so this is not an RxO QoS (ROS2 interop unaffected).
+        const std::int32_t effective_history_depth =
+            (history_depth > 0) ? history_depth : qos_defaults<data_pub_sub_type>::keep_last_history_depth;
+        if (effective_history_depth > 0)
         {
-            // keep defaults
-        }
-        else if (history_depth == no_history)
-        {
-            datawriter_qos.durability().kind = VOLATILE_DURABILITY_QOS;
-        }
-        else if (history_depth > 0)
-        {
-            datawriter_qos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
             datawriter_qos.history().kind = KEEP_LAST_HISTORY_QOS;
-            datawriter_qos.history().depth = history_depth;
+            datawriter_qos.history().depth = effective_history_depth;
+        }
+        // Durability is now independent of history: applied only if the caller requested it,
+        // otherwise the Fast-DDS/XML default is preserved. Mirrors the reliability_kind parameter.
+        if (durability_kind.has_value())
+        {
+            datawriter_qos.durability().kind = *durability_kind;
         }
         datawriter_qos.reliability().kind = reliability_kind;
+        datawriter_qos.publish_mode().kind = qos_defaults<data_pub_sub_type>::datawriter_publish_mode;
         datawriter_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
 
 #if defined(_MSC_VER) || defined(__APPLE__)

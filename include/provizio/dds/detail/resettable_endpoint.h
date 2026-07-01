@@ -15,6 +15,7 @@
 #ifndef DDS_DETAIL_RESETTABLE_ENDPOINT
 #define DDS_DETAIL_RESETTABLE_ENDPOINT
 
+#include <fastdds/dds/core/policy/QosPolicies.hpp>
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 
 namespace provizio::dds::detail
@@ -48,6 +49,15 @@ namespace provizio::dds::detail
      * The participant pointer is passed by reference in phases 2 and 3 rather
      * than re-fetched, because the runtime already holds the lifecycle mutex
      * exclusively — re-locking would deadlock.
+     *
+     * A match-mode subscriber registers a NON-owning back-reference (a raw
+     * pointer) to itself with the participant's deferred-subscriber registry, so
+     * the participant's discovery listener can route a writer-discovered event to
+     * the waiting subscriber (see @c start_deferred_build / @c build_deferred_locked
+     * below and @c domain_participant::register_deferred_subscriber). The registry
+     * is deliberately non-owning — the subscriber removes itself in its destructor
+     * under the registry mutex — so no thread but the subscriber's owner ever runs
+     * its teardown.
      */
     class resettable_endpoint
     {
@@ -78,6 +88,39 @@ namespace provizio::dds::detail
          * throw; the parent @c domain_participant logs and continues.
          */
         virtual void on_new_participant_started(eprosima::fastdds::dds::DomainParticipant &new_participant) = 0;
+
+        /**
+         * @brief Spawn the deferred DataReader build for a match-mode subscriber
+         * that has just had its reliability resolved by a discovered writer.
+         * Called by the participant's deferred-subscriber registry while holding
+         * @c deferred_mutex (from @c register_deferred_subscriber on a cache hit,
+         * or @c resolve_deferred_for_writer on writer discovery). The build itself
+         * MUST run off the Fast-DDS discovery thread (building there would deadlock
+         * against a concurrent reset — see the AB-BA note in subscriber.h), so the
+         * implementation hops it onto its own thread (a stored @c std::future) and
+         * returns promptly. It must be idempotent (spawn at most one build per
+         * subscriber). Default no-op (only match-mode subscribers override it).
+         */
+        virtual void start_deferred_build(eprosima::fastdds::dds::ReliabilityQosPolicyKind /*resolved*/)
+        {
+        }
+
+        /**
+         * @brief Build the deferred DataReader now, with the resolved reliability.
+         * Called by @c domain_participant::run_deferred_build on the build thread
+         * spawned by @c start_deferred_build, which already holds
+         * @c registration_mutex and @c reset_mutex — the latter EXCLUSIVELY (unlike
+         * @c register_endpoint's shared acquire for an initial build) because the
+         * deferred build swaps in a DataReader already visible to other threads and
+         * so must fence concurrent get_guid / get_num_matched_publishers readers —
+         * so the implementation MUST NOT re-acquire either. Must be idempotent (a
+         * network-recovery reset may have rebuilt the reader first). Default no-op
+         * (only match-mode subscribers override it).
+         */
+        virtual void build_deferred_locked(eprosima::fastdds::dds::DomainParticipant & /*participant*/,
+                                           eprosima::fastdds::dds::ReliabilityQosPolicyKind /*resolved*/)
+        {
+        }
     };
 }  // namespace provizio::dds::detail
 

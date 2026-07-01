@@ -17,6 +17,7 @@
 import time
 import asyncio
 import threading
+import sys
 import provizio_dds
 
 log_prefix = "python_request_response_service_concurrent: "
@@ -77,4 +78,4 @@ def main():
     service.stop()
     return 0
 
-exit(main())
+sys.exit(main())

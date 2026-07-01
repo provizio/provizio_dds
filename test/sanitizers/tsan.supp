@@ -1,0 +1,26 @@
+# ThreadSanitizer suppressions for provizio_dds sanitizer builds (applied via TSAN_OPTIONS).
+# Deadlock detection stays ENABLED — only the specific false positives below are suppressed.
+#
+# --- Data races ---
+# No race: suppressions. Local validation found ZERO data races with none active, and any pattern
+# broad enough to cover Fast-DDS internals would also silence a real race in provizio_dds's own
+# listener callbacks (they run on Fast-DDS-owned threads, so their stacks always contain Fast-DDS
+# frames). If a genuinely Fast-DDS-internal race ever appears, add a symbol-specific `race:` entry for
+# that exact function — never a namespace- or library-wide pattern.
+#
+# --- Lock-order inversions (potential deadlocks) ---
+# provizio_dds holds its participant lifecycle lock `reset_mutex` in SHARED (read) mode across calls
+# into Fast-DDS, and Fast-DDS discovery/listener threads holding their own locks invoke provizio_dds
+# callbacks that read-lock `reset_mutex` (via these accessors). TSan's deadlock detector reports the
+# resulting lock-order cycles, but they CANNOT deadlock: shared read-locks are mutually compatible, and
+# TSan simply does not model std::shared_mutex read mode. Suppress at the read-lock acquisition sites
+# only. The EXCLUSIVE acquisitions — the network-recovery reset and the deferred-reader swap
+# (domain_participant.cpp, `std::unique_lock<std::shared_mutex>`) — are deliberately NOT listed, so a
+# genuine reset-vs-* deadlock, a data race, or a deadlock among provizio_dds's other mutexes is still
+# reported. Add any NEW reset_mutex shared-lock accessor here (get_guid / get_num_matched_publishers /
+# publish etc. acquire it via fastdds_participant and are already covered).
+deadlock:provizio::dds::domain_participant::fastdds_participant
+deadlock:provizio::dds::domain_participant::register_endpoint
+deadlock:provizio::dds::domain_participant::register_type
+deadlock:provizio::dds::domain_participant::register_topic
+deadlock:provizio::dds::domain_participant::on_discovered_endpoint

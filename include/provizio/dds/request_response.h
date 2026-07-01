@@ -23,6 +23,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -59,6 +60,21 @@ namespace provizio::dds
     template <typename request_pub_sub_type, typename response_pub_sub_type> class future_response;
 
     /**
+     * @brief Persistent client for issuing many requests to a service, each returning a future_response.
+     */
+    template <typename request_pub_sub_type, typename response_pub_sub_type> class service_client;
+
+    /**
+     * @brief Default KEEP_LAST history depth for a service_client's request/response endpoints.
+     *
+     * Bounds how many requests can be concurrently in flight before the reliable endpoints apply
+     * back-pressure (the request writer blocks briefly on publish once this many are unacknowledged). Matches
+     * the service's default response history. Raise it via the service_client / make_service_client
+     * @c endpoint_history_depth parameter when you need more than this many requests outstanding at once.
+     */
+    constexpr std::int32_t service_client_default_history_depth = 10;
+
+    /**
      * @brief Creates a new service.
      *
      * @tparam request_pub_sub_type The type of the request message.
@@ -68,7 +84,12 @@ namespace provizio::dds
      * @param request_topic_name The name of the request topic.
      * @param response_topic_name The name of the response topic.
      * @param handle_request_function The function to handle requests.
-     * @param max_history_depth The maximum number of requests to queue.
+     * @param max_history_depth The maximum number of requests to queue (request queue size). This is distinct from
+     * endpoint_history_depth, which controls the KEEP_LAST history depth of the underlying request/response endpoints.
+     * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS) applied to the
+     * underlying request/response DataWriters/DataReaders; std::nullopt keeps the current default.
+     * @param endpoint_history_depth KEEP_LAST history depth for the underlying request/response endpoints;
+     * use_default_history_depth keeps the current default. Distinct from max_history_depth (request queue size).
      * @return std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> A
      * shared pointer to the created service.
      */
@@ -76,7 +97,9 @@ namespace provizio::dds
     std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> make_service(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, handle_request_function_type handle_request_function,
-        std::int32_t max_history_depth = use_default_qos_durability);
+        std::int32_t max_history_depth = use_default_history_depth,
+        std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+        std::int32_t endpoint_history_depth = use_default_history_depth);
 
     /**
      * @brief Creates a new service from a single name for both topics.
@@ -87,7 +110,12 @@ namespace provizio::dds
      * @param participant The DomainParticipant.
      * @param service_name The name of the service.
      * @param handle_request_function The function to handle requests.
-     * @param max_history_depth The maximum number of requests to queue.
+     * @param max_history_depth The maximum number of requests to queue (request queue size). This is distinct from
+     * endpoint_history_depth, which controls the KEEP_LAST history depth of the underlying request/response endpoints.
+     * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS) applied to the
+     * underlying request/response DataWriters/DataReaders; std::nullopt keeps the current default.
+     * @param endpoint_history_depth KEEP_LAST history depth for the underlying request/response endpoints;
+     * use_default_history_depth keeps the current default. Distinct from max_history_depth (request queue size).
      * @return std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> A
      * shared pointer to the created service.
      */
@@ -95,7 +123,9 @@ namespace provizio::dds
     std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> make_service(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
         handle_request_function_type handle_request_function,
-        std::int32_t max_history_depth = use_default_qos_durability);
+        std::int32_t max_history_depth = use_default_history_depth,
+        std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+        std::int32_t endpoint_history_depth = use_default_history_depth);
 
     /**
      * @brief Sends a request to a service.
@@ -114,7 +144,13 @@ namespace provizio::dds
      * @param stable_matches_period Additional settling window that the match count must remain stable for before
      * sending the first request (0 skips the extra wait). Useful when there are multiple sensors in the network, so we
      * make sure to match all of them prior to sending the request.
-     * @param service_match_timeout Optional deadline for endpoint matching. Use 0 to wait indefinitely.
+     * @param service_match_timeout Optional deadline for the whole readiness wait, which includes the post-match
+     * settling window (see stable_matches_period). Use 0 to wait indefinitely; a finite value should comfortably
+     * exceed stable_matches_period, or it can expire before settling completes even with a healthy service.
+     * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS) applied to the
+     * request DataWriter and response DataReader; std::nullopt keeps the current default.
+     * @param endpoint_history_depth KEEP_LAST history depth for the request/response endpoints;
+     * use_default_history_depth keeps the current default.
      * @return future_response<request_pub_sub_type, response_pub_sub_type> A future object to get the response.
      */
     template <typename request_pub_sub_type, typename response_pub_sub_type>
@@ -123,7 +159,9 @@ namespace provizio::dds
         const std::string &response_topic_name, typename request_pub_sub_type::type &request_data,
         std::chrono::milliseconds stable_matches_period = detail::service_client_basic<
             request_pub_sub_type, response_pub_sub_type>::default_wait_for_stable_matches_period,
-        std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0});
+        std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0},
+        std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+        std::int32_t endpoint_history_depth = use_default_history_depth);
 
     /**
      * @brief Sends a request to a service.
@@ -141,7 +179,13 @@ namespace provizio::dds
      * @param stable_matches_period Additional settling window that the match count must remain stable for before
      * sending the first request (0 skips the extra wait). Useful when there are multiple sensors in the network, so we
      * make sure to match all of them prior to sending the request.
-     * @param service_match_timeout Optional deadline for endpoint matching. Use 0 to wait indefinitely.
+     * @param service_match_timeout Optional deadline for the whole readiness wait, which includes the post-match
+     * settling window (see stable_matches_period). Use 0 to wait indefinitely; a finite value should comfortably
+     * exceed stable_matches_period, or it can expire before settling completes even with a healthy service.
+     * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS) applied to the
+     * request DataWriter and response DataReader; std::nullopt keeps the current default.
+     * @param endpoint_history_depth KEEP_LAST history depth for the request/response endpoints;
+     * use_default_history_depth keeps the current default.
      * @return future_response<request_pub_sub_type, response_pub_sub_type> A future object to get the response.
      */
     template <typename request_pub_sub_type, typename response_pub_sub_type>
@@ -150,7 +194,72 @@ namespace provizio::dds
         typename request_pub_sub_type::type &request_data,
         std::chrono::milliseconds stable_matches_period = detail::service_client_basic<
             request_pub_sub_type, response_pub_sub_type>::default_wait_for_stable_matches_period,
-        std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0});
+        std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0},
+        std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+        std::int32_t endpoint_history_depth = use_default_history_depth);
+
+    /**
+     * @brief Creates a service_client from explicit request/response topic names.
+     *
+     * Unlike request(), the client is created up front and matches the service(s) over time. Call
+     * wait_for_service() to block until ready, or just call request() (requests issued before matching
+     * auto-defer and flush once matched). service_match_timeout defaults to 0 (wait indefinitely), suited
+     * to clients created in advance.
+     *
+     * @tparam request_pub_sub_type The type of the request message.
+     * @tparam response_pub_sub_type The type of the response message.
+     * @param participant The DomainParticipant.
+     * @param request_topic_name The name of the request topic.
+     * @param response_topic_name The name of the response topic.
+     * @param stable_matches_period Settling window the match count must remain stable for before the
+     * background readiness completes and deferred requests flush.
+     * @param service_match_timeout Deadline for the background readiness wait; 0 (default) waits
+     * indefinitely, suited to clients created in advance.
+     * @param durability_kind Optional DDS durability kind applied to the request DataWriter and response
+     * DataReader; std::nullopt keeps the current default.
+     * @param endpoint_history_depth KEEP_LAST history depth for the request/response endpoints, bounding
+     * how many requests may be concurrently in flight before the reliable writer applies back-pressure;
+     * use_default_history_depth (the default) selects service_client_default_history_depth. Raise it for
+     * higher concurrency.
+     * @return std::shared_ptr<service_client<request_pub_sub_type, response_pub_sub_type>>
+     */
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    std::shared_ptr<service_client<request_pub_sub_type, response_pub_sub_type>> make_service_client(
+        std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
+        const std::string &response_topic_name,
+        std::chrono::milliseconds stable_matches_period = detail::service_client_basic<
+            request_pub_sub_type, response_pub_sub_type>::default_wait_for_stable_matches_period,
+        std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0},
+        std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+        std::int32_t endpoint_history_depth = use_default_history_depth);
+
+    /**
+     * @brief Creates a service_client from a single service name (request/response topics inferred).
+     *
+     * @tparam request_pub_sub_type The type of the request message.
+     * @tparam response_pub_sub_type The type of the response message.
+     * @param participant The DomainParticipant.
+     * @param service_name The name of the service (request/response topic names are inferred from it).
+     * @param stable_matches_period Settling window the match count must remain stable for before the
+     * background readiness completes and deferred requests flush.
+     * @param service_match_timeout Deadline for the background readiness wait; 0 (default) waits
+     * indefinitely, suited to clients created in advance.
+     * @param durability_kind Optional DDS durability kind applied to the request DataWriter and response
+     * DataReader; std::nullopt keeps the current default.
+     * @param endpoint_history_depth KEEP_LAST history depth for the request/response endpoints, bounding
+     * how many requests may be concurrently in flight before the reliable writer applies back-pressure;
+     * use_default_history_depth (the default) selects service_client_default_history_depth. Raise it for
+     * higher concurrency.
+     * @return std::shared_ptr<service_client<request_pub_sub_type, response_pub_sub_type>>
+     */
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    std::shared_ptr<service_client<request_pub_sub_type, response_pub_sub_type>> make_service_client(
+        std::shared_ptr<domain_participant> participant, const std::string &service_name,
+        std::chrono::milliseconds stable_matches_period = detail::service_client_basic<
+            request_pub_sub_type, response_pub_sub_type>::default_wait_for_stable_matches_period,
+        std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0},
+        std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+        std::int32_t endpoint_history_depth = use_default_history_depth);
 
     /**
      * @brief A request/response service.
@@ -170,11 +279,19 @@ namespace provizio::dds
          * @param request_topic_name The name of the request topic
          * @param response_topic_name The name of the response topic
          * @param handle_request_function The function to handle requests
-         * @param max_history_depth The maximum number of requests to queue
+         * @param max_history_depth The maximum number of requests to queue (request queue size). This is distinct from
+         * endpoint_history_depth, which controls the KEEP_LAST history depth of the underlying request/response
+         * endpoints.
+         * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS) applied to the
+         * underlying request/response DataWriters/DataReaders; std::nullopt keeps the current default.
+         * @param endpoint_history_depth KEEP_LAST history depth for the underlying request/response endpoints;
+         * use_default_history_depth keeps the current default. Distinct from max_history_depth (request queue size).
          */
         service(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
                 const std::string &response_topic_name, handle_request_function_type handle_request_function,
-                std::int32_t max_history_depth = use_default_qos_durability);
+                std::int32_t max_history_depth = use_default_history_depth,
+                std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+                std::int32_t endpoint_history_depth = use_default_history_depth);
 
         /**
          * @brief Construct a new service object from a single name for both topics
@@ -182,11 +299,19 @@ namespace provizio::dds
          * @param participant The DomainParticipant
          * @param service_name The name of the service
          * @param handle_request_function The function to handle requests
-         * @param max_history_depth The maximum number of requests to queue
+         * @param max_history_depth The maximum number of requests to queue (request queue size). This is distinct from
+         * endpoint_history_depth, which controls the KEEP_LAST history depth of the underlying request/response
+         * endpoints.
+         * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS) applied to the
+         * underlying request/response DataWriters/DataReaders; std::nullopt keeps the current default.
+         * @param endpoint_history_depth KEEP_LAST history depth for the underlying request/response endpoints;
+         * use_default_history_depth keeps the current default. Distinct from max_history_depth (request queue size).
          */
         service(std::shared_ptr<domain_participant> participant, const std::string &service_name,
                 handle_request_function_type handle_request_function,
-                std::int32_t max_history_depth = use_default_qos_durability);
+                std::int32_t max_history_depth = use_default_history_depth,
+                std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+                std::int32_t endpoint_history_depth = use_default_history_depth);
         ~service();
 
       private:
@@ -272,20 +397,131 @@ namespace provizio::dds
         std::shared_ptr<detail::response_data<response_type>> data;
     };
 
+    /**
+     * @brief Persistent request/response client.
+     *
+     * Created in advance; matches the service(s) in the background and supports many concurrent in-flight
+     * requests, each returning its own future_response. Thread-safe. Mirrors the ROS 2 service-client
+     * workflow. A future_response keeps the underlying client (and its response DataReader) alive, so
+     * in-flight requests still resolve even if the service_client is destroyed first.
+     *
+     * @tparam request_pub_sub_type The type of the request message.
+     * @tparam response_pub_sub_type The type of the response message.
+     */
+    template <typename request_pub_sub_type, typename response_pub_sub_type> class service_client
+    {
+      public:
+        using request_type = typename request_pub_sub_type::type;
+        using response_type = typename response_pub_sub_type::type;
+
+        /**
+         * @brief Constructs a client from explicit request/response topic names.
+         * @param participant The DomainParticipant.
+         * @param request_topic_name The name of the request topic.
+         * @param response_topic_name The name of the response topic.
+         * @param stable_matches_period Settling window the match count must remain stable for before the
+         * background readiness completes and deferred requests flush.
+         * @param service_match_timeout Deadline for the background readiness wait; 0 (default) waits
+         * indefinitely, suited to clients created in advance.
+         * @param durability_kind Optional DDS durability kind applied to the request DataWriter and response
+         * DataReader; std::nullopt keeps the current default.
+         * @param endpoint_history_depth KEEP_LAST history depth for the request/response endpoints, bounding
+         * how many requests may be concurrently in flight before the reliable writer applies back-pressure;
+         * use_default_history_depth (the default) selects service_client_default_history_depth. Raise it for
+         * higher concurrency.
+         */
+        service_client(std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
+                       const std::string &response_topic_name,
+                       std::chrono::milliseconds stable_matches_period = detail::service_client_basic<
+                           request_pub_sub_type, response_pub_sub_type>::default_wait_for_stable_matches_period,
+                       std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0},
+                       std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+                       std::int32_t endpoint_history_depth = use_default_history_depth);
+
+        /**
+         * @brief Constructs a client from a single service name (request/response topics inferred).
+         * @param participant The DomainParticipant.
+         * @param service_name The name of the service (request/response topic names are inferred from it).
+         * @param stable_matches_period Settling window the match count must remain stable for before the
+         * background readiness completes and deferred requests flush.
+         * @param service_match_timeout Deadline for the background readiness wait; 0 (default) waits
+         * indefinitely, suited to clients created in advance.
+         * @param durability_kind Optional DDS durability kind applied to the request DataWriter and response
+         * DataReader; std::nullopt keeps the current default.
+         * @param endpoint_history_depth KEEP_LAST history depth for the request/response endpoints, bounding
+         * how many requests may be concurrently in flight before the reliable writer applies back-pressure;
+         * use_default_history_depth (the default) selects service_client_default_history_depth. Raise it for
+         * higher concurrency.
+         */
+        service_client(std::shared_ptr<domain_participant> participant, const std::string &service_name,
+                       std::chrono::milliseconds stable_matches_period = detail::service_client_basic<
+                           request_pub_sub_type, response_pub_sub_type>::default_wait_for_stable_matches_period,
+                       std::chrono::milliseconds service_match_timeout = std::chrono::milliseconds{0},
+                       std::optional<DurabilityQosPolicyKind> durability_kind = std::nullopt,
+                       std::int32_t endpoint_history_depth = use_default_history_depth);
+
+        /**
+         * @brief Issues a request and returns a future_response. Sends immediately if matched, else
+         * auto-defers until matched. Thread-safe; many requests may be outstanding at once.
+         * @param request_data The request payload to send.
+         * @return A future_response that resolves with the response correlated to this request.
+         */
+        future_response<request_pub_sub_type, response_pub_sub_type> request(request_type &request_data);
+
+        /**
+         * @brief Blocks until the service(s) are ready (matched and stable for stable_matches_period),
+         * bounded by timeout (0 = wait indefinitely). Returns true once ready, false on timeout/shutdown.
+         * Includes the settling window so all services sharing the topic (multiple sensors, by frame_id) are
+         * discovered before sending.
+         *
+         * Stability is bounded, not strict: to avoid blocking indefinitely under sustained churn, settling is
+         * hard-capped at 4x stable_matches_period from the first match, after which the call returns ready even
+         * if the match count is still changing. Do not treat a true return as a guarantee that no further
+         * services will appear.
+         * @param timeout Maximum time to wait for readiness; 0 (default) waits indefinitely.
+         * @param stable_matches_period Settling window the match count must remain stable for before the
+         * service is considered ready (subject to the 4x hard cap above).
+         * @return true once the service(s) are ready, false on timeout or shutdown.
+         */
+        bool wait_for_service(std::chrono::milliseconds timeout = std::chrono::milliseconds{0},
+                              std::chrono::milliseconds stable_matches_period = detail::service_client_basic<
+                                  request_pub_sub_type, response_pub_sub_type>::default_wait_for_stable_matches_period);
+
+      private:
+        std::shared_ptr<detail::response_router<response_type>> router;
+        std::shared_ptr<detail::service_client_basic<request_pub_sub_type, response_pub_sub_type>> basic_client;
+    };
+
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
     service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>::service(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, handle_request_function_type handle_request_function,
-        const std::int32_t max_history_depth)
+        const std::int32_t max_history_depth, std::optional<DurabilityQosPolicyKind> durability_kind,
+        const std::int32_t endpoint_history_depth)
         : publisher(make_publisher<response_pub_sub_type>(
               participant, response_topic_name,
               [this](data_publisher<response_pub_sub_type> &, const bool matched, const guid &subscriber_guid) {
                   on_matched(matched, subscriber_guid);
               },
               RELIABLE_RELIABILITY_QOS,
-              // As transient local publishers are compatible with volatile subscribers, it is way more reliable for
-              // services to always use transient local durability
-              static_cast<std::int32_t>(detail::to_max_queue_size(max_history_depth)))),
+              // Response-writer history is DECOUPLED from max_history_depth (the request-queue size):
+              // sizing the request queue — in particular minimal_request_queue (0) → KEEP_LAST(1) —
+              // must not shrink the response writer and risk a reliable depth-1 writer blocking or
+              // dropping responses under multiple concurrent clients. When the caller doesn't set an
+              // explicit endpoint_history_depth, the response writer uses the standard default queue
+              // depth (to_max_queue_size(use_default_history_depth)), independent of max_history_depth;
+              // endpoint_history_depth overrides it.
+              (endpoint_history_depth == use_default_history_depth)
+                  ? static_cast<std::int32_t>(detail::to_max_queue_size(use_default_history_depth))
+                  : endpoint_history_depth,
+              // Default the response writer to TRANSIENT_LOCAL durability, overridable via durability_kind.
+              // NOTE: the DEFAULT client response reader is VOLATILE (see request_response_details.h —
+              // nullopt → Fast-DDS default), so against a default client this offered durability is inert:
+              // a VOLATILE reader never requests the writer's historical samples. It is not a data-loss
+              // path — in the settled flow the response reader is matched before the response is sent — it
+              // only benefits a client that explicitly opts its response reader into TRANSIENT_LOCAL.
+              durability_kind ? durability_kind
+                              : std::optional<DurabilityQosPolicyKind>{TRANSIENT_LOCAL_DURABILITY_QOS})),
           request_handler(
               std::move(handle_request_function),
               [this](typename response_pub_sub_type::type data,
@@ -294,7 +530,7 @@ namespace provizio::dds
           subscriber(make_subscriber<request_pub_sub_type>(
               participant, request_topic_name,
               [this](const typename request_pub_sub_type::type &data, const SampleInfo &info) { on_data(data, info); },
-              RELIABLE_RELIABILITY_QOS, max_history_depth)),
+              RELIABLE_RELIABILITY_QOS, endpoint_history_depth, durability_kind)),
           dispatch_responses_thread(&service::dispatch_responses, this)
     {
     }
@@ -302,10 +538,11 @@ namespace provizio::dds
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
     service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>::service(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
-        handle_request_function_type handle_request_function, const std::int32_t max_history_depth)
+        handle_request_function_type handle_request_function, const std::int32_t max_history_depth,
+        std::optional<DurabilityQosPolicyKind> durability_kind, const std::int32_t endpoint_history_depth)
         : service(std::move(participant), detail::request_prefix + service_name + detail::request_suffix,
                   detail::response_prefix + service_name + detail::response_suffix, std::move(handle_request_function),
-                  max_history_depth)
+                  max_history_depth, durability_kind, endpoint_history_depth)
     {
     }
 
@@ -485,20 +722,23 @@ namespace provizio::dds
     std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> make_service(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, handle_request_function_type handle_request_function,
-        const std::int32_t max_history_depth)
+        const std::int32_t max_history_depth, std::optional<DurabilityQosPolicyKind> durability_kind,
+        const std::int32_t endpoint_history_depth)
     {
         return std::make_shared<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>>(
             std::move(participant), request_topic_name, response_topic_name, std::move(handle_request_function),
-            max_history_depth);
+            max_history_depth, durability_kind, endpoint_history_depth);
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type, typename handle_request_function_type>
     std::shared_ptr<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>> make_service(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
-        handle_request_function_type handle_request_function, const std::int32_t max_history_depth)
+        handle_request_function_type handle_request_function, const std::int32_t max_history_depth,
+        std::optional<DurabilityQosPolicyKind> durability_kind, const std::int32_t endpoint_history_depth)
     {
         return std::make_shared<service<request_pub_sub_type, response_pub_sub_type, handle_request_function_type>>(
-            std::move(participant), service_name, std::move(handle_request_function), max_history_depth);
+            std::move(participant), service_name, std::move(handle_request_function), max_history_depth,
+            durability_kind, endpoint_history_depth);
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
@@ -513,7 +753,8 @@ namespace provizio::dds
     future_response<request_pub_sub_type, response_pub_sub_type> request(
         std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
         const std::string &response_topic_name, typename request_pub_sub_type::type &request_data,
-        const std::chrono::milliseconds stable_matches_period, std::chrono::milliseconds service_match_timeout)
+        const std::chrono::milliseconds stable_matches_period, std::chrono::milliseconds service_match_timeout,
+        std::optional<DurabilityQosPolicyKind> durability_kind, const std::int32_t endpoint_history_depth)
     {
         using response_type = typename response_pub_sub_type::type;
         auto response = std::make_shared<detail::response_data<response_type>>();
@@ -537,7 +778,7 @@ namespace provizio::dds
                     }
                 }
             },
-            stable_matches_period, service_match_timeout);
+            stable_matches_period, service_match_timeout, durability_kind, endpoint_history_depth);
 
         client->request(request_data, context);
         return {client, response};
@@ -547,12 +788,90 @@ namespace provizio::dds
     future_response<request_pub_sub_type, response_pub_sub_type> request(
         std::shared_ptr<domain_participant> participant, const std::string &service_name,
         typename request_pub_sub_type::type &request_data, const std::chrono::milliseconds stable_matches_period,
-        const std::chrono::milliseconds service_match_timeout)
+        const std::chrono::milliseconds service_match_timeout, std::optional<DurabilityQosPolicyKind> durability_kind,
+        const std::int32_t endpoint_history_depth)
     {
         return request<request_pub_sub_type, response_pub_sub_type>(
             std::move(participant), detail::request_prefix + service_name + detail::request_suffix,
             detail::response_prefix + service_name + detail::response_suffix, request_data, stable_matches_period,
-            service_match_timeout);
+            service_match_timeout, durability_kind, endpoint_history_depth);
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    service_client<request_pub_sub_type, response_pub_sub_type>::service_client(
+        std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
+        const std::string &response_topic_name, const std::chrono::milliseconds stable_matches_period,
+        const std::chrono::milliseconds service_match_timeout, std::optional<DurabilityQosPolicyKind> durability_kind,
+        const std::int32_t endpoint_history_depth)
+        : router(std::make_shared<detail::response_router<response_type>>())
+    {
+        // service_client issues many requests over a single request DataWriter / response DataReader pair, so
+        // a depth-1 KEEP_LAST default would let a burst of concurrent requests overwrite undelivered samples.
+        // Default the endpoints to KEEP_LAST(service_client_default_history_depth) — a bounded buffer matching
+        // the service's default response history — so a burst up to that many is retained and the reliable
+        // writer applies back-pressure beyond it (rather than dropping). Raise endpoint_history_depth for
+        // higher concurrency.
+        const std::int32_t effective_history_depth = (endpoint_history_depth == use_default_history_depth)
+                                                         ? service_client_default_history_depth
+                                                         : endpoint_history_depth;
+        auto router_ptr = router;
+        basic_client = std::make_shared<detail::service_client_basic<request_pub_sub_type, response_pub_sub_type>>(
+            std::move(participant), request_topic_name, response_topic_name,
+            [router_ptr](const response_type &data, const SampleInfo &info) { router_ptr->dispatch(data, info); },
+            stable_matches_period, service_match_timeout, durability_kind, effective_history_depth);
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    service_client<request_pub_sub_type, response_pub_sub_type>::service_client(
+        std::shared_ptr<domain_participant> participant, const std::string &service_name,
+        const std::chrono::milliseconds stable_matches_period, const std::chrono::milliseconds service_match_timeout,
+        std::optional<DurabilityQosPolicyKind> durability_kind, const std::int32_t endpoint_history_depth)
+        : service_client(std::move(participant), detail::request_prefix + service_name + detail::request_suffix,
+                         detail::response_prefix + service_name + detail::response_suffix, stable_matches_period,
+                         service_match_timeout, durability_kind, endpoint_history_depth)
+    {
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    future_response<request_pub_sub_type, response_pub_sub_type> service_client<
+        request_pub_sub_type, response_pub_sub_type>::request(request_type &request_data)
+    {
+        auto response = std::make_shared<detail::response_data<response_type>>();
+        auto context = std::make_shared<detail::request_context<response_type>>();
+        context->response = response;
+        router->add(context);
+        basic_client->request(request_data, context);
+        return {basic_client, response};
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    bool service_client<request_pub_sub_type, response_pub_sub_type>::wait_for_service(
+        const std::chrono::milliseconds timeout, const std::chrono::milliseconds stable_matches_period)
+    {
+        return basic_client->wait_for_service(timeout, stable_matches_period);
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    std::shared_ptr<service_client<request_pub_sub_type, response_pub_sub_type>> make_service_client(
+        std::shared_ptr<domain_participant> participant, const std::string &request_topic_name,
+        const std::string &response_topic_name, const std::chrono::milliseconds stable_matches_period,
+        const std::chrono::milliseconds service_match_timeout, std::optional<DurabilityQosPolicyKind> durability_kind,
+        const std::int32_t endpoint_history_depth)
+    {
+        return std::make_shared<service_client<request_pub_sub_type, response_pub_sub_type>>(
+            std::move(participant), request_topic_name, response_topic_name, stable_matches_period,
+            service_match_timeout, durability_kind, endpoint_history_depth);
+    }
+
+    template <typename request_pub_sub_type, typename response_pub_sub_type>
+    std::shared_ptr<service_client<request_pub_sub_type, response_pub_sub_type>> make_service_client(
+        std::shared_ptr<domain_participant> participant, const std::string &service_name,
+        const std::chrono::milliseconds stable_matches_period, const std::chrono::milliseconds service_match_timeout,
+        std::optional<DurabilityQosPolicyKind> durability_kind, const std::int32_t endpoint_history_depth)
+    {
+        return std::make_shared<service_client<request_pub_sub_type, response_pub_sub_type>>(
+            std::move(participant), service_name, stable_matches_period, service_match_timeout, durability_kind,
+            endpoint_history_depth);
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>

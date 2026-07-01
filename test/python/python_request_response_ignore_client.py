@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import asyncio
+import sys
 import provizio_dds
 
 log_prefix = "python_request_response_ignore_client: "
@@ -80,4 +81,4 @@ async def main():
     return 0
 
 
-exit(asyncio.run(main()))
+sys.exit(asyncio.run(main()))

@@ -32,7 +32,7 @@ namespace provizio::dds::detail
         {
             return static_cast<std::size_t>(max_history_depth);
         }
-        if (max_history_depth == no_history)
+        if (max_history_depth == minimal_request_queue)
         {
             return min_queue_size_limit;
         }

@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import asyncio
+import sys
 import provizio_dds
 
 log_prefix = "python_request_response_concurrent_client: "
@@ -99,8 +100,8 @@ async def main():
 
             print(f"{log_prefix}Correctly got expected response = {received}")
 
-    print(f"{log_prefix}Successfully complete")
+    print(f"{log_prefix}Successfully completed")
     return 0
 
 
-exit(asyncio.run(main()))
+sys.exit(asyncio.run(main()))

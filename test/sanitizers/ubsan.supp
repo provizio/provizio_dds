@@ -1,0 +1,16 @@
+# UBSan runtime suppressions for the provizio_dds sanitizer builds.
+# Applied via UBSAN_OPTIONS=suppressions=<this file> (see the sanitizer CI job).
+#
+# Fast-DDS compares serialized payloads with memcmp() even when the payload is empty (data == nullptr,
+# length == 0). memcmp is declared __attribute__((nonnull)), so passing the null (but unused, length 0)
+# pointer trips UBSan's nonnull-attribute check. It is benign (no bytes are read) and lives entirely in
+# Fast-DDS's discovery serialization, so suppress it rather than carry a patch in the fork.
+nonnull-attribute:SerializedPayload.cpp
+
+# Fast-DDS represents an infinite timer interval (c_TimeInfinite) as a floating-point +inf and casts it
+# to a long long count when arming the event; inf->long long is float-cast-overflow UB. It is benign —
+# the value denotes "never fire" — and lives entirely in Fast-DDS's TimedEvent resource. It surfaces
+# only on macOS (the Linux runners do not reach this conversion). Suppress it: besides being a Fast-DDS
+# internal issue, leaving it unsuppressed makes UBSan symbolize a stack trace on every periodic firing,
+# which on macOS is slow enough to stall the timed-event thread and break pub/sub delivery timing.
+float-cast-overflow:TimedEvent.cpp

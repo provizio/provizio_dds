@@ -31,7 +31,7 @@ int main(int argc, char *argv[])
     constexpr provizio::dds::DomainId_t domain_id = 14;
     constexpr int requests_expected_default = 7;
     constexpr std::chrono::seconds total_timeout{
-        60};  // DDS entity matching can be slow on some platforms (e.g. Windows)
+        60 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};  // DDS entity matching can be slow on some platforms (e.g. Windows)
     constexpr std::chrono::seconds end_sleep{4};
 
     int requests_expected = requests_expected_default;
