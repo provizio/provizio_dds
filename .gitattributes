@@ -1,0 +1,5 @@
+# The binary build cache under cache/ holds CI-produced artifacts (auto-committed by the
+# "Bin cache for common configurations" job), not hand-authored source. Mark the archives as
+# generated so GitHub collapses them in diffs / pull requests and omits them from the
+# repository's language statistics. cache/README.md is hand-authored and stays a normal file.
+cache/*.zip linguist-generated=true

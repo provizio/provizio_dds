@@ -316,8 +316,8 @@ namespace
             check_point_meta(ego[pt], input_points[pt], radar_ids[pt], "move_simple_extrinsics ego");
         }
 
-        // Extrinsics required but never provided => throws (validated BEFORE buffering, unlike Python which
-        // appends first — a deliberate clean-API divergence, see the spec)
+        // Extrinsics required but never provided => throws BEFORE any buffer is created, so the accumulator
+        // (and the getters' first-accumulation ordering) stays untouched. Same in Python.
         acc::point_clouds_accumulator strict_accumulator{2, no_filters_options(0, false)};
         bool threw = false;
         try
@@ -331,6 +331,18 @@ namespace
         check(threw, "move_simple_extrinsics: missing extrinsics did not throw");
         check(strict_accumulator.get_points_local_frame_relative().empty(),
               "move_simple_extrinsics: throwing accumulate must not buffer the frame");
+        // The rejected call must NOT have registered a buffer for "no_extrinsics_radar". Accumulate a
+        // different radar, then "no_extrinsics_radar" WITH extrinsics: the getters return radars in
+        // first-accumulation order, so "later_radar" must come first — it would come second if the earlier
+        // failed call had already created the "no_extrinsics_radar" buffer.
+        const acc::rigid_transform zero_extrinsics{{0, 0, 0}, {0, 0, 0}};
+        strict_accumulator.accumulate("later_radar", radar_points{point_0}, identity_transform, zero_extrinsics);
+        strict_accumulator.accumulate("no_extrinsics_radar", radar_points{point_0}, identity_transform,
+                                      zero_extrinsics);
+        const auto ordered = strict_accumulator.get_points_local_frame_relative();
+        check(ordered.size() == 2 && ordered.front().radar_position_id != nullptr &&
+                  *ordered.front().radar_position_id == "later_radar",
+              "move_simple_extrinsics: a rejected accumulate must not create a buffer that reorders later radars");
     }
 
     // Mirrors Python test_accumulate_overflow

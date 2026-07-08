@@ -344,6 +344,10 @@ namespace provizio::dds::accumulation
             std::optional<rigid_transform> extrinsics;
         };
 
+        /// Non-mutating lookup of an existing radar buffer (nullptr if this radar has none yet). Lets
+        /// accumulate() validate before buffer_for() creates any state, so a rejected call leaves the
+        /// accumulator — and the first-accumulation ordering below — untouched. In src/accumulation.cpp.
+        radar_buffer *find_buffer(const std::string &radar_position_id);
         /// In src/accumulation.cpp; no export needed: only called from accumulate (the same translation unit)
         radar_buffer &buffer_for(const std::string &radar_position_id);
         /// Header-inline by design: the maths path shared by both public getters (see the @file doc)

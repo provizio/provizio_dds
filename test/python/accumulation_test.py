@@ -242,6 +242,45 @@ def test_accumulate_move_simple_extrinsics():
             )
             assert accumulated_points_ego_relative[pt].radar_id == radar_ids[pt]
 
+    # Extrinsics required but never provided => raises BEFORE any buffer is created, so the accumulator
+    # (and the getters' first-accumulation ordering) stays untouched. Mirrors the C++ test.
+    strict_accumulator = provizio_dds.accumulation.PointCloudsAccumulator(
+        2, snr_threshold=0, point_filter=None, allow_no_extrinsics=False
+    )
+    threw = False
+    try:
+        strict_accumulator.accumulate(
+            "no_extrinsics_radar",
+            [point_0],
+            provizio_dds.accumulation.RigidTransform([0, 0, 0], no_rotation),
+        )
+    except ValueError:
+        threw = True
+    assert threw, "missing extrinsics did not raise"
+    assert (
+        len(strict_accumulator.get_points_local_frame_relative()) == 0
+    ), "raising accumulate must not buffer the frame"
+    # The rejected call must NOT have registered a buffer for "no_extrinsics_radar": accumulate a different
+    # radar, then "no_extrinsics_radar" WITH extrinsics; first-accumulation order puts "later_radar" first
+    # (it would be second if the failed call had already created the "no_extrinsics_radar" buffer).
+    zero_extrinsics = provizio_dds.accumulation.RigidTransform([0, 0, 0], no_rotation)
+    strict_accumulator.accumulate(
+        "later_radar",
+        [point_0],
+        provizio_dds.accumulation.RigidTransform([0, 0, 0], no_rotation),
+        radar_extrinsics=zero_extrinsics,
+    )
+    strict_accumulator.accumulate(
+        "no_extrinsics_radar",
+        [point_0],
+        provizio_dds.accumulation.RigidTransform([0, 0, 0], no_rotation),
+        radar_extrinsics=zero_extrinsics,
+    )
+    ordered = strict_accumulator.get_points_local_frame_relative()
+    assert (
+        len(ordered) == 2 and ordered[0].radar_id == "later_radar"
+    ), "a rejected accumulate must not create a buffer that reorders later radars"
+
 
 def test_accumulate_move_simple_extrinsics_snr_filter():
     accumulator_snr_5 = provizio_dds.accumulation.PointCloudsAccumulator(

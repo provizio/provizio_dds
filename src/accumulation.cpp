@@ -186,15 +186,20 @@ namespace provizio::dds::accumulation
         }
     }
 
-    point_clouds_accumulator::radar_buffer &point_clouds_accumulator::buffer_for(const std::string &radar_position_id)
+    point_clouds_accumulator::radar_buffer *point_clouds_accumulator::find_buffer(const std::string &radar_position_id)
     {
         const auto iter =
             std::find_if(buffers.begin(), buffers.end(), [&radar_position_id](const radar_buffer &buffer) {
                 return *buffer.radar_position_id == radar_position_id;
             });
-        if (iter != buffers.end())
+        return iter != buffers.end() ? &*iter : nullptr;
+    }
+
+    point_clouds_accumulator::radar_buffer &point_clouds_accumulator::buffer_for(const std::string &radar_position_id)
+    {
+        if (auto *const existing = find_buffer(radar_position_id))
         {
-            return *iter;
+            return *existing;
         }
         buffers.push_back(radar_buffer{std::make_shared<const std::string>(radar_position_id), {}, std::nullopt});
         return buffers.back();
@@ -211,14 +216,21 @@ namespace provizio::dds::accumulation
             return;
         }
 
-        auto &buffer = buffer_for(radar_position_id);
-
-        // Validate BEFORE buffering the frame: when accumulate throws, the accumulator state is untouched
-        if (!radar_extrinsics && !options.allow_no_extrinsics && !buffer.extrinsics)
+        // Validate BEFORE creating or touching any buffer: when accumulate throws, the accumulator state —
+        // including the first-accumulation ordering — stays untouched, so a rejected call does not create an
+        // empty buffer for a new radar. A radar with no buffer yet has no stored extrinsics, exactly like an
+        // existing buffer whose extrinsics is still unset.
+        if (!radar_extrinsics && !options.allow_no_extrinsics)
         {
-            throw std::invalid_argument{
-                "point_clouds_accumulator: allow_no_extrinsics is false so radar_extrinsics must be specified!"};
+            const auto *const existing = find_buffer(radar_position_id);
+            if (existing == nullptr || !existing->extrinsics)
+            {
+                throw std::invalid_argument{
+                    "point_clouds_accumulator: allow_no_extrinsics is false so radar_extrinsics must be specified!"};
+            }
         }
+
+        auto &buffer = buffer_for(radar_position_id);
 
         if (options.snr_threshold > 0)
         {
@@ -295,6 +307,12 @@ namespace provizio::dds::accumulation
                     "dds_point_clouds_accumulator: with localization_source::none, localization_topic, "
                     "localization_frame_id and localization_extrinsics_topic must all be empty"};
             }
+            // timesync buffers a cloud until the localization covering its timestamp arrives; with no
+            // localization source there is nothing to sync to, so it has no effect (as documented). Normalise
+            // to 0 here so on_pc2_message skips the buffering path and accumulates immediately, instead of
+            // buffering the cloud until the next one triggers a timeout release. (kalman_localization is
+            // likewise inert with no localization — see the localization_filter guard in the constructor.)
+            options.timesync_max_delay_seconds = 0.0;
         }
         else
         {
@@ -539,8 +557,18 @@ namespace provizio::dds::accumulation
         {
             const std::lock_guard<std::mutex> lock{mutex};
 
-            // nav_sat_fix learns its localization frame from the first fix (default "any"); multiple GNSS sources
-            // can share one topic, so fixes from any other frame are dropped.
+            // Reject a garbage fix (e.g. a GPS sample emitted before fix-lock) BEFORE anything else: a NaN
+            // fix must never learn/lock localization_frame_id — that would drop every later valid fix from the
+            // intended source — nor poison the ENU origin (set once, from the first valid fix).
+            const double latitude = fix.latitude();
+            const double longitude = fix.longitude();
+            if (std::isnan(latitude) || std::isnan(longitude))
+            {
+                return;
+            }
+
+            // nav_sat_fix learns its localization frame from the first (valid) fix (default "any"); multiple GNSS
+            // sources can share one topic, so fixes from any other frame are dropped.
             if (localization_frame_id.empty())
             {
                 localization_frame_id = fix.header().frame_id();
@@ -561,14 +589,6 @@ namespace provizio::dds::accumulation
                 return;
             }
 
-            const double latitude = fix.latitude();
-            const double longitude = fix.longitude();
-            if (std::isnan(latitude) || std::isnan(longitude))
-            {
-                // A NaN fix (e.g. a GPS sample emitted before fix-lock) would permanently poison the ENU origin
-                // (set once, from the first fix) and every geo_to_enu thereafter — drop it, keep the prior estimate.
-                return;
-            }
             const double altitude = std::isnan(fix.altitude()) ? 0.0 : fix.altitude();
 
             if (!gps)

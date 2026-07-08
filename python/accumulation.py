@@ -447,14 +447,9 @@ class PointCloudsAccumulator:
             # Simply ignore this radar
             return
 
-        if radar_position_id not in self._buffers:
-            self._buffers[radar_position_id] = collections.deque(
-                maxlen=self.max_frames_per_radar
-            )
-
-        buffer = self._buffers[radar_position_id]
-
-        # Validate BEFORE buffering the frame: when accumulate raises, the accumulator state stays untouched
+        # Validate BEFORE creating or touching any buffer: when accumulate raises, the accumulator state stays
+        # untouched — a rejected call must not create an empty buffer for a new radar (which would also fix that
+        # radar's position in the getters' first-accumulation iteration order).
         if (
             not radar_extrinsics
             and not self.allow_no_extrinsics
@@ -463,6 +458,13 @@ class PointCloudsAccumulator:
             raise ValueError(
                 "allow_no_extrinsics is False so radar_extrinsics must be specified!"
             )
+
+        if radar_position_id not in self._buffers:
+            self._buffers[radar_position_id] = collections.deque(
+                maxlen=self.max_frames_per_radar
+            )
+
+        buffer = self._buffers[radar_position_id]
 
         if self.snr_threshold > 0:
             points = list(
@@ -934,8 +936,16 @@ class DDSPointCloudsAccumulator:
 
         released = 0
         with self._mutex:
-            # nav_sat_fix learns its localization frame from the first fix (default "any"); multiple GNSS sources
-            # can share one topic, so fixes from any other frame are dropped.
+            # Reject a garbage fix (e.g. a GPS sample emitted before fix-lock) BEFORE anything else: a NaN
+            # fix must never learn/lock localization_frame_id — that would drop every later valid fix from the
+            # intended source — nor poison the ENU origin (set once, from the first valid fix).
+            lat = nav_sat_fix.latitude()
+            lon = nav_sat_fix.longitude()
+            if isnan(lat) or isnan(lon):
+                return
+
+            # nav_sat_fix learns its localization frame from the first (valid) fix (default "any"); multiple GNSS
+            # sources can share one topic, so fixes from any other frame are dropped.
             if not self.localization_frame_id:
                 self.localization_frame_id = nav_sat_fix.header().frame_id()
             if nav_sat_fix.header().frame_id() != self.localization_frame_id:
@@ -951,12 +961,6 @@ class DDSPointCloudsAccumulator:
                     # stream monotonic. Must run before ego localization or fixes are mutated.
                     return
 
-            lat = nav_sat_fix.latitude()
-            lon = nav_sat_fix.longitude()
-            if isnan(lat) or isnan(lon):
-                # A NaN fix (e.g. a GPS sample emitted before fix-lock) would permanently poison the ENU origin
-                # (set once, from the first fix) and every geo2enu thereafter — drop it, keep the prior estimate.
-                return
             alt = nav_sat_fix.altitude() if not isnan(nav_sat_fix.altitude()) else 0
 
             if self._gps_utils is None:
