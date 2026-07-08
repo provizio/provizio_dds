@@ -89,6 +89,11 @@ _nr_add_test(network_recovery_reset_refreshes_fastdds_interface_cache
 # Coalescer + concurrency tests using the test-only injection hooks.
 _nr_add_test(network_recovery_coalescer_skips_no_change
     ARGS coalescer_skips_no_change TIMEOUT ${_NR_TIMEOUT_DDS})
+# Regression: a transient flap (a DDS-relevant address that leaves and returns
+# within the debounce window) nets to an unchanged end-snapshot but must still
+# rebuild — the coalescer compares the burst-start snapshot too.
+_nr_add_test(network_recovery_coalescer_resets_on_transient_flap
+    ARGS coalescer_resets_on_transient_flap TIMEOUT ${_NR_TIMEOUT_DDS})
 _nr_add_test(network_recovery_wait_for_idle_blocks_during_reset
     ARGS wait_for_idle_blocks_during_reset TIMEOUT ${_NR_TIMEOUT_DDS})
 _nr_add_test(network_recovery_reentrant_listener_during_reset

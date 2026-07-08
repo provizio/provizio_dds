@@ -404,6 +404,47 @@ namespace
         return passed ? 0 : 1;
     }
 
+    int test_coalescer_resets_on_transient_flap()
+    {
+        // Regression: a DDS-relevant address that LEAVES and RETURNS within the
+        // debounce window nets to an unchanged end-snapshot. An end-snapshot-only
+        // diff coalesces it away ("snapshot unchanged, no reset") — but the
+        // Fast-DDS sockets bound to that address were torn down while it was gone
+        // and must be rebuilt. The coordinator now also compares the burst-START
+        // snapshot; this drives that path with a synthetic start snapshot that
+        // differs from the (real) end snapshot, so no host interface manipulation
+        // is needed. Without the burst-start comparison this asserts FALSE (the
+        // burst would be skipped), so it is a true regression guard.
+        bool passed = true;
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+
+        auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+
+        // last_known_snapshot was seeded with the real host snapshot when this
+        // participant registered. Build a start snapshot that DIFFERS from it (an
+        // extra address, gone by the real end-snapshot) so the burst "deviated"
+        // mid-window yet returns to the real set by the time it settles.
+        auto simulated_start = provizio::dds::detail::capture_address_snapshot();
+        simulated_start.insert(
+            provizio::dds::detail::interface_address{"provizio_test_transient_if", "203.0.113.7"});  // TEST-NET-3
+
+        const auto reset_before = coordinator.reset_count_for_test();
+        const auto skipped_before = coordinator.skipped_reset_count_for_test();
+
+        coordinator.inject_transient_for_test(simulated_start);
+        coordinator.wait_for_idle();
+
+        const auto reset_after = coordinator.reset_count_for_test();
+        const auto skipped_after = coordinator.skipped_reset_count_for_test();
+
+        passed &= EXPECT(reset_after == reset_before + 1);  // transient → participant rebuild
+        passed &= EXPECT(skipped_after == skipped_before);  // NOT coalesced away as "no change"
+
+        std::cout << "coalescer_resets_on_transient_flap: " << (passed ? "PASS" : "FAIL")
+                  << " (reset_count=" << reset_after << " skipped=" << skipped_after << ")" << '\n';
+        return passed ? 0 : 1;
+    }
+
     int test_wait_for_idle_blocks_during_reset()
     {
         // wait_for_idle() must not return until the coalescer's terminal log
@@ -751,6 +792,10 @@ int main(int argc, char **argv)
     if (subcommand == "coalescer_skips_no_change")
     {
         return test_coalescer_skips_no_change();
+    }
+    if (subcommand == "coalescer_resets_on_transient_flap")
+    {
+        return test_coalescer_resets_on_transient_flap();
     }
     if (subcommand == "wait_for_idle_blocks_during_reset")
     {

@@ -272,7 +272,8 @@ add_test(NAME accumulation_test COMMAND
 # this file.
 set(_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV)
 foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
-        reset_refreshes_fastdds_interface_cache teardown_deferred)
+        reset_refreshes_fastdds_interface_cache teardown_deferred
+        coalescer_resets_on_transient_flap)
     add_test(NAME python_network_recovery_${_nrt_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler
         ./python_network_recovery_test.py ${_nrt_case}

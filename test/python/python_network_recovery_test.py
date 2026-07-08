@@ -443,6 +443,41 @@ def test_teardown_deferred():
     return 0
 
 
+def test_coalescer_resets_on_transient_flap():
+    """A transient flap (a DDS-relevant address that leaves and returns within
+    the quiet period) nets to an unchanged end-snapshot but must still rebuild —
+    the Fast-DDS sockets bound to that address were torn down while it was gone.
+    The coordinator's _on_network_event compares the burst-START snapshot too;
+    inject_transient_for_test drives that path with a synthetic start snapshot.
+    The second half confirms a same-end-state event with NO transient signal is
+    still correctly skipped (no spurious reset) — exactly what the old end-only
+    logic did for the transient too, which was the bug."""
+    from provizio_dds import network_recovery as nr
+
+    # Recovery ON so the coordinator (and monitor) are live (mirrors the C++ test).
+    participant = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert participant is not None
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+
+    # 1) Transient flap → MUST reset.
+    reset_before = coordinator.reset_count
+    skipped_before = coordinator.skipped_reset_count
+    coordinator.inject_transient_for_test()
+    assert coordinator.reset_count == reset_before + 1, (coordinator.reset_count, reset_before)
+    assert coordinator.skipped_reset_count == skipped_before, (coordinator.skipped_reset_count, skipped_before)
+
+    # 2) Same end-state but NO transient signal → correctly skipped (no spurious reset).
+    snap = nr._capture_address_snapshot()
+    reset_before2 = coordinator.reset_count
+    skipped_before2 = coordinator.skipped_reset_count
+    coordinator.inject_change_for_test(snap, snap)
+    assert coordinator.reset_count == reset_before2, (coordinator.reset_count, reset_before2)
+    assert coordinator.skipped_reset_count == skipped_before2 + 1, (coordinator.skipped_reset_count, skipped_before2)
+
+    _log("coalescer_resets_on_transient_flap: PASS")
+    return 0
+
+
 _TESTS = {
     "logging": test_logging,
     "env_recovery": test_env_recovery,
@@ -457,6 +492,7 @@ _TESTS = {
     "reset_disabled": test_reset_disabled,
     "reset_refreshes_fastdds_interface_cache": test_reset_refreshes_fastdds_interface_cache,
     "teardown_deferred": test_teardown_deferred,
+    "coalescer_resets_on_transient_flap": test_coalescer_resets_on_transient_flap,
 }
 
 
