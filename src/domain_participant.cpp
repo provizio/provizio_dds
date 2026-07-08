@@ -49,11 +49,106 @@ namespace provizio::dds
 {
     namespace
     {
-        // More reliable participants matching (only 5 multicast announcements are sent 0.1 seconds apart by default
-        // and then only once in 3 seconds, which is often not enough when nearing 100% bandwidth load)
-        const eprosima::fastdds::dds::Duration_t initial_announcements_period{0.05};        // NOLINT: Doesn't throw
-        const eprosima::fastdds::dds::Duration_t lease_duration_announcement_period{1, 0};  // NOLINT: Doesn't throw
-        constexpr std::uint32_t num_initial_discovery_announcements = 200;
+        // ---- Auto-discovery (SPDP) tuning --------------------------------------------------------
+        //
+        // Participant discovery announcements are multicast best-effort, so some are lost on a busy
+        // or lossy network. Fast-DDS counters this with an INITIAL burst of announcements at
+        // participant creation plus a PERIODIC re-announcement thereafter. Set too high, both make
+        // the library itself a primary source of UDP congestion once many participants (sensors +
+        // clients) run at once: the initial burst is paid on EVERY participant creation (including
+        // each network-recovery reset, which recreates the participant), and the periodic
+        // re-announcement is paid by every participant forever, so its multicast rate scales with
+        // the participant count.
+        //
+        // These defaults are de-escalated from a former 200-shot / 50 ms initial burst and a 1 s
+        // periodic flood to a modest burst and a relaxed cadence that still discovers robustly (the
+        // initial count stays well above Fast-DDS's own default of 5, so a lossy link still gets
+        // several shots through) without flooding the network. All four are overridable at runtime
+        // via the PROVIZIO_DDS_DISCOVERY_* env variables below — e.g. to tune for an unusually large
+        // fleet or a particularly lossy link — without recompiling.
+        //
+        // Keep these defaults and the env-variable names in sync with python/provizio_dds.py
+        // (QosDefaults and its _resolve_discovery_* helpers).
+        constexpr std::uint32_t default_initial_announcement_count = 15;
+        constexpr std::uint32_t default_initial_announcement_period_ms = 100;
+        constexpr std::uint32_t default_announcement_period_ms = 3000;
+        // Lease duration: how long a peer is considered alive without a fresh announcement. Raised
+        // from Fast-DDS's 20 s default to 30 s so the relaxed announcement cadence has more margin
+        // before a peer is wrongly declared lost when announcements are dropped on a congested or
+        // lossy link (the only cost is detecting a genuinely-dead peer ~10 s later). Must stay
+        // longer than the periodic announcement period above (a warning is logged otherwise).
+        constexpr std::uint32_t default_lease_duration_ms = 30000;
+
+        // Time-unit conversion factors for milliseconds <-> Fast-DDS Duration_t (seconds + nanosec).
+        constexpr std::uint32_t ms_per_second = 1000U;          // milliseconds per second
+        constexpr std::uint32_t ns_per_millisecond = 1000000U;  // nanoseconds per millisecond
+        constexpr double ns_per_second = 1e9;                   // nanoseconds per second
+        constexpr double ms_per_second_f = 1000.0;              // milliseconds per second (floating-point)
+
+        constexpr const char *const initial_announcement_count_env =
+            "PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_COUNT";
+        constexpr const char *const initial_announcement_period_env =
+            "PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_PERIOD_MS";
+        constexpr const char *const announcement_period_env = "PROVIZIO_DDS_DISCOVERY_ANNOUNCEMENT_PERIOD_MS";
+        constexpr const char *const lease_duration_env = "PROVIZIO_DDS_DISCOVERY_LEASE_DURATION_MS";
+
+        // Strictly-positive unsigned integer from env var `name`, else `fallback` (logged at
+        // warning). Used by the discovery-tuning resolvers below; rejects unset/empty/non-numeric/
+        // zero/overflowing input so a typo can never silently disable or wildly misconfigure
+        // discovery.
+        std::uint32_t resolve_positive_u32_env(const char *const name, const std::uint32_t fallback)
+        {
+            const char *const env = std::getenv(name);  // NOLINT: getenv required
+            if (env == nullptr || *env == '\0')
+            {
+                return fallback;
+            }
+            char *end = nullptr;
+            const std::uint64_t parsed = std::strtoull(env, &end, 10);  // NOLINT: C numeric parse
+            if (end != nullptr && *end == '\0' && parsed > 0U &&
+                parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+            {
+                return static_cast<std::uint32_t>(parsed);
+            }
+            log_warning() << "ignoring invalid " << name << "='" << env << "'; using default " << fallback;
+            return fallback;
+        }
+
+        // Milliseconds -> Fast-DDS Duration_t. milliseconds is uint32, so seconds (ms / 1000) always
+        // fits int32 and nanosec (< 1e9) fits uint32 — no overflow for any accepted value.
+        eprosima::fastdds::dds::Duration_t milliseconds_to_duration(const std::uint32_t milliseconds)
+        {
+            return eprosima::fastdds::dds::Duration_t{
+                static_cast<std::int32_t>(milliseconds / ms_per_second),
+                static_cast<std::uint32_t>((milliseconds % ms_per_second) * ns_per_millisecond)};
+        }
+
+        double duration_to_seconds(const eprosima::fastdds::dds::Duration_t &duration)
+        {
+            return static_cast<double>(duration.seconds) + static_cast<double>(duration.nanosec) / ns_per_second;
+        }
+
+        std::uint32_t resolve_initial_announcement_count()
+        {
+            return resolve_positive_u32_env(initial_announcement_count_env, default_initial_announcement_count);
+        }
+
+        eprosima::fastdds::dds::Duration_t resolve_initial_announcement_period()
+        {
+            return milliseconds_to_duration(
+                resolve_positive_u32_env(initial_announcement_period_env, default_initial_announcement_period_ms));
+        }
+
+        eprosima::fastdds::dds::Duration_t resolve_announcement_period()
+        {
+            return milliseconds_to_duration(
+                resolve_positive_u32_env(announcement_period_env, default_announcement_period_ms));
+        }
+
+        eprosima::fastdds::dds::Duration_t resolve_lease_duration()
+        {
+            return milliseconds_to_duration(resolve_positive_u32_env(lease_duration_env, default_lease_duration_ms));
+        }
 
         // Default UDP socket send/recv buffer ceiling (16 MiB). Large enough that a
         // multi-MB sample's fragments don't overflow the receive socket buffer (which
@@ -314,12 +409,23 @@ namespace provizio::dds
             participant_factory->load_profiles();
             participant_factory->get_default_participant_qos(cached_qos);
 
-            cached_qos.wire_protocol().builtin.discovery_config.initial_announcements.count =
-                num_initial_discovery_announcements;
-            cached_qos.wire_protocol().builtin.discovery_config.initial_announcements.period =
-                initial_announcements_period;
-            cached_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod =
-                lease_duration_announcement_period;
+            auto &discovery_config = cached_qos.wire_protocol().builtin.discovery_config;
+            discovery_config.initial_announcements.count = resolve_initial_announcement_count();
+            discovery_config.initial_announcements.period = resolve_initial_announcement_period();
+            discovery_config.leaseDuration = resolve_lease_duration();
+            const auto announcement_period = resolve_announcement_period();
+            discovery_config.leaseDuration_announcementperiod = announcement_period;
+            // Fast-DDS guidance: the periodic re-announcement must stay shorter than the lease
+            // duration, or a peer can be declared lost in the gap between announcements. The default
+            // 3 s is well clear of the 30 s default lease; warn only if an env override crossed it.
+            if (duration_to_seconds(announcement_period) >= duration_to_seconds(discovery_config.leaseDuration))
+            {
+                log_warning() << announcement_period_env << " ("
+                              << duration_to_seconds(announcement_period) * ms_per_second_f
+                              << " ms) is >= the participant lease duration ("
+                              << duration_to_seconds(discovery_config.leaseDuration) * ms_per_second_f
+                              << " ms); peers may be declared lost between announcements";
+            }
 
             // Transport tuning (skipped entirely when FASTDDS_BUILTIN_TRANSPORTS hands
             // control to the user). Two things happen here:

@@ -21,6 +21,7 @@ import asyncio
 import atexit
 import inspect
 import os
+import re
 import sys
 import threading
 import weakref
@@ -220,14 +221,29 @@ class QosDefaults:
     QoS and doesn't affect matching or ROS 2 interop. Registered lazily by _register_large_sample_qos_defaults()."""
     keep_last_history_depth_per_type = {None: 0}
 
-    """Number of initial participants discovery messages to be broadcast on period of initial_announcements_period"""
-    num_initial_discovery_announcements = 200
+    """Default count of the INITIAL discovery-announcement burst sent once at participant creation.
+    De-escalated from a former 200 to a modest burst that still beats best-effort multicast loss on
+    a lossy link (well above Fast-DDS's own default of 5) without flooding the network. Overridable
+    via PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_COUNT. Mirrors src/domain_participant.cpp."""
+    num_initial_discovery_announcements = 15
 
-    """Period of broadcasting initial participants discovery messages"""
-    initial_announcements_period = Duration_t(0, 50000000)  # As (sec, nanosec)
+    """Default spacing of the initial discovery announcements. Overridable (in milliseconds) via
+    PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_PERIOD_MS."""
+    initial_announcements_period = Duration_t(0, 100000000)  # 100 ms, as (sec, nanosec)
 
-    """Period of broadcasting participants discovery messages after the initial announcements"""
-    lease_duration_announcement_period = Duration_t(1, 0)  # As (sec, nanosec)
+    """Default period of the PERIODIC participant re-announcement after the initial burst
+    (leaseDuration_announcementperiod). Paid by every participant forever, so its multicast rate
+    scales with the participant count; de-escalated from a former 1 s to the Fast-DDS default of 3 s
+    (well under the 20 s lease) so the library is not itself a primary source of UDP congestion when
+    many participants run. Overridable (in milliseconds) via PROVIZIO_DDS_DISCOVERY_ANNOUNCEMENT_PERIOD_MS."""
+    lease_duration_announcement_period = Duration_t(3, 0)  # 3 s, as (sec, nanosec)
+
+    """Default participant lease duration — how long a peer is considered alive without a fresh
+    announcement. Raised from Fast-DDS's 20 s default to 30 s so the relaxed announcement cadence has
+    more margin before a peer is wrongly declared lost when announcements are dropped on a congested
+    or lossy link. Must stay longer than lease_duration_announcement_period. Overridable (in
+    milliseconds) via PROVIZIO_DDS_DISCOVERY_LEASE_DURATION_MS. Mirrors src/domain_participant.cpp."""
+    lease_duration = Duration_t(30, 0)  # 30 s, as (sec, nanosec)
 
     def __init__(self, pub_sub_type: TopicDataType):
         """Constructs an instance of QosDefaults for the DDS Pub/Sub type.
@@ -617,6 +633,84 @@ def _resolve_udp_socket_buffer_size():
     return _DEFAULT_UDP_SOCKET_BUFFER_SIZE
 
 
+# ---- Auto-discovery (SPDP) tuning ------------------------------------------------------------
+#
+# Participant discovery announcements are multicast best-effort, so some are lost on a busy or
+# lossy network. Fast-DDS counters this with an INITIAL burst of announcements at participant
+# creation plus a PERIODIC re-announcement thereafter. Set too high, both make the library itself
+# a primary source of UDP congestion once many participants (sensors + clients) run at once. The
+# defaults (in QosDefaults) are de-escalated to a modest burst and a relaxed cadence that still
+# discover robustly; all four are overridable at runtime via these env variables (counts as plain
+# integers, periods in milliseconds) without recompiling. Keep these names and the resolver
+# behaviour in sync with src/domain_participant.cpp.
+_INITIAL_ANNOUNCEMENT_COUNT_ENV = "PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_COUNT"
+_INITIAL_ANNOUNCEMENT_PERIOD_MS_ENV = "PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_PERIOD_MS"
+_ANNOUNCEMENT_PERIOD_MS_ENV = "PROVIZIO_DDS_DISCOVERY_ANNOUNCEMENT_PERIOD_MS"
+_LEASE_DURATION_MS_ENV = "PROVIZIO_DDS_DISCOVERY_LEASE_DURATION_MS"
+
+
+def _resolve_discovery_positive_int_env(name, fallback):
+    """Strictly-positive int from env var ``name``, else ``fallback`` (logged at warning).
+
+    Rejects unset/empty/non-numeric/zero/overflowing input so a typo can never silently disable or
+    wildly misconfigure discovery. Mirrors ``resolve_positive_u32_env`` in src/domain_participant.cpp.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return fallback
+    # Mirror the C++ resolve_positive_u32_env (strtoull + full-consume): allow leading whitespace and a single
+    # leading '+', then ASCII digits to end-of-string. This rejects trailing characters, underscores and other
+    # input that Python's permissive int() would accept, so both languages treat the same env values as valid.
+    value = int(raw) if re.fullmatch(r"\s*\+?[0-9]+", raw) else 0
+    if 0 < value <= 0xFFFFFFFF:
+        return value
+    _network_recovery._emit_log(
+        _network_recovery.LogLevel.WARNING,
+        f"ignoring invalid {name}='{raw}'; using default {fallback}",
+    )
+    return fallback
+
+
+def _milliseconds_to_duration(milliseconds):
+    """Milliseconds -> Fast-DDS ``Duration_t(sec, nanosec)``."""
+    return Duration_t(milliseconds // 1000, (milliseconds % 1000) * 1000000)
+
+
+def _resolve_discovery_initial_announcement_count():
+    """Initial discovery-announcement count, env-overridable (default
+    ``QosDefaults.num_initial_discovery_announcements``)."""
+    return _resolve_discovery_positive_int_env(
+        _INITIAL_ANNOUNCEMENT_COUNT_ENV, QosDefaults.num_initial_discovery_announcements
+    )
+
+
+def _resolve_discovery_initial_announcement_period():
+    """Spacing of the initial discovery announcements as a ``Duration_t``, env-overridable in
+    milliseconds (default ``QosDefaults.initial_announcements_period``)."""
+    fallback_ms = QosDefaults.initial_announcements_period.to_ns() // 1000000
+    return _milliseconds_to_duration(
+        _resolve_discovery_positive_int_env(_INITIAL_ANNOUNCEMENT_PERIOD_MS_ENV, fallback_ms)
+    )
+
+
+def _resolve_discovery_announcement_period():
+    """Periodic participant re-announcement period as a ``Duration_t``, env-overridable in
+    milliseconds (default ``QosDefaults.lease_duration_announcement_period``)."""
+    fallback_ms = QosDefaults.lease_duration_announcement_period.to_ns() // 1000000
+    return _milliseconds_to_duration(
+        _resolve_discovery_positive_int_env(_ANNOUNCEMENT_PERIOD_MS_ENV, fallback_ms)
+    )
+
+
+def _resolve_discovery_lease_duration():
+    """Participant lease duration as a ``Duration_t``, env-overridable in milliseconds (default
+    ``QosDefaults.lease_duration``)."""
+    fallback_ms = QosDefaults.lease_duration.to_ns() // 1000000
+    return _milliseconds_to_duration(
+        _resolve_discovery_positive_int_env(_LEASE_DURATION_MS_ENV, fallback_ms)
+    )
+
+
 def _build_deferred_subscriber(subscriber, reliability):
     """Run a deferred (match-publisher) DataReader build for ``subscriber`` with the
     adopted ``reliability``, OFF the Fast-DDS discovery thread.
@@ -820,15 +914,28 @@ def make_domain_participant(domain_id: int = 0,
                     os.environ[_DomainParticipant.xml_profiles_env_variable]
                 )
             ):
-                self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.count = (
-                    QosDefaults.num_initial_discovery_announcements
+                discovery_config = self._participant_qos.wire_protocol().builtin.discovery_config
+                discovery_config.initial_announcements.count = (
+                    _resolve_discovery_initial_announcement_count()
                 )
-                self._participant_qos.wire_protocol().builtin.discovery_config.initial_announcements.period = (
-                    QosDefaults.initial_announcements_period
+                discovery_config.initial_announcements.period = (
+                    _resolve_discovery_initial_announcement_period()
                 )
-                self._participant_qos.wire_protocol().builtin.discovery_config.leaseDuration_announcementperiod = (
-                    QosDefaults.lease_duration_announcement_period
-                )
+                discovery_config.leaseDuration = _resolve_discovery_lease_duration()
+                announcement_period = _resolve_discovery_announcement_period()
+                discovery_config.leaseDuration_announcementperiod = announcement_period
+                # Fast-DDS guidance: the periodic re-announcement must stay shorter than the lease
+                # duration, or a peer can be declared lost in the gap between announcements. The
+                # default 3 s is well clear of the 30 s default lease; warn only if an env override
+                # crossed it. Mirrors src/domain_participant.cpp.
+                if announcement_period.to_ns() >= discovery_config.leaseDuration.to_ns():
+                    _network_recovery._emit_log(
+                        _network_recovery.LogLevel.WARNING,
+                        f"{_ANNOUNCEMENT_PERIOD_MS_ENV} ({announcement_period.to_ns() // 1000000} ms) is >= "
+                        f"the participant lease duration "
+                        f"({discovery_config.leaseDuration.to_ns() // 1000000} ms); peers may be declared "
+                        f"lost between announcements",
+                    )
 
             # Type / topic registries. Initialised BEFORE create_participant
             # below: an initial_discovery_callback can fire as soon as the
