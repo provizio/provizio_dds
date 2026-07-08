@@ -764,6 +764,53 @@ def _build_deferred_subscriber(subscriber, reliability):
         )
 
 
+# Serialises the brief, process-global factory-autoenable toggle performed by
+# _create_participant_with_listener across concurrent participant creation.
+_participant_create_lock = threading.Lock()
+
+
+def _create_participant_with_listener(factory, domain_id, participant_qos, listener):
+    """Create a DomainParticipant with ``listener`` attached BEFORE it starts
+    discovery, then enable it. Returns the enabled participant, or ``None`` if
+    Fast-DDS could not create it (the caller decides how to surface that).
+
+    Why not the obvious ``create_participant`` then ``set_listener``: a participant
+    is auto-enabled at creation and immediately begins discovery, so any endpoint
+    it discovers between ``create_participant`` returning and ``set_listener`` runs
+    fires the discovery callback with no listener attached and is lost forever
+    (Fast-DDS never replays already-discovered endpoints to a later listener). That
+    gap is normally microseconds, but a scheduling stall on a loaded host widens it
+    enough to drop the event — reproducibly the post-reset re-discovery in the
+    discovered-endpoints ``survives_reset`` test, where the peer's writer already
+    exists and is discoverable the instant the recreated participant enables.
+
+    The C++ side avoids this by passing the listener into ``create_participant``;
+    the Python binding can't (handing a SWIG director to ``create_participant``
+    disowns it and breaks reuse across resets). So instead create the participant
+    disabled — Fast-DDS only auto-enables when the factory's entity-factory QoS says
+    to, and there is no per-call flag — attach the listener while it is quiescent,
+    then enable it. The factory toggle is process-global, hence the lock; it is
+    always restored (``finally``)."""
+    with _participant_create_lock:
+        factory_qos = DomainParticipantFactoryQos()
+        factory.get_qos(factory_qos)
+        previous_autoenable = factory_qos.entity_factory().autoenable_created_entities
+        factory_qos.entity_factory().autoenable_created_entities = False
+        factory.set_qos(factory_qos)
+        try:
+            participant = factory.create_participant(domain_id, participant_qos)
+        finally:
+            factory_qos.entity_factory().autoenable_created_entities = previous_autoenable
+            factory.set_qos(factory_qos)
+    if participant is None:
+        return None
+    # Attach BEFORE enable so the participant is quiescent (no discovery yet) while
+    # the listener goes on; enable() then starts discovery with it already in place.
+    participant.set_listener(listener, StatusMask.none())
+    participant.enable()
+    return participant
+
+
 class TransportMode(Enum):
     """Network transport selection for :func:`make_domain_participant`, mirroring the
     C++ ``provizio::dds::transport_mode``. Controls only whether shared memory is used
@@ -803,18 +850,16 @@ def make_domain_participant(domain_id: int = 0,
         Fast-DDS objects are swapped under the user-held Python object.
         See ``network_recovery.py`` for details.
     :param initial_discovery_callback: Optional endpoint-discovery callback
-        registered on the (always-installed) discovery listener at construction.
-        Equivalent to calling :meth:`on_discovered_endpoint` immediately after
-        construction, but with a smaller race window: in Python the listener is
-        attached via ``set_listener`` microseconds AFTER ``create_participant``
-        (passing a SWIG director to ``create_participant`` would disown it and
-        break network-recovery re-attach), so a vanishingly small gap remains —
-        unlike C++, which attaches the listener eagerly at participant creation.
-        In practice a remote writer's SEDP announcement needs a PDP round-trip
-        that far exceeds this gap, and Fast-DDS re-announces discovery
-        (``initial_announcements.count``), so an early event is not lost.
-        Defaults to ``None`` (no user callback; the listener still runs its
-        internal match-publisher resolver).
+        registered on the (always-installed) discovery listener at construction,
+        before the participant starts discovering — so it cannot miss an endpoint,
+        unlike calling :meth:`on_discovered_endpoint` after construction (which can
+        race a discovery already in flight). The participant is created disabled,
+        the listener attached, then the participant enabled (see
+        ``_create_participant_with_listener``); this closes the
+        create-then-``set_listener`` gap that would otherwise drop an endpoint
+        discovered in between, matching the C++ path (which passes the listener
+        into ``create_participant``). Defaults to ``None`` (no user callback; the
+        listener still runs its internal match-publisher resolver).
     :param initial_discovery_kinds: Which :class:`EndpointKind` values the
         initial callback fires for. Ignored when
         ``initial_discovery_callback`` is ``None``. Defaults to
@@ -993,16 +1038,19 @@ def make_domain_participant(domain_id: int = 0,
                 self._discovery_listener.set_callback(initial_discovery_callback,
                                                      initial_discovery_kinds)
 
-            # Create the participant WITHOUT the listener, then attach via
-            # set_listener. Passing a SWIG director to create_participant DISOWNS
-            # the Python proxy (transfers ownership to C++), after which the SAME
-            # director object can neither be passed to create_participant again nor
-            # safely Python-GC'd — fatal on a network-recovery reset, which must
-            # re-attach this very listener to the recreated participant. set_listener
-            # registers the raw pointer without disowning, so the same director is
-            # reusable across unlimited resets while Python keeps ownership.
-            self._participant = factory.create_participant(
-                domain_id, self._participant_qos
+            # Create the participant with the discovery listener attached BEFORE it
+            # starts discovery (see _create_participant_with_listener). Attaching the
+            # listener microseconds later via set_listener leaves a gap in which an
+            # endpoint discovered by the freshly-enabled participant fires the
+            # discovery callback with no listener and is lost forever — the listener
+            # drives the match-publisher default, so it must never miss a discovered
+            # writer. This matches the C++ ctor, which passes the listener into
+            # create_fastdds_participant. (The SWIG director can't be handed to
+            # create_participant directly — that disowns it and breaks re-attach
+            # across resets — so the helper creates the participant disabled, attaches
+            # the listener, then enables.)
+            self._participant = _create_participant_with_listener(
+                factory, domain_id, self._participant_qos, self._discovery_listener
             )
             if self._participant is None:
                 # Fast-DDS create_participant returned None — typically a
@@ -1017,23 +1065,6 @@ def make_domain_participant(domain_id: int = 0,
                     "domain_participant: Fast-DDS create_participant returned None "
                     "(check FASTDDS_DEFAULT_PROFILES_FILE / system limits / logs)"
                 )
-
-            # Attach the eagerly-created discovery listener immediately after
-            # creation. StatusMask.none() — discovery callbacks fire regardless;
-            # we don't use the Fast-DDS status callbacks. The gap between
-            # create_participant and here is microseconds and Fast-DDS re-announces
-            # discovery repeatedly (initial_announcements.count), so an early SEDP
-            # event is not lost.
-            #
-            # ASYMMETRY WITH C++: src/domain_participant.cpp installs the discovery
-            # listener EAGERLY at participant creation (passed into
-            # create_fastdds_participant), with no gap — and treats it as mandatory
-            # for the match-publisher default. Python attaches it a hair later via
-            # set_listener because passing a SWIG director to create_participant
-            # disowns the proxy and breaks reset re-attach (see the long comment
-            # above). The resulting micro-window is mitigated as noted above; see the
-            # make_domain_participant `initial_discovery_callback` doc.
-            self._participant.set_listener(self._discovery_listener, StatusMask.none())
 
             # Lifecycle lock: held by every operation that touches
             # self._participant. The reset path takes it for the entire
@@ -1569,18 +1600,21 @@ def make_domain_participant(domain_id: int = 0,
                 # domain_participant::trigger_network_recovery_reset path.
                 _network_recovery.refresh_fastdds_interface_cache()
 
-                # Recreate with the same QoS, then re-attach the discovery
-                # listener via set_listener (NOT by passing it to
-                # create_participant — that would disown the director; see the
-                # constructor). The listener is installed eagerly (always present)
-                # to drive the internal match-publisher resolution, so it is ALWAYS
-                # re-attached here regardless of whether a user callback is
-                # currently registered; _invoke skips the user path when no user
-                # callback is set. An unresolved match-mode subscriber re-defers on
-                # rebuild and is resolved again once a writer is rediscovered
-                # against the new participant.
-                self._participant = factory.create_participant(
-                    self._domain_id, self._participant_qos
+                # Recreate with the same QoS, attaching the discovery listener
+                # BEFORE the new participant starts discovery (see
+                # _create_participant_with_listener). This is the load-bearing part
+                # of the fix for survives_reset: the peer's writer already exists, so
+                # the recreated participant can rediscover it the instant it enables.
+                # If the listener were attached a step later (the old
+                # create_participant-then-set_listener sequence), a rediscovery event
+                # in that gap fires with no listener and is lost forever — stranding
+                # the match-publisher resolver and any user callback until the next
+                # reset. The listener is always present (it drives the match-publisher
+                # default even with no user callback). An unresolved match-mode
+                # subscriber re-defers on rebuild and resolves again once a writer is
+                # rediscovered against the new participant.
+                self._participant = _create_participant_with_listener(
+                    factory, self._domain_id, self._participant_qos, self._discovery_listener
                 )
                 if self._participant is None:
                     _network_recovery._emit_log(
@@ -1593,13 +1627,6 @@ def make_domain_participant(domain_id: int = 0,
                     return
 
                 self._generation += 1
-
-                # Re-attach the discovery listener to the recreated participant
-                # (always present — see the create_participant comment above) so
-                # the internal match-publisher resolver and any user callback
-                # resume before Fast-DDS rediscovers peers against the new
-                # participant.
-                self._participant.set_listener(self._discovery_listener, StatusMask.none())
 
                 # Re-register all known types against the new participant.
                 with self._register_type_mutex:

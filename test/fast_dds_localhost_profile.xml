@@ -20,6 +20,17 @@
         memory is unavailable).
       - initialPeersList 127.0.0.1 drives unicast discovery to localhost, since
         the loopback interface carries no multicast on Linux.
+      - maxInitialPeersRange 50 widens how many participant indices that unicast
+        initial peer probes. An initial peer given as an address with no port
+        expands to the well-known metatraffic ports of participant indices
+        [0, maxInitialPeersRange); Fast-DDS's default is 4, so only the first four
+        participants on a domain are reachable this way — and with multicast off
+        (loopback) a test that creates a fifth-or-later participant then sees it
+        silently fail to discover its peers: a matching timeout that flakes with
+        participant-id assignment order. 50 comfortably exceeds the participant
+        count of any single test while staying cheap on loopback. (This only bites
+        because we force unicast-only discovery; the default transport would reach
+        the rest via multicast.)
 
     Applied via FASTDDS_DEFAULT_PROFILES_FILE in test.sh. The library defers
     entirely to this profile when the variable is set, so its own transport and
@@ -35,6 +46,10 @@
             <interfaceWhiteList>
                 <address>127.0.0.1</address>
             </interfaceWhiteList>
+            <!-- Probe participant indices [0, 50) via the unicast initial peer
+                 below (default 4 is too few once a test creates >4 participants
+                 on a domain with multicast off). See the header comment. -->
+            <maxInitialPeersRange>50</maxInitialPeersRange>
         </transport_descriptor>
     </transport_descriptors>
     <participant profile_name="provizio_test_loopback" is_default_profile="true">

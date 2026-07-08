@@ -517,6 +517,15 @@ jobs:
           venv_python=$(./test/python/setup_legacy_provizio_dds_venv.sh)
           echo "PROVIZIO_DDS_LEGACY_PYTHON=${venv_python}" >> "${GITHUB_ENV}"
       - name: Test
+        # Confine test DDS traffic to loopback with deterministic unicast discovery,
+        # mirroring the Linux test.sh setup. The Windows runner otherwise uses the
+        # default UDP multicast transport, whose discovery matching flakes under CI
+        # load (intermittent "subscriber failed to match in time" in the
+        # multi-participant accumulation tests). The profile also disables shared
+        # memory (already off on Windows). discovery_tuning unsets this in-code to
+        # exercise the code-driven path.
+        env:
+          FASTDDS_DEFAULT_PROFILES_FILE: ${{ github.workspace }}/test/fast_dds_localhost_profile.xml
         run: cd build && ctest --output-on-failure
 
   test-windows-python-versions:
@@ -585,6 +594,11 @@ jobs:
           venv_python=$(./test/python/setup_legacy_provizio_dds_venv.sh)
           echo "PROVIZIO_DDS_LEGACY_PYTHON=${venv_python}" >> "${GITHUB_ENV}"
       - name: Test
+        # Loopback profile: deterministic unicast discovery, mirroring Linux test.sh.
+        # Avoids the default-multicast discovery-matching flakiness on the Windows
+        # runner (see the test-windows job). discovery_tuning unsets it in-code.
+        env:
+          FASTDDS_DEFAULT_PROFILES_FILE: ${{ github.workspace }}/test/fast_dds_localhost_profile.xml
         run: cd build && ctest --output-on-failure
 
   test-windows-pip-package:
