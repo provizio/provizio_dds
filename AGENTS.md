@@ -49,7 +49,7 @@ ctest --output-on-failure
 ctest --output-on-failure -R simplest_pub_sub
 ```
 
-Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`.
+Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `callback_exceptions`, `point_cloud2`, `accumulation`.
 
 ### CI Build Scripts
 
@@ -76,7 +76,9 @@ Two shared libraries are produced:
 - **`publisher.h`** — Template `make_publisher<PubSubType>(participant, topic, ...)`. Configurable QoS (reliability, durability, history depth). Match/unmatch callbacks. Header-only.
 - **`subscriber.h`** — Template `make_subscriber<PubSubType>(participant, topic, callback)`. Callback takes `(const Data&)` or `(const Data&, const SampleInfo&)` — dispatched via `function_traits.h`. Header-only.
 - **`request_response.h`** — `make_service<ReqType, ResType>(...)` and `request<ReqType, ResType>(...)`. Uses correlation tracking via `SampleIdentity`. Dual topics with `_request`/`_response` suffixes.
+- **`accumulation.h`** — Point clouds accumulation & multi-radar fusion: `rigid_transform`, core `point_clouds_accumulator` and the DDS-fed `dds_point_clouds_accumulator` (Odometry/NavSatFix/no localization). Mirrors `python/accumulation.py`. Non-template logic is compiled into the library; the maths path (`get_points_*` → `detail/accumulation_math.h`) is header-only and auto-detects Eigen at the consumer's compile time (`PROVIZIO_DDS_DISABLE_EIGEN` opts out; `DISABLE_EIGEN` CMake option for provizio_dds's own builds).
 - **`common.h`** — `PROVIZIO_DDS_API` macro for DLL export/import, namespace aliases.
+- **`point_cloud2.h`** — Generic + Provizio-radar-specific PointCloud2 reading/writing: `cloud_view` field-driven reading, tiered `create_cloud` writing, `radar_point`/`read_radar_points`/`make_radar_point_cloud`, entity cloud makers + unified read_entities/get_entities_kind. Mirrors `python/point_cloud2.py`. Templates header-only; non-template functions compiled into the library.
 - **`qos_defaults.h`** — `apply_qos_defaults()` configures QoS policies (reliability, durability, history, memory).
 - **`topic.h`** — RAII `make_topic()` with deduplication (reuses existing topic if same name/type).
 
@@ -90,8 +92,8 @@ Two shared libraries are produced:
 ### Python Layer (python/)
 
 - `provizio_dds.py` — Main API wrapping C++ via SWIG-generated `fastdds` and `provizio_dds_python_types` modules.
-- `point_cloud2.py` — Point cloud parsing utilities.
-- `accumulation.py` — Multi-radar point cloud accumulation/fusion with odometry.
+- `point_cloud2.py` — Point cloud parsing utilities. (Has a C++ counterpart: include/provizio/dds/point_cloud2.h; keep behavior in sync.)
+- `accumulation.py` — Multi-radar point cloud accumulation/fusion with odometry. (Has a C++ counterpart: include/provizio/dds/accumulation.h; keep behavior in sync.)
 - `gps_utils.py` — GPS/GNSS coordinate utilities.
 
 Python bindings require SWIG 4.0+ and are generated from Fast-DDS-python + provizio_dds_idls `.i` files.
@@ -128,6 +130,7 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
 | `FAST_DDS_VERSION` | "v3.6.1" | Fast-DDS Git tag to build from source |
 | `FAST_CDR_VERSION` | "2.3" | Fast-CDR major.minor version for Windows versioned library naming (must match FAST_DDS_VERSION bundle) |
 | `DONT_INSTALL_STDCPP_LIBS` | ON | When installing from prebuilt binaries, skip standard C++ libraries |
+| `DISABLE_EIGEN` | OFF | Force plain-CPU linear algebra in point clouds accumulation for provizio_dds's own builds/tests even when Eigen3 is installed (consumers choose at their own compile time via Eigen visibility / `PROVIZIO_DDS_DISABLE_EIGEN`) |
 
 ## Git Workflow
 
