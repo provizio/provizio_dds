@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+    Loopback-only Fast-DDS profile for the test suite.
+
+    Provizio's self-hosted CI runners share a local network, and the test suite
+    creates participants on the default domain (0) with a small set of fixed
+    topic names. With the default transport a participant binds to every host
+    interface (verified: 0.0.0.0 plus the LAN/overlay addresses), so two runners
+    executing the same suite concurrently discover each other and cross-deliver
+    samples. Tests that integrate every sample they receive — point-cloud
+    accumulation in particular — then read another runner's data as if it were
+    their own and fail non-deterministically.
+
+    Confining every participant to the loopback interface makes cross-host
+    discovery and data exchange impossible while leaving same-host communication
+    (the only thing the tests need) intact:
+      - interfaceWhiteList 127.0.0.1 binds all locators to loopback only.
+      - useBuiltinTransports=false swaps the default SHM+UDP stack for the single
+        whitelisted UDPv4 transport (also sidestepping platforms where shared
+        memory is unavailable).
+      - initialPeersList 127.0.0.1 drives unicast discovery to localhost, since
+        the loopback interface carries no multicast on Linux.
+
+    Applied via FASTDDS_DEFAULT_PROFILES_FILE in test.sh. The library defers
+    entirely to this profile when the variable is set, so its own transport and
+    discovery tuning is intentionally skipped (see domain_participant.cpp). Tests
+    that exercise that code path (discovery_tuning) unset the variable
+    themselves.
+-->
+<profiles xmlns="http://www.eprosima.com">
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>test_loopback_udpv4</transport_id>
+            <type>UDPv4</type>
+            <interfaceWhiteList>
+                <address>127.0.0.1</address>
+            </interfaceWhiteList>
+        </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="provizio_test_loopback" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>test_loopback_udpv4</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+            <builtin>
+                <initialPeersList>
+                    <locator>
+                        <udpv4>
+                            <address>127.0.0.1</address>
+                        </udpv4>
+                    </locator>
+                </initialPeersList>
+            </builtin>
+        </rtps>
+    </participant>
+</profiles>
