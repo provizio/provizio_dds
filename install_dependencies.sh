@@ -54,6 +54,9 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
   brew install cmake || echo "Skipping, as it's likely already installed"
   brew install ninja || echo "Skipping, as it's likely already installed"
 
+  # Install Eigen3 (optional provizio_dds dependency: accelerates point clouds accumulation linear algebra)
+  brew install eigen || echo "Skipping, as it's likely already installed"
+
   # Install openssl
   brew install openssl || echo "Skipping, as it's likely already installed"
 
@@ -106,6 +109,9 @@ else
 
   # Install unzip
   apt install -y --no-install-recommends unzip
+
+  # Install Eigen3 (optional provizio_dds dependency: accelerates point clouds accumulation linear algebra)
+  apt install -y --no-install-recommends libeigen3-dev
 
   # Check if running in Ubuntu 18
   UBUNTU_18=false
