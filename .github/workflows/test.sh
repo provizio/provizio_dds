@@ -41,6 +41,27 @@ fi
 
 cd ../../build
 
+# Prefer the source-built Fast-DDS over any same-SONAME copy a sourced ROS 2
+# environment put on LD_LIBRARY_PATH. ROS 2 distros bundle their own Fast-DDS;
+# when its major.minor version matches provizio_dds's bundled build (e.g.
+# ROS 2 Lyrical ships v3.6.1 while provizio_dds bundles v3.6.2 — both have
+# SONAME libfastdds.so.3.6), the sourced environment would otherwise take
+# precedence over the test binaries' RUNPATH and bind every directly-launched
+# test to the foreign build. Fast-DDS does not guarantee ABI stability across
+# patch releases (v3.6.2 changed RTPSParticipantAttributes layout), so that
+# mixed loading breaks discovery callbacks and crashes tests. run_parallel.py
+# already shields the tests it launches by stripping ROS environment entries
+# for provizio-side children; this covers the tests ctest launches directly.
+# The prepended directory is exported so run_parallel.py can remove exactly it
+# for its "--ros:"-prefixed children — native ROS nodes must keep resolving
+# the ROS-bundled Fast-DDS or they hit the same ABI mismatch in reverse.
+PROVIZIO_DDS_TEST_PREPENDED_LIB_PATH=""
+if [[ "$(uname -s)" == "Linux" && -d "${PWD}/fast_dds_build/install/lib" ]]; then
+    PROVIZIO_DDS_TEST_PREPENDED_LIB_PATH="${PWD}/fast_dds_build/install/lib"
+    export LD_LIBRARY_PATH="${PROVIZIO_DDS_TEST_PREPENDED_LIB_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+export PROVIZIO_DDS_TEST_PREPENDED_LIB_PATH
+
 # Cross-version wire-interop test against the deployed-fleet baseline
 # (provizio_dds 1.10.1, installed into a venv). Only relevant when the
 # current build includes Python bindings — the test exercises the python

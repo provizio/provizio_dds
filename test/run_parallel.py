@@ -46,6 +46,23 @@ for _stream in (sys.stdout, sys.stderr):
 # Save the original environment before any modifications
 original_env = os.environ.copy()
 
+# Environment for "--ros:" children: the original ROS-sourced environment,
+# minus the source-built Fast-DDS directory test.sh may have prepended to
+# LD_LIBRARY_PATH (exported as PROVIZIO_DDS_TEST_PREPENDED_LIB_PATH). That
+# prepend makes directly-launched provizio_dds tests resolve the bundled
+# Fast-DDS; native ROS nodes must NOT see it — when the ROS-bundled Fast-DDS
+# shares the SONAME with the bundled one (e.g. ROS 2 Lyrical's v3.6.1 vs the
+# bundled v3.6.2, both libfastdds.so.3.6), it would bind ROS-built code to
+# the bundled library: the same patch-release ABI mismatch in reverse.
+ros_env = original_env.copy()
+_prepended_lib_path = ros_env.pop("PROVIZIO_DDS_TEST_PREPENDED_LIB_PATH", "")
+if _prepended_lib_path:
+    _ld_library_path = ros_env.get("LD_LIBRARY_PATH", "")
+    if _ld_library_path:
+        ros_env["LD_LIBRARY_PATH"] = os.pathsep.join(
+            p for p in _ld_library_path.split(os.pathsep) if p != _prepended_lib_path
+        )
+
 # Build a clean environment with ROS entries removed (avoids conflicts with
 # ROS-bundled Fast-DDS, which is non-backwards-compatible with provizio_dds's version)
 ament = os.environ.get("AMENT_PREFIX_PATH", "")
@@ -179,7 +196,7 @@ else:
 # invoked from CTest, never from untrusted user input.
 for cmd in sys.argv[1:]:
     if cmd.startswith(ROS_CMD_PREFIX):
-        procs.append(subprocess.Popen(cmd[len(ROS_CMD_PREFIX):], shell=True, env=original_env, **popen_kwargs))
+        procs.append(subprocess.Popen(cmd[len(ROS_CMD_PREFIX):], shell=True, env=ros_env, **popen_kwargs))
     else:
         procs.append(subprocess.Popen(cmd, shell=True, env=clean_env, **popen_kwargs))
 

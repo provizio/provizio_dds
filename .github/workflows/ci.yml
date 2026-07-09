@@ -447,8 +447,12 @@ jobs:
       # a 512 MB /dev/shm so the SHM transport works as intended.
       options: --shm-size=512m
     strategy:
+      # One distro's failure must not cancel the other 19 combinations:
+      # a single new-distro or flaky-job failure would otherwise hide the
+      # results of every remaining distro/compiler/build-type pairing.
+      fail-fast: false
       matrix:
-        ros: [humble, iron, jazzy, kilted]
+        ros: [humble, iron, jazzy, kilted, lyrical]
         build_type: [Release, Debug]
         cc: [gcc, clang]
     env:

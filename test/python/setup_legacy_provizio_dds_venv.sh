@@ -161,6 +161,26 @@ rm -rf "${VENV_DIR}" >&2
 # POSIX too.
 "${VENV_PYTHON}" -m pip install --quiet --upgrade pip setuptools wheel >&2
 
+# The 1.10.1 baseline bundles Fast-DDS 2.14.x sources that predate the
+# GNU C++ standard library major version 15 header cleanup: libstdc++ no
+# longer provides <cstdint> transitively, so the fixed-width integer
+# types those sources use (uint8_t and friends) are undeclared on
+# toolchains newer than the baseline itself (first hit on ROS2 Lyrical's
+# Ubuntu 26.04 containers, with both gcc and clang, as both use
+# libstdc++ there). The baseline tag is immutable — the test exists to
+# compare against the exact deployed-fleet build — so rather than patch
+# it, force-include <cstdint> into every translation unit of its
+# Fast-DDS sub-build. The header only declares standard types, so this
+# cannot alter the semantics of the built code. The flag reaches the
+# failing Fast-DDS sub-build through the environment: pip runs CMake,
+# whose ExternalProject step re-invokes CMake as a child process that
+# initializes its compile flags from the inherited CXXFLAGS variable.
+# Windows is untouched: the MSVC standard library still provides the
+# transitive include, and -include is GCC/Clang-specific syntax.
+if [[ "${IS_WINDOWS}" -eq 0 ]]; then
+    export CXXFLAGS="${CXXFLAGS:+${CXXFLAGS} }-include cstdint"
+fi
+
 # Build from the immutable tag, not the moving branch — the whole point
 # of this test is to compare against the deployed-fleet baseline that
 # 1.10.1 represents.

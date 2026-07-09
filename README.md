@@ -659,6 +659,7 @@ service.stop()
 - For both publish/subscribe and request/response to interoperate with ROS 2, either:
   - Keep the default `max_history_depth` on subscribers and services/requests, or
   - Configure ROS 2 QoS to use TRANSIENT_LOCAL durability on the ROS 2 publishers with appropriate history depth for better reliability.
+- When running provizio_dds binaries in a shell with a **sourced ROS 2 environment** (`setup.bash`), note that ROS 2 distros bundle their own eProsima Fast-DDS. If its major.minor version matches the Fast-DDS bundled by provizio_dds (e.g. ROS 2 Lyrical ships Fast-DDS v3.6.1 while provizio_dds bundles v3.6.2 — both named `libfastdds.so.3.6`), the sourced `LD_LIBRARY_PATH` makes provizio_dds binaries load the ROS-bundled library. Fast-DDS doesn't guarantee ABI stability across patch releases, so this can break discovery or crash. To make an installed provizio_dds immune to it, build with `-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=ON` (Linux): installed binaries then link Fast-DDS by its fully-qualified name (e.g. `libfastdds.so.3.6.2.0`), which never collides with the ROS-bundled copy. Linking both provizio_dds and ROS 2 libraries into the *same process* is a different problem — see [provizio_radar_api_ros2](https://github.com/provizio/provizio_radar_api_ros2) for the namespace-isolation approach it requires.
 
 ## Reading and Creating PointCloud2 Messages
 
