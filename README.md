@@ -866,7 +866,7 @@ As DDS allows for configuring many of its parameters, you can optionally define 
 </profiles>
 ```
 
-For more details, please refer to [Fast-DDS documentation](https://fast-dds.docs.eprosima.com/en/v3.6.1/fastdds/xml_configuration/xml_configuration.html).
+For more details, please refer to [Fast-DDS documentation](https://fast-dds.docs.eprosima.com/en/v3.6.2/fastdds/xml_configuration/xml_configuration.html).
 Please note that some of the changes may break compatibility between publishers and subscribers, unless applied on both sides.
 
 You may see how this functionality is used to activate Discovery-Server-based participants discovery in provizio_dds tests:

@@ -127,7 +127,7 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
 | `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS` | OFF | Disable Provizio coding standards (clang-tidy, formatting) |
 | `STATIC_ANALYSIS` | OFF | Enable clang-tidy static analysis (requires coding standards checks enabled; not supported on macOS+clang) |
 | `INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS` | OFF | Linux: use versioned .so names to avoid runtime conflicts |
-| `FAST_DDS_VERSION` | "v3.6.1" | Fast-DDS Git tag to build from source |
+| `FAST_DDS_VERSION` | "v3.6.2.0" | Fast-DDS Git tag to build from source |
 | `FAST_CDR_VERSION` | "2.3" | Fast-CDR major.minor version for Windows versioned library naming (must match FAST_DDS_VERSION bundle) |
 | `DONT_INSTALL_STDCPP_LIBS` | ON | When installing from prebuilt binaries, skip standard C++ libraries |
 | `DISABLE_EIGEN` | OFF | Force plain-CPU linear algebra in point clouds accumulation for provizio_dds's own builds/tests even when Eigen3 is installed (consumers choose at their own compile time via Eigen visibility / `PROVIZIO_DDS_DISABLE_EIGEN`) |
