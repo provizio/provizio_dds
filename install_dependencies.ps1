@@ -53,6 +53,28 @@ if ($WithPython -ne "OFF") {
     if ($LASTEXITCODE -ne 0) { throw "Failed to install Python build dependencies" }
 }
 
+# Eigen3 (optional provizio_dds dependency: accelerates point clouds accumulation linear algebra).
+# Header-only: "install" = configure + install headers and CMake config files, no compilation.
+$eigenVersion = "3.4.0"
+$eigenZip = Join-Path $env:TEMP "eigen-$eigenVersion.zip"
+$eigenSrc = Join-Path $env:TEMP "eigen-$eigenVersion"
+$eigenInstallDir = "C:\eigen3"
+Write-Host "Installing Eigen $eigenVersion..."
+& curl.exe -fsSL -o $eigenZip "https://gitlab.com/libeigen/eigen/-/archive/$eigenVersion/eigen-$eigenVersion.zip"
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $eigenZip)) { throw "Failed to download Eigen $eigenVersion" }
+Expand-Archive -Path $eigenZip -DestinationPath $env:TEMP -Force
+cmake -S $eigenSrc -B "$eigenSrc\build" -DBUILD_TESTING=OFF
+if ($LASTEXITCODE -ne 0) { throw "Failed to configure Eigen $eigenVersion" }
+cmake --install "$eigenSrc\build" --prefix $eigenInstallDir
+if ($LASTEXITCODE -ne 0) { throw "Failed to install Eigen $eigenVersion" }
+# Make find_package(Eigen3) work in subsequent steps
+if ($env:GITHUB_ENV) {
+    Add-Content -Path $env:GITHUB_ENV -Value "Eigen3_DIR=$eigenInstallDir\share\eigen3\cmake"
+} else {
+    $env:Eigen3_DIR = "$eigenInstallDir\share\eigen3\cmake"
+}
+Write-Host "Eigen $eigenVersion installed to $eigenInstallDir"
+
 if ($StaticAnalysis -ne "OFF") {
     Write-Host "Installing LLVM (clang-format, clang-tidy)..."
     choco install llvm -y

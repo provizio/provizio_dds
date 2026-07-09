@@ -189,7 +189,11 @@ jobs:
           path: cache/
       - uses: stefanzweifel/git-auto-commit-action@v4
         with:
-          commit_message: Bin cache for common configurations
+          # [skip ci] keeps this auto-pushed cache commit from triggering a
+          # fresh pull_request run. The commit only adds prebuilt cache/*.zip
+          # artifacts — nothing to test — and GitHub honours the skip
+          # instruction in the HEAD commit of a PR for pull_request events.
+          commit_message: "Bin cache for common configurations [skip ci]"
       - name: Export the cache commit SHA
         id: cache_commit_sha
         run: |
@@ -278,6 +282,18 @@ jobs:
       - run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=TRUE -DPYTHON_BINDINGS=OFF -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
+
+  test-no-eigen:
+    name: Test without Eigen (plain-CPU accumulation maths)
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc
+      STATIC_ANALYSIS: OFF
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "OFF" "${STATIC_ANALYSIS}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE=Release -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS=OFF -DENABLE_TESTS=ON -DDISABLE_EIGEN=ON
+      - run: cd build && ctest --output-on-failure -R "accumulation|point_cloud2|localization_filter"
 
   test-nix-python-versions:
     # Intentionally builds from source (no cache dependency) to verify the full
@@ -501,6 +517,15 @@ jobs:
           venv_python=$(./test/python/setup_legacy_provizio_dds_venv.sh)
           echo "PROVIZIO_DDS_LEGACY_PYTHON=${venv_python}" >> "${GITHUB_ENV}"
       - name: Test
+        # Confine test DDS traffic to loopback with deterministic unicast discovery,
+        # mirroring the Linux test.sh setup. The Windows runner otherwise uses the
+        # default UDP multicast transport, whose discovery matching flakes under CI
+        # load (intermittent "subscriber failed to match in time" in the
+        # multi-participant accumulation tests). The profile also disables shared
+        # memory (already off on Windows). discovery_tuning unsets this in-code to
+        # exercise the code-driven path.
+        env:
+          FASTDDS_DEFAULT_PROFILES_FILE: ${{ github.workspace }}/test/fast_dds_localhost_profile.xml
         run: cd build && ctest --output-on-failure
 
   test-windows-python-versions:
@@ -569,6 +594,11 @@ jobs:
           venv_python=$(./test/python/setup_legacy_provizio_dds_venv.sh)
           echo "PROVIZIO_DDS_LEGACY_PYTHON=${venv_python}" >> "${GITHUB_ENV}"
       - name: Test
+        # Loopback profile: deterministic unicast discovery, mirroring Linux test.sh.
+        # Avoids the default-multicast discovery-matching flakiness on the Windows
+        # runner (see the test-windows job). discovery_tuning unsets it in-code.
+        env:
+          FASTDDS_DEFAULT_PROFILES_FILE: ${{ github.workspace }}/test/fast_dds_localhost_profile.xml
         run: cd build && ctest --output-on-failure
 
   test-windows-pip-package:
@@ -604,7 +634,7 @@ jobs:
         run: |
           . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
           python test\run_parallel.py "python test\python\python_publisher.py" "python test\python\python_subscriber.py"
-          python test\python\pointcloud2_test.py
+          python test\python\point_cloud2_test.py
 
   test-congested-networks-simple-discovery:
     name: Test working in congested networks (Simple Discovery)

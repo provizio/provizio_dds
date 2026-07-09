@@ -51,6 +51,16 @@ if(ENABLE_ROS_TESTS)
             "--ros:python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_publisher/ros_subscriber.py"
         )
 
+        # These tests interoperate with a NATIVE ROS 2 node, which uses its default DDS transport
+        # (rmw_fastrtps does not apply FASTDDS_DEFAULT_PROFILES_FILE to its QoS). The provizio side must use
+        # the default transport too, or it cannot discover the native node. The suite-wide loopback profile
+        # (exported in test.sh) would otherwise confine the provizio side to loopback-only and break the
+        # interop — verified in the ROS2-compat containers, where the native talker publishes but the provizio
+        # side receives nothing. Clearing the variable runs these provizio binaries with the default transport,
+        # matching the native node (and matching the pre-profile behaviour these tests were written for).
+        set_tests_properties(ros_interop_subscriber ros_interop_publisher
+            PROPERTIES ENVIRONMENT "FASTDDS_DEFAULT_PROFILES_FILE=")
+
         # Request/Response are only compatible with ROS2 Jazzy+
         message(STATUS "Detecting rmw_fastrtps_cpp version...")
         execute_process(
@@ -71,6 +81,9 @@ if(ENABLE_ROS_TESTS)
                 "--ros:python3 ${CMAKE_CURRENT_SOURCE_DIR}/ros_interop_request/ros_interop_service.py"
                 "\"$<TARGET_FILE:ros_interop_request>\""
             )
+            # Same as subscriber/publisher above: interop with the native ROS 2 node needs the default transport.
+            set_tests_properties(ros_interop_service ros_interop_request
+                PROPERTIES ENVIRONMENT "FASTDDS_DEFAULT_PROFILES_FILE=")
         else(RMW_FASTRPS_VERSION_RETURN_CODE EQUAL 0 AND RMW_FASTRPS_VERSION VERSION_GREATER_EQUAL "8.4.0")
             message(WARNING "ROS2 Jazzy+ is required for ROS Interop Request/Response but ROS 2 $ENV{ROS_DISTRO} is sourced. Appropriate tests will be skipped.")
         endif(RMW_FASTRPS_VERSION_RETURN_CODE EQUAL 0 AND RMW_FASTRPS_VERSION VERSION_GREATER_EQUAL "8.4.0")

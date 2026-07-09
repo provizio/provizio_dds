@@ -173,18 +173,65 @@ namespace provizio::dds::detail
         on_kernel_event();
     }
 
+    void network_recovery_coordinator::inject_transient_for_test(const address_snapshot &simulated_burst_start)
+    {
+        // Stage a synthetic burst and let the COALESCER THREAD run the reset, rather
+        // than calling run_reset() inline here. run_reset() reads and writes
+        // last_known_snapshot lock-free under the invariant that only the coalescer
+        // thread ever mutates it (see run_reset); driving it from the test thread
+        // while the coalescer is live would race that single-writer access. So we
+        // seed the burst-start snapshot (= simulated_burst_start) and mark a pending
+        // burst — the end snapshot is whatever the coalescer captures live, exactly
+        // as in the real path. The event timers are backdated past max_debounce so
+        // the coalescer fires on its next wake without waiting out the window. The
+        // caller wait_for_idle()s for completion. Out-of-line / exported for the
+        // same reason as inject_kernel_event_for_test.
+        {
+            const std::lock_guard<std::mutex> lock{coalescer_mutex};
+            const auto now = std::chrono::steady_clock::now();
+            first_event_time = now - max_debounce;
+            last_event_time = now - max_debounce;
+            has_pending_burst = true;
+            burst_start_snapshot = simulated_burst_start;
+            burst_start_valid = true;
+        }
+        coalescer_cv.notify_all();
+    }
+
     void network_recovery_coordinator::on_kernel_event()
     {
         const auto now = std::chrono::steady_clock::now();
+        bool first_of_burst = false;
         {
             const std::lock_guard<std::mutex> lock{coalescer_mutex};
             if (!has_pending_burst)
             {
                 first_event_time = now;
                 has_pending_burst = true;
+                first_of_burst = true;
             }
             last_event_time = now;
         }
+
+        // On the FIRST event of a burst, snapshot the interfaces immediately, before
+        // a quick flap can revert. The coalescer captures the END snapshot ~quiet_period
+        // later; if an address left and returned within that window the two ends match
+        // and the end-only diff would skip the reset — yet the Fast-DDS sockets bound to
+        // that address were torn down while it was gone. This start snapshot is what lets
+        // run_reset() catch that transient. capture_address_snapshot() is too slow to hold
+        // coalescer_mutex across, so capture outside it and then store under the lock.
+        if (first_of_burst)
+        {
+            auto start_snapshot = capture_address_snapshot();
+            const std::lock_guard<std::mutex> lock{coalescer_mutex};
+            // Guard against a racing coalescer having already consumed this burst.
+            if (has_pending_burst && !burst_start_valid)
+            {
+                burst_start_snapshot = std::move(start_snapshot);
+                burst_start_valid = true;
+            }
+        }
+
         coalescer_cv.notify_all();
     }
 
@@ -225,15 +272,24 @@ namespace provizio::dds::detail
             // lock) to wake anyone waiting.
             has_pending_burst = false;
             reset_in_progress = true;
+            // Consume the burst-start snapshot under the lock so a subsequent
+            // burst's on_kernel_event can't clobber the value run_reset will use.
+            const bool had_burst_start = burst_start_valid;
+            address_snapshot burst_start;
+            if (had_burst_start)
+            {
+                burst_start = std::move(burst_start_snapshot);
+            }
+            burst_start_valid = false;
             lock.unlock();
-            run_reset();
+            run_reset(burst_start, had_burst_start);
             lock.lock();
             reset_in_progress = false;
             coalescer_cv.notify_all();
         }
     }
 
-    void network_recovery_coordinator::run_reset()
+    void network_recovery_coordinator::run_reset(const address_snapshot &burst_start, bool had_burst_start)
     {
         // last_known_snapshot is only mutated here (inside the coalescer
         // thread) and once during the lazy monitor-start in
@@ -243,7 +299,17 @@ namespace provizio::dds::detail
         // whether the access pattern needs additional synchronisation.
         const auto new_snapshot = capture_address_snapshot();
 
-        if (new_snapshot == last_known_snapshot)
+        const bool end_changed = (new_snapshot != last_known_snapshot);
+        // Transient flap: the burst OPENED with a different DDS-interesting address
+        // set than last known (e.g. an address had just been removed) but the set is
+        // back to normal by the time the burst settles. An end-snapshot-only diff
+        // treats this as "nothing changed" and skips the rebuild — but the Fast-DDS
+        // sockets bound to that address were torn down while it was gone, so a rebuild
+        // is still required. (Container/veth/link-local churn can't trigger this: it is
+        // filtered out of BOTH the start and end snapshots by capture_address_snapshot.)
+        const bool transient_changed = had_burst_start && (burst_start != last_known_snapshot);
+
+        if (!end_changed && !transient_changed)
         {
             log_info() << "network event burst — snapshot unchanged (" << new_snapshot.size()
                        << " interface address(es)), no reset";
@@ -251,29 +317,40 @@ namespace provizio::dds::detail
             return;
         }
 
-        // Quick diff summary for the log: counts of additions and removals
-        // give a more useful one-liner than "old.size() → new.size()" which
-        // could be the same even when contents fully differ.
-        std::size_t added = 0;
-        for (const auto &address : new_snapshot)
+        if (end_changed)
         {
-            if (last_known_snapshot.find(address) == last_known_snapshot.end())
+            // Quick diff summary for the log: counts of additions and removals
+            // give a more useful one-liner than "old.size() → new.size()" which
+            // could be the same even when contents fully differ.
+            std::size_t added = 0;
+            for (const auto &address : new_snapshot)
             {
-                ++added;
+                if (last_known_snapshot.find(address) == last_known_snapshot.end())
+                {
+                    ++added;
+                }
             }
-        }
-        std::size_t removed = 0;
-        for (const auto &address : last_known_snapshot)
-        {
-            if (new_snapshot.find(address) == new_snapshot.end())
+            std::size_t removed = 0;
+            for (const auto &address : last_known_snapshot)
             {
-                ++removed;
+                if (new_snapshot.find(address) == new_snapshot.end())
+                {
+                    ++removed;
+                }
             }
-        }
 
-        log_info() << "network change detected: +" << added << " / -" << removed << " interface address(es) ("
-                   << last_known_snapshot.size() << " → " << new_snapshot.size()
-                   << "); resetting recovery-enabled participants";
+            log_info() << "network change detected: +" << added << " / -" << removed << " interface address(es) ("
+                       << last_known_snapshot.size() << " → " << new_snapshot.size()
+                       << "); resetting recovery-enabled participants";
+        }
+        else
+        {
+            // Transient: end-state matches last known (added/removed both 0), so log
+            // the actual reason rather than a misleading "+0 / -0".
+            log_info() << "network change detected: transient interface change within the debounce window "
+                          "(a DDS-relevant address left and returned, end-state unchanged); "
+                          "resetting recovery-enabled participants";
+        }
 
         last_known_snapshot = new_snapshot;
 

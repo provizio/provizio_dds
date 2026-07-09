@@ -233,11 +233,11 @@ add_test(NAME python_service_cpp_requests_concurrent COMMAND
 )
 set_tests_properties(python_service_cpp_requests_concurrent PROPERTIES TIMEOUT 30)
 
-add_test(NAME pointcloud2_test COMMAND
-    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./pointcloud2_test.py"
+add_test(NAME python_point_cloud2_test COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler ./point_cloud2_test.py
     WORKING_DIRECTORY "${TEST_PATH}"
 )
+set_tests_properties(python_point_cloud2_test PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_publisher_no_leaks_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
@@ -272,7 +272,8 @@ add_test(NAME accumulation_test COMMAND
 # this file.
 set(_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV)
 foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
-        reset_refreshes_fastdds_interface_cache teardown_deferred)
+        reset_refreshes_fastdds_interface_cache teardown_deferred
+        coalescer_resets_on_transient_flap)
     add_test(NAME python_network_recovery_${_nrt_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler
         ./python_network_recovery_test.py ${_nrt_case}
@@ -335,6 +336,26 @@ foreach(_mp_case deferral adopts_reliable adopts_best_effort explicit_best_effor
     )
     list(APPEND _PYTHON_MATCH_PUBLISHER_TEST_NAMES python_match_publisher_default_${_mp_case})
     set_tests_properties(python_match_publisher_default_${_mp_case} PROPERTIES TIMEOUT 45)
+endforeach()
+
+# Participant auto-discovery tuning — Python mirror of the C++ test/discovery_tuning/
+# subcommands: the de-escalated discovery defaults, the PROVIZIO_DDS_DISCOVERY_* env overrides,
+# and many-participant discovery convergence. Each subcommand is its own ctest entry so per-case
+# failure stays isolated. The multi_participant case spins up 2*K participants (its own 60s
+# convergence budget); the rest create a single participant and return near-instantly.
+set(_PYTHON_DISCOVERY_TUNING_TEST_NAMES)
+foreach(_dt_case defaults env_overrides env_invalid multi_participant)
+    add_test(NAME python_discovery_tuning_${_dt_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        ./python_discovery_tuning_test.py ${_dt_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    list(APPEND _PYTHON_DISCOVERY_TUNING_TEST_NAMES python_discovery_tuning_${_dt_case})
+    if(_dt_case STREQUAL "multi_participant")
+        set_tests_properties(python_discovery_tuning_${_dt_case} PROPERTIES TIMEOUT 90)
+    else()
+        set_tests_properties(python_discovery_tuning_${_dt_case} PROPERTIES TIMEOUT 30)
+    endif()
 endforeach()
 
 # Crash-safety of throwing user callbacks (Python mirror of the C++
@@ -462,6 +483,7 @@ if(WIN32)
         ${_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV}
         ${_PYTHON_DISCOVERED_ENDPOINTS_TEST_NAMES}
         ${_PYTHON_MATCH_PUBLISHER_TEST_NAMES}
+        ${_PYTHON_DISCOVERY_TUNING_TEST_NAMES}
         ${_PYTHON_CALLBACK_EXCEPTIONS_TEST_NAMES}
         python_pub_python_sub python_pub_python_sub_type_reuse
         python_pub_cpp_sub cpp_pub_python_sub
@@ -474,7 +496,7 @@ if(WIN32)
         python_serial_service_cpp_concurrent_requests python_service_cpp_requests_concurrent
         python_request_response_service_client python_request_response_concurrent_service_client
         python_service_client_cpp_service cpp_service_client_python_service
-        pointcloud2_test python_publisher_no_leaks_test python_subscriber_no_leaks_test
+        python_point_cloud2_test python_publisher_no_leaks_test python_subscriber_no_leaks_test
         python_stop_subscriber_test accumulation_test
         legacy_api_compat_test
     )

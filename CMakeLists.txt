@@ -20,7 +20,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/imported_targets.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 
 # Configuration
-set(PROVIZIO_DDS_IDLS_VERSION "2.0.0" CACHE STRING "provizio_dds_idls version")
+set(PROVIZIO_DDS_IDLS_VERSION "2.1.0" CACHE STRING "provizio_dds_idls version")
 set(FAST_DDS_VERSION "v3.6.1" CACHE STRING "Fast-DDS git ref (upstream tag, mirrored by the provizio fork)")
 set(FAST_DDS_NUMERIC_VERSION "3.6.1" CACHE STRING "Fast-DDS numeric version (used for library naming on Windows); must match what FAST_DDS_VERSION resolves to")
 set(FAST_CDR_VERSION "2.3" CACHE STRING "Fast-CDR major.minor version (for Windows versioned library naming). Must match the Fast-CDR bundled with FAST_DDS_VERSION")
@@ -45,6 +45,7 @@ endif()
 set(IGNORE_BIN_CACHE OFF CACHE BOOL "Enable to force build from sources instead of using prebuilt cache")
 set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binaries, skip standard C++ libraries")
 set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
+set(DISABLE_EIGEN OFF CACHE BOOL "Force plain-CPU linear algebra in point clouds accumulation for this build even when Eigen3 is installed (consumers make their own choice at compile time — the accumulation maths path is header-only)")
 
 # Force Release CRT when building Python bindings in Debug mode on Windows.
 # Python interpreters (actions/setup-python, system installs) are Release-built
@@ -95,6 +96,22 @@ message(STATUS "Version: ${PROVIZIO_DDS_VERSION}")
 
 # Project
 project(provizio_dds VERSION ${PROVIZIO_DDS_VERSION})
+
+# Eigen3 (optional): accelerates the point-clouds-accumulation linear algebra (include/provizio/dds/accumulation.h).
+# The maths path is HEADER-ONLY: provizio/dds/detail/accumulation_math.h auto-detects Eigen at COMPILE time via
+# __has_include, so this find_package only serves provizio_dds's own test builds (include path + the explicit
+# PROVIZIO_DDS_DISABLE_EIGEN macro) and the configure-time heads-up below. Consumers decide for themselves by
+# making Eigen visible (or not) to their compiler; libprovizio_dds and the bin cache are identical either way.
+if(NOT DISABLE_EIGEN)
+    find_package(Eigen3 QUIET)
+endif(NOT DISABLE_EIGEN)
+if(NOT DISABLE_EIGEN AND TARGET Eigen3::Eigen)
+    message(STATUS "Eigen3 found: using Eigen for linear algebra operations in point clouds accumulation")
+elseif(DISABLE_EIGEN)
+    message(STATUS "DISABLE_EIGEN=ON: plain-CPU processing will be used for linear algebra operations in point clouds accumulation")
+else()
+    message(WARNING "Eigen3 not found: less efficient plain-CPU processing will be used for linear algebra operations in point clouds accumulation")
+endif()
 
 # Trying locating bin cache, unless disabled
 set(HAS_BIN_CACHE FALSE)
@@ -723,9 +740,12 @@ else(HAS_BIN_CACHE)
     # provizio_dds library
     set(PROVIZIO_DDS_SOURCES
         src/network_recovery_coordinator.cpp
+        src/accumulation.cpp
+        src/detail/localization_filter.cpp
         src/domain_participant.cpp
         src/logging.cpp
         src/network_recovery.cpp
+        src/point_cloud2.cpp
         src/request_response.cpp
         src/topic.cpp
     )

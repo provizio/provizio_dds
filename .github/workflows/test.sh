@@ -93,4 +93,16 @@ if [[ -n "${PROVIZIO_DDS_CTEST_EXCLUDE:-}" ]]; then
     CTEST_EXTRA_ARGS+=(-E "${PROVIZIO_DDS_CTEST_EXCLUDE}")
 fi
 
+# Confine all test DDS traffic to the loopback interface. Provizio's self-hosted
+# runners share a local network, so without this a participant on another host
+# (a concurrent CI run, or resident software on a radar board publishing on a
+# standard topic such as rt/provizio_extrinsics) can be discovered and cross-deliver
+# samples, corrupting tests that integrate everything they receive (point-cloud
+# accumulation). This guards the cross-host case; the DDS tests additionally run on
+# a per-process domain to guard against a publisher on the same host (where loopback
+# does not help). The library defers entirely to this profile when the variable is
+# set; the discovery-tuning tests unset it where they must exercise the code-driven
+# transport tuning. Honour a caller-supplied value so it can be overridden locally.
+export FASTDDS_DEFAULT_PROFILES_FILE="${FASTDDS_DEFAULT_PROFILES_FILE:-${SCRIPT_DIR}/../../test/fast_dds_localhost_profile.xml}"
+
 ctest --output-on-failure "${CTEST_EXTRA_ARGS[@]}"

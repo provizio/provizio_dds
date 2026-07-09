@@ -65,7 +65,7 @@ rm -f "${PIP_LOG}"
 
 # Test it works fine by executing Python tests directly (without copying provizio_dds.py and other beside the tests)
 python3 test/python/python_publisher.py & python3 test/python/python_subscriber.py
-python3 test/python/pointcloud2_test.py
+python3 test/python/point_cloud2_test.py
 
 # Deactivate and delete the virtual environment
 deactivate

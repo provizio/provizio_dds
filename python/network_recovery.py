@@ -17,13 +17,16 @@
 Mirrors the C++ implementation in include/provizio/dds/network_recovery.h
 and src/network_recovery_coordinator.cpp, with three differences:
 
-  1. Event detection is polling-based rather than kernel-notification-based.
-     Pure Python has no portable, dependency-free way to subscribe to kernel
-     address-change events; ctypes wrappers around netlink / PF_ROUTE /
+  1. Event detection is kernel-notification-based (netlink) on Linux, like the
+     C++ side; macOS and Windows fall back to polling, and Linux falls back to
+     polling too if AF_NETLINK is unavailable (e.g. a sandbox). Pure Python has
+     no portable, dependency-free way to subscribe to macOS/Windows kernel
+     address-change events; ctypes wrappers around PF_ROUTE /
      NotifyUnicastIpAddressChange would add a significant amount of
      platform-specific glue with limited benefit (recovery is intentionally
-     debounced over a multi-second quiet period anyway). Polling is simpler,
-     dependency-free, and the latency is well within the design budget.
+     debounced over a multi-second quiet period anyway). Polling there is
+     simpler, dependency-free, and the latency is well within the design
+     budget.
 
   2. The reset hook is supplied by the Python `_DomainParticipant`, not the
      coordinator. The Python participant knows how to tear down and rebuild
@@ -35,7 +38,8 @@ and src/network_recovery_coordinator.cpp, with three differences:
      same filter list as the C++ side (loopback, link-local, docker /
      veth / etc.).
 
-The polling cadence is configurable via the
+The detection interval — the polling cadence on the polling backends, or the
+burst debounce (quiet period) on the netlink backend — is configurable via the
 `PROVIZIO_DDS_NETWORK_RECOVERY_POLL_INTERVAL_SEC` env variable; default 3 s
 (matches the C++ quiet_period).
 """
@@ -43,12 +47,15 @@ The polling cadence is configurable via the
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import queue
+import select
 import socket
 import struct
 import sys
 import threading
+import time
 import weakref
 from enum import Enum
 from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
@@ -1059,22 +1066,36 @@ def submit_off_thread(task: "Callable[[], None]") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Network monitor — polling-based
+# Network monitor — event-driven netlink on Linux, polling elsewhere/fallback
 # ---------------------------------------------------------------------------
 
 
-class _NetworkMonitor:
-    """Polls :func:`_capture_address_snapshot` on an interval and fires a
-    callback when the result changes from the last observed value.
+# The monitor reports each settled burst as (old_snapshot, new_snapshot,
+# burst_start_snapshot). burst_start is the snapshot captured at the FIRST event
+# of the burst (event-driven backends only); the coordinator uses it to detect a
+# transient flap whose end-state equals old. Polling backends pass burst_start as
+# None (they cannot observe a sub-interval transient).
+OnNetworkEvent = Callable[[AddressSnapshot, AddressSnapshot, Optional[AddressSnapshot]], None]
 
-    The polling interval doubles as the coalescing quiet period: a burst of
-    OS-level changes that all settle within one interval is observed as a
-    single delta.
+# Coalescing parameters, mirroring the C++ network_recovery_coordinator
+# quiet_period / max_debounce. The quiet period is the env-configurable
+# detection interval (also the polling cadence on non-event-driven backends).
+_MAX_DEBOUNCE_SEC = 60.0
+
+
+class _PollingNetworkMonitor:
+    """Fallback monitor: polls :func:`_capture_address_snapshot` on an interval
+    and reports a burst whenever the result changes from the last observed value.
+
+    LIMITATION: a sub-interval transient (an address removed and re-added between
+    two polls) is invisible — both polls observe the same set, so no burst is
+    reported. The Linux backend (:class:`_NetlinkNetworkMonitor`) is event-driven
+    and does not have this blind spot. Used on macOS / Windows, or on Linux only
+    if the netlink socket cannot be opened.
     """
 
-    def __init__(self, on_change: Callable[[AddressSnapshot, AddressSnapshot], None],
-                 poll_interval_sec: float):
-        self._on_change = on_change
+    def __init__(self, on_event: OnNetworkEvent, poll_interval_sec: float):
+        self._on_event = on_event
         self._poll_interval_sec = poll_interval_sec
         self._stop_event = threading.Event()
         # Initial snapshot is captured BEFORE the worker thread starts so
@@ -1101,9 +1122,168 @@ class _NetworkMonitor:
                 old = self._last_snapshot
                 self._last_snapshot = new_snapshot
                 try:
-                    self._on_change(old, new_snapshot)
+                    self._on_event(old, new_snapshot, None)  # no burst-start: poll can't see transients
                 except Exception as ex:
-                    _emit_log(LogLevel.ERROR, f"network monitor: on_change handler raised ({ex})")
+                    _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
+
+
+class _NetlinkNetworkMonitor:
+    """Linux event-driven monitor. Subscribes an ``AF_NETLINK`` / ``NETLINK_ROUTE``
+    socket to ``RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR`` and coalesces the
+    resulting ``RTM_NEWADDR`` / ``RTM_DELADDR`` bursts, mirroring the C++
+    network_monitor + coordinator coalescer.
+
+    Crucially it captures a snapshot at the FIRST event of each burst — before a
+    quick flap can revert — and reports it as ``burst_start``. That is what lets
+    the coordinator catch a transient (an address removed and re-added within the
+    quiet period): the end-state matches the last known set, but the Fast-DDS
+    sockets bound to that address were torn down while it was gone and must be
+    rebuilt. A pure end-state diff (what polling and the old code did) skips it.
+
+    Like the C++ side, the netlink payload is NOT parsed — any address event is
+    just a trigger; the actual decision is made from the captured snapshots, so
+    the existing filters (loopback / link-local / container kinds) apply for free
+    and container/veth churn cannot cause spurious resets.
+    """
+
+    _RTMGRP_IPV4_IFADDR = 0x10
+    _RTMGRP_IPV6_IFADDR = 0x100
+
+    def __init__(self, on_event: OnNetworkEvent, quiet_period_sec: float):
+        self._on_event = on_event
+        self._quiet = quiet_period_sec
+        self._last_known: AddressSnapshot = _capture_address_snapshot()
+        # Subscribing to the multicast groups can raise OSError; the caller
+        # (_make_network_monitor) falls back to polling on failure.
+        self._sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_ROUTE)
+        self._stop_r = self._stop_w = -1
+        try:
+            self._sock.bind((0, self._RTMGRP_IPV4_IFADDR | self._RTMGRP_IPV6_IFADDR))
+            # Self-pipe to wake the select() loop for a clean shutdown (mirrors the
+            # C++ eventfd). Closing the socket from another thread is not a reliable
+            # way to unblock a blocked recv/select on every kernel.
+            self._stop_r, self._stop_w = os.pipe()
+            self._thread = threading.Thread(target=self._run, name="provizio_dds.network_monitor", daemon=True)
+            self._thread.start()
+        except BaseException:
+            # Construction failed partway: close whatever was opened so a half-built monitor doesn't leak the
+            # socket / pipe fds. The object never finishes constructing, so stop() is never reachable to do it.
+            self._sock.close()
+            for fd in (self._stop_r, self._stop_w):
+                if fd >= 0:
+                    os.close(fd)
+            raise
+
+    def initial_snapshot(self) -> AddressSnapshot:
+        return self._last_known
+
+    def _run(self) -> None:
+        pending = False
+        burst_start: AddressSnapshot = frozenset()
+        first_event_mono = 0.0
+        last_event_mono = 0.0
+
+        while True:
+            timeout: Optional[float] = None
+            if pending:
+                now = time.monotonic()
+                wake_at = min(last_event_mono + self._quiet, first_event_mono + _MAX_DEBOUNCE_SEC)
+                timeout = max(0.0, wake_at - now)
+
+            try:
+                readable, _, _ = select.select([self._sock, self._stop_r], [], [], timeout)
+            except OSError as ex:
+                # EINTR: select was interrupted by a signal — retry rather than tear
+                # down the monitor. Anything else is genuinely terminal.
+                if ex.errno == errno.EINTR:
+                    continue
+                _emit_log(LogLevel.ERROR, f"network monitor: select() failed ({ex}); auto-recovery disabled")
+                break
+
+            if self._stop_r in readable:
+                break
+
+            if self._sock in readable:
+                try:
+                    self._sock.recv(65536)  # content ignored — any address event is a trigger
+                except OSError as ex:
+                    # Mirror the C++ Linux monitor's recv classification. EINTR/EAGAIN
+                    # are spurious — retry. ENOBUFS means the kernel's netlink multicast
+                    # buffer overflowed because address events arrived faster than we
+                    # drained them — precisely a rapid flap, the scenario auto-recovery
+                    # exists to handle. The kernel drops the unread events and subsequent
+                    # recvs succeed, so log and keep monitoring (the next snapshot capture
+                    # reflects whatever state the kernel settles into); breaking here would
+                    # silently kill the monitor under the very load it must survive. Only
+                    # genuinely terminal errors stop it.
+                    if ex.errno in (errno.EINTR, errno.EAGAIN, errno.EWOULDBLOCK):
+                        continue
+                    if ex.errno == errno.ENOBUFS:
+                        _emit_log(LogLevel.WARNING, "network monitor: netlink recv lost events (ENOBUFS); continuing")
+                        continue
+                    _emit_log(LogLevel.ERROR, f"network monitor: recv() failed ({ex}); auto-recovery disabled")
+                    break
+                now = time.monotonic()
+                if not pending:
+                    pending = True
+                    first_event_mono = now
+                    # Burst START snapshot — capture immediately, before a quick
+                    # flap can revert. capture_address_snapshot() is slow; while it
+                    # runs the kernel buffers further events for the next iteration.
+                    try:
+                        burst_start = _capture_address_snapshot()
+                    except Exception:
+                        burst_start = self._last_known
+                last_event_mono = now
+                continue
+
+            # select() timed out → the burst has gone quiet (or hit max_debounce).
+            if pending and (
+                last_event_mono + self._quiet <= time.monotonic()
+                or first_event_mono + _MAX_DEBOUNCE_SEC <= time.monotonic()
+            ):
+                try:
+                    end_snapshot = _capture_address_snapshot()
+                except Exception as ex:
+                    _emit_log(LogLevel.WARNING, f"network monitor: snapshot capture failed ({ex})")
+                    pending = False
+                    burst_start = frozenset()
+                    continue
+                try:
+                    self._on_event(self._last_known, end_snapshot, burst_start)
+                except Exception as ex:
+                    _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
+                self._last_known = end_snapshot
+                pending = False
+                burst_start = frozenset()
+
+    def stop(self) -> None:
+        try:
+            os.write(self._stop_w, b"x")
+        except OSError:
+            pass
+        self._thread.join(timeout=2.0)
+        for closer in (lambda: self._sock.close(), lambda: os.close(self._stop_r), lambda: os.close(self._stop_w)):
+            try:
+                closer()
+            except OSError:
+                pass
+
+
+def _make_network_monitor(on_event: OnNetworkEvent, interval_sec: float):
+    """Construct the platform-appropriate monitor: event-driven netlink on Linux,
+    polling elsewhere. Falls back to polling on Linux if the netlink socket cannot
+    be opened (e.g. a sandbox without ``AF_NETLINK``)."""
+    if sys.platform.startswith("linux"):
+        try:
+            return _NetlinkNetworkMonitor(on_event, interval_sec)
+        except OSError as ex:
+            _emit_log(
+                LogLevel.WARNING,
+                f"network monitor: netlink unavailable ({ex}); falling back to polling "
+                f"(sub-interval transient flaps may be missed)",
+            )
+    return _PollingNetworkMonitor(on_event, interval_sec)
 
 
 # ---------------------------------------------------------------------------
@@ -1175,7 +1355,8 @@ class _NetworkRecoveryCoordinator:
         # pin the participant via __self__ and defeat the weak-registry
         # design.
         self._registered: list[weakref.WeakMethod] = []
-        self._monitor: Optional[_NetworkMonitor] = None
+        # _PollingNetworkMonitor or _NetlinkNetworkMonitor (see _make_network_monitor).
+        self._monitor: Optional[object] = None
         # Test observability counters — always present so behaviour stays
         # comparable to the C++ side. See network_recovery_coordinator.h.
         self.reset_count = 0
@@ -1234,7 +1415,7 @@ class _NetworkRecoveryCoordinator:
             if self._monitor is None:
                 try:
                     init_poll_interval = _resolve_poll_interval()
-                    self._monitor = _NetworkMonitor(self._on_network_change, init_poll_interval)
+                    self._monitor = _make_network_monitor(self._on_network_event, init_poll_interval)
                     initialised_monitor_now = True
                     initial_snapshot_size = len(self._monitor.initial_snapshot())
                 except Exception as ex:
@@ -1258,23 +1439,48 @@ class _NetworkRecoveryCoordinator:
                 f"participant creation retries the initialization",
             )
 
-    def _on_network_change(self, old: AddressSnapshot, new: AddressSnapshot) -> None:
-        added = len(new - old)
-        removed = len(old - new)
-        if not added and not removed:
-            # The monitor's polling loop only invokes us when new != old,
-            # so this should not happen in practice. Guard anyway. Bump under
-            # _idle_lock to match reset_count, so a test sampling the counter
-            # has a happens-before edge to this write.
+    def _on_network_event(self, old: AddressSnapshot, new: AddressSnapshot,
+                          burst_start: Optional[AddressSnapshot] = None) -> None:
+        """Decide whether a settled burst warrants a participant rebuild.
+
+        Resets when the end-state changed (``new != old``) OR — for event-driven
+        backends that supply it — when the burst-START snapshot differed from
+        ``old`` even though the end-state is unchanged. The latter is a transient
+        flap (a DDS-relevant address left and returned within the quiet period):
+        the end-state looks the same but the Fast-DDS sockets bound to that
+        address were torn down while it was gone and must be rebuilt. Mirrors the
+        C++ ``network_recovery_coordinator::run_reset``.
+        """
+        end_changed = new != old
+        transient_changed = burst_start is not None and burst_start != old
+
+        if not end_changed and not transient_changed:
+            # Genuine no-op (or container/veth/link-local churn, which is filtered
+            # out of both snapshots). Bump under _idle_lock to match reset_count so
+            # a test sampling the counter has a happens-before edge to this write.
+            _emit_log(
+                LogLevel.INFO,
+                f"network event burst — snapshot unchanged ({len(new)} interface address(es)), no reset",
+            )
             with self._idle_lock:
                 self.skipped_reset_count += 1
             return
 
-        _emit_log(
-            LogLevel.INFO,
-            f"network change detected: +{added} / -{removed} interface address(es) "
-            f"({len(old)} → {len(new)}); resetting recovery-enabled participants",
-        )
+        if end_changed:
+            added = len(new - old)
+            removed = len(old - new)
+            _emit_log(
+                LogLevel.INFO,
+                f"network change detected: +{added} / -{removed} interface address(es) "
+                f"({len(old)} → {len(new)}); resetting recovery-enabled participants",
+            )
+        else:
+            _emit_log(
+                LogLevel.INFO,
+                "network change detected: transient interface change within the debounce window "
+                "(a DDS-relevant address left and returned, end-state unchanged); "
+                "resetting recovery-enabled participants",
+            )
 
         with self._idle_lock:
             self._reset_in_progress = True
@@ -1318,6 +1524,18 @@ class _NetworkRecoveryCoordinator:
 
     def inject_change_for_test(self, old: AddressSnapshot, new: AddressSnapshot) -> None:
         """Test-only: synthesize a network change event without waiting for
-        the polling loop. Drives the same code path as a real change."""
+        the monitor. Drives the same decision path as a real change."""
 
-        self._on_network_change(old, new)
+        self._on_network_event(old, new)
+
+    def inject_transient_for_test(self) -> None:
+        """Test-only: drive a transient-flap reset — an address that left and
+        returned within the quiet period, so the end-state equals the last known
+        set but a rebuild is still required. Mirrors the C++
+        ``network_recovery_coordinator::inject_transient_for_test``. No host
+        interface manipulation needed: the end-state is the current real snapshot
+        and the (synthetic) burst-start differs from it."""
+
+        snapshot = _capture_address_snapshot()
+        burst_start = frozenset(snapshot) | {("provizio_test_transient_if", "203.0.113.7")}  # TEST-NET-3
+        self._on_network_event(snapshot, snapshot, burst_start)

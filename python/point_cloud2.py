@@ -51,9 +51,10 @@
 # Serialization of provizio_dds.PointCloud2 messages.
 
 import array
-from collections import namedtuple
 import ctypes
+import math
 import sys
+from collections import namedtuple
 from typing import Iterable, List, NamedTuple, Optional, Sequence
 import numpy as np
 from numpy.lib.recfunctions import (
@@ -85,6 +86,50 @@ _DATATYPES_SIZES[FLOAT64] = 8
 
 
 DUMMY_FIELD_PREFIX = "unnamed_field"
+
+NO_ENTITY_ID = 0xFFFFFFFF
+"""The value of entity_id/camera_entity_id meaning the id is not present in the source cloud (see entities_kind)."""
+
+
+class Entity(NamedTuple):
+    """A single Provizio entity of any kind (radar / camera / fused), as read by read_entities. Fields absent from
+    the source cloud read as NaN (float and multi-value fields such as orientation / size / camera_bbox),
+    NO_ENTITY_ID (entity_id / camera_entity_id), or 0 (the integral entity_class and confidence fields).
+    orientation is a quaternion in (x, y, z, w) order — the PointCloud2 wire contract (note: Python accumulation
+    uses (w, x, y, z))."""
+
+    entity_id: int
+    camera_entity_id: int
+    entity_class: int
+    x: float
+    y: float
+    z: float
+    radar_relative_radial_velocity: float
+    ground_relative_radial_velocity: float
+    orientation: tuple
+    size: tuple
+    camera_bbox: tuple
+    entity_confidence: int
+    entity_class_confidence: int
+
+    def has_radar_data(self) -> bool:
+        """Returns True when this entity carries radar-sourced data (its entity_id is present)."""
+        return self.entity_id != NO_ENTITY_ID
+
+    def has_camera_data(self) -> bool:
+        """Returns True when this entity carries camera-sourced data (its camera_entity_id is present)."""
+        return self.camera_entity_id != NO_ENTITY_ID
+
+    def kind(self) -> Optional[str]:
+        """Returns the kind of this single entity: "fused"/"radar"/"camera", or None when it carries neither id.
+        The whole-cloud counterpart is entities_kind."""
+        if self.has_radar_data() and self.has_camera_data():
+            return "fused"
+        if self.has_radar_data():
+            return "radar"
+        if self.has_camera_data():
+            return "camera"
+        return None
 
 
 def read_points(
@@ -247,7 +292,7 @@ def dtype_from_fields(fields: Sequence, point_step: Optional[int] = None) -> np.
         # Datatype as numpy datatype
         datatype = _DATATYPES[fields[i].datatype()]
         # Name field
-        if fields[i].name == "":
+        if fields[i].name() == "":
             name = f"{DUMMY_FIELD_PREFIX}_{i}"
         else:
             name = fields[i].name()
@@ -546,7 +591,7 @@ def make_radar_entities(header: Header, entities: Iterable) -> PointCloud2:
 def make_camera_entities(header: Header, entities: Iterable) -> PointCloud2:
     """
     Create a PointCloud2 containing entities
-    (camera_entity_id, entity_class, x, y, camera_bbox(left, top, right, bottom), entity_confidence, entity_class_confidence) fields.
+    (camera_entity_id, entity_class, x, y, z, camera_bbox(left, top, right, bottom), entity_confidence, entity_class_confidence) fields.
 
     :param header: The point cloud header. (Type: Header)
     :param entities: The entities. List of iterables, i.e. one iterable
@@ -571,12 +616,148 @@ def make_fused_entities(header: Header, entities: Iterable) -> PointCloud2:
     return make_entities(header, True, True, entities)
 
 
+def entities_kind(cloud: PointCloud2) -> Optional[str]:
+    """
+    Detects the kind of a Provizio entities cloud by which entity id fields it carries.
+
+    :param cloud: The cloud to probe. (Type: provizio_dds.PointCloud2)
+    :return: "fused" when both entity_id and camera_entity_id fields are present, "radar" or "camera" when only the
+             respective id field is, None when neither is (not a Provizio entities cloud).
+    """
+    field_names = {f.name() for f in cloud.fields()}
+    has_entity_id = "entity_id" in field_names
+    has_camera_entity_id = "camera_entity_id" in field_names
+    if has_entity_id and has_camera_entity_id:
+        return "fused"
+    if has_entity_id:
+        return "radar"
+    if has_camera_entity_id:
+        return "camera"
+    return None
+
+
+def read_entities(cloud: PointCloud2, skip_nans: bool = False) -> List[Entity]:
+    """
+    Reads all entities of a Provizio entities PointCloud2 (radar, camera or fused - see entities_kind) into Entity
+    instances with a unified field set: entity_id, camera_entity_id, entity_class, x, y, z,
+    radar_relative_radial_velocity, ground_relative_radial_velocity, orientation (4-tuple), size (3-tuple),
+    camera_bbox (4-tuple), entity_confidence, entity_class_confidence. Fields absent from the cloud read as NaN
+    (float / multi-value fields as tuples of NaN), NO_ENTITY_ID (the id fields), or 0 (the integral entity_class
+    and confidence fields) - matching the C++ read_entities defaults.
+
+    :param cloud: The entities cloud to read. (Type: provizio_dds.PointCloud2)
+    :param skip_nans: If True, then don't return any entity with a NaN value in a present field. (Type: bool,
+                      Default: False)
+                      Note: skip_nans only has effect when the cloud declares is_dense=False (read_points
+                      semantics); this library sets is_dense=True by default.
+    :return: List of Entity instances, one per entity.
+    """
+    arr = read_points(cloud, skip_nans=skip_nans)
+    names = set(arr.dtype.names) if arr.dtype.names else set()
+
+    _nan = math.nan
+
+    # Pre-resolve suffixed sub-field name lists for multi-component fields once, outside the row loop.
+    _orientation_names = [f"orientation_{i}" for i in range(4)]
+    _size_names = [f"size_{i}" for i in range(3)]
+    _camera_bbox_names = [f"camera_bbox_{i}" for i in range(4)]
+    _has_orientation = all(n in names for n in _orientation_names)
+    _has_size = all(n in names for n in _size_names)
+    _has_camera_bbox = all(n in names for n in _camera_bbox_names)
+
+    def _multi(row, base_names, has_all):
+        if has_all:
+            return tuple(float(row[n]) for n in base_names)
+        return tuple(_nan for _ in base_names)
+
+    result = []
+    for row in arr:
+
+        result.append(Entity(
+            entity_id=int(row["entity_id"]) if "entity_id" in names else NO_ENTITY_ID,
+            camera_entity_id=int(row["camera_entity_id"]) if "camera_entity_id" in names else NO_ENTITY_ID,
+            entity_class=int(row["entity_class"]) if "entity_class" in names else 0,
+            x=float(row["x"]) if "x" in names else _nan,
+            y=float(row["y"]) if "y" in names else _nan,
+            z=float(row["z"]) if "z" in names else _nan,
+            radar_relative_radial_velocity=float(row["radar_relative_radial_velocity"])
+            if "radar_relative_radial_velocity" in names
+            else _nan,
+            ground_relative_radial_velocity=float(row["ground_relative_radial_velocity"])
+            if "ground_relative_radial_velocity" in names
+            else _nan,
+            orientation=_multi(row, _orientation_names, _has_orientation),
+            size=_multi(row, _size_names, _has_size),
+            camera_bbox=_multi(row, _camera_bbox_names, _has_camera_bbox),
+            entity_confidence=int(row["entity_confidence"]) if "entity_confidence" in names else 0,
+            entity_class_confidence=int(row["entity_class_confidence"])
+            if "entity_class_confidence" in names
+            else 0,
+        ))
+    return result
+
+
+def make_entities_from(header: Header, kind: str, entities: Iterable) -> PointCloud2:
+    """
+    Creates a Provizio entities PointCloud2 of the given kind ("radar", "camera" or "fused" - the same values
+    entities_kind returns) from any iterable of entity-like objects exposing the unified attributes returned by
+    read_entities (entity_id, camera_entity_id, entity_class, x, y, z, radar_relative_radial_velocity,
+    ground_relative_radial_velocity, orientation, size, camera_bbox, entity_confidence, entity_class_confidence).
+    Only the field groups of the requested kind are written (e.g. camera_bbox of an entity is ignored when kind is
+    "radar"). read_entities reads such a cloud back losslessly for the written groups.
+
+    :param header: The point cloud header. (Type: Header)
+    :param kind: The kind of the entities cloud to create: "radar", "camera" or "fused".
+    :param entities: Any iterable of entity-like objects with the unified attributes.
+    :return: The entities PointCloud2.
+    :raises ValueError: When kind is not "radar", "camera" or "fused".
+    """
+    if kind not in ("radar", "camera", "fused"):
+        raise ValueError(f"kind must be 'radar', 'camera' or 'fused', got {kind!r}")
+
+    has_radar = kind != "camera"
+    has_camera = kind != "radar"
+
+    rows = []
+    for ent in entities:
+        row = []
+        if has_radar:
+            row.append(ent.entity_id)
+        if has_camera:
+            row.append(ent.camera_entity_id)
+        row.append(ent.entity_class)
+        row.append(ent.x)
+        row.append(ent.y)
+        row.append(ent.z)
+        if has_radar:
+            row.append(ent.radar_relative_radial_velocity)
+            row.append(ent.ground_relative_radial_velocity)
+            # orientation: 4 scalars
+            if len(ent.orientation) != 4:
+                raise ValueError(f"orientation must have 4 elements, got {len(ent.orientation)}")
+            row.extend(ent.orientation)
+            # size: 3 scalars
+            if len(ent.size) != 3:
+                raise ValueError(f"size must have 3 elements, got {len(ent.size)}")
+            row.extend(ent.size)
+        if has_camera:
+            # camera_bbox: 4 scalars
+            if len(ent.camera_bbox) != 4:
+                raise ValueError(f"camera_bbox must have 4 elements, got {len(ent.camera_bbox)}")
+            row.extend(ent.camera_bbox)
+        row.append(ent.entity_confidence)
+        row.append(ent.entity_class_confidence)
+        rows.append(row)
+
+    return make_entities(header, has_radar, has_camera, rows)
+
+
 def make_header(timestamp_sec: int, timestamp_nanosec: int, frame_id: str) -> Header:
     """
     Create a provizio_dds.Header
 
     :param timestamp_sec: Seconds component of timestamp. (Type: int)
-    :param timestamp_nanosec: Nanoseconds component of timestamp, valid in the range [0, 10e9). (Type: int)
+    :param timestamp_nanosec: Nanoseconds component of timestamp, valid in the range [0, 999999999]. (Type: int)
     :param frame_id: Frame this data is associated with
     """
     header = Header()

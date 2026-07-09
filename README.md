@@ -1,11 +1,10 @@
 # provizio_dds
 
-C++ and Python library for [DDS communication](https://www.dds-foundation.org/what-is-dds-3/) in Provizio customer
-facing APIs and internal Provizio software components. Built using
+C++ and Python library for [DDS communication](https://www.dds-foundation.org/what-is-dds-3/) in Provizio customer-facing APIs and internal Provizio software components. Built using
 [eProsima Fast-DDS](https://www.eprosima.com/index.php/products-all/eprosima-fast-dds) DDS implementation (Apache
 License 2.0).
 
-Although based directly on a DDS, it's compatible with [ROS2](https://docs.ros.org/en/rolling/) and provides all ROS2
+Although based directly on DDS, it's compatible with [ROS2](https://docs.ros.org/en/rolling/) and provides all ROS2
 built-in data types.
 
 | CI Status: master | CI Status: develop |
@@ -24,7 +23,7 @@ built-in data types.
 - Git
 - C++ 17 compiler (gcc, clang, or MSVC)
 - libssl-dev (OpenSSL development headers)
-- eProsima Fast-DDS 3.x (provizio_dds builds against the Fast-DDS 3.x API): when a Fast-DDS installation is present it will be used, otherwise it's downloaded and built automatically. Existing 1.10.x sources keep compiling — the migration is source-compatible — but note the `FASTRTPS_DEFAULT_PROFILES_FILE` environment variable was renamed to `FASTDDS_DEFAULT_PROFILES_FILE` (see [XML Profiles](#xml-profiles)).
+- eProsima Fast-DDS 3.x (provizio_dds builds against the Fast-DDS 3.x API): when a Fast-DDS installation is present it will be used, otherwise it's downloaded and built automatically. Note that the `FASTRTPS_DEFAULT_PROFILES_FILE` environment variable was renamed to `FASTDDS_DEFAULT_PROFILES_FILE` in Fast-DDS 3.x (see [XML Profiles](#xml-profiles)).
 
 **C++ (Windows):**
 
@@ -49,7 +48,7 @@ built-in data types.
 - Pip 3
 - All C++ (Windows) dependencies above (pip install builds from source)
 
-When using non-binary-prebuilt configurations (i.e. any macOS, Linux Debug, non-x64/non-aarch64, non-master provizio_dds_idls) all the C++ dependencies will also be required.
+When using non-binary-prebuilt configurations (i.e. any macOS, Linux Debug, non-x64/non-aarch64, non-default provizio_dds_idls) all the C++ dependencies will also be required.
 
 There is a convenience Bash script to install all dependencies in *apt*-featuring Linux and macOS. In Linux it's to be executed with root privileges, f.e. using `sudo`.
 
@@ -402,6 +401,26 @@ The large-sample message types listed under [Publishing Data](#publishing-data) 
 
 For details see [include/provizio/dds/domain_participant.h](include/provizio/dds/domain_participant.h).
 
+## Discovery Tuning
+
+Participants discover each other over best-effort multicast (SPDP), so some announcements are lost on a busy or lossy network. Fast-DDS counters this with an **initial burst** of announcements sent once at participant creation, plus a **periodic re-announcement** thereafter. Both are levers: set too high, the discovery traffic itself becomes a primary source of UDP congestion once many participants (sensors + clients) run at once — the initial burst is paid on every participant creation (including each [network-recovery](#network-auto-recovery) reset, which recreates the participant), and the periodic re-announcement is paid by every participant forever, so its multicast rate scales with the participant count.
+
+provizio_dds therefore uses de-escalated defaults — a modest initial burst of **15 announcements 100 ms apart** (still well above Fast-DDS's own default of 5, so a lossy link gets several shots through) and a relaxed periodic re-announcement of **3 s** (the Fast-DDS default). The participant lease duration is also raised from the Fast-DDS default of 20 s to **30 s**, giving the relaxed cadence more margin before a peer is wrongly declared lost when announcements are dropped (at the cost of detecting a genuinely-dead peer ~10 s later). For most deployments these need no tuning. When they do — an unusually large fleet, or a particularly lossy link — all four are overridable at runtime via environment variables (read once at participant creation; ignored, with a logged warning, when unset or malformed):
+
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_COUNT` | `15` | Number of announcements in the one-time initial burst. Raise on very lossy links; lower to reduce the startup/reset burst. |
+| `PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_PERIOD_MS` | `100` | Spacing (milliseconds) between the initial-burst announcements. |
+| `PROVIZIO_DDS_DISCOVERY_ANNOUNCEMENT_PERIOD_MS` | `3000` | Period (milliseconds) of the steady-state periodic re-announcement. Raise to cut steady-state congestion in large fleets; lower to speed up late-joiner discovery. |
+| `PROVIZIO_DDS_DISCOVERY_LEASE_DURATION_MS` | `30000` | Lease duration (milliseconds) — how long a peer is considered alive without a fresh announcement. Raise for more tolerance of dropped announcements; must stay longer than the re-announcement period. |
+
+Keep the periodic re-announcement period shorter than the participant lease duration (30 s by default), or peers can be declared lost in the gap between announcements; a warning is logged if an override crosses that threshold. These settings are skipped entirely when discovery is configured through an [XML profile](#xml-profiles) instead.
+
+```bash
+# Example: a large fleet trading slightly slower late-joiner discovery for less steady-state traffic
+PROVIZIO_DDS_DISCOVERY_ANNOUNCEMENT_PERIOD_MS=6000 my_app
+```
+
 ## Logging
 
 provizio_dds emits diagnostic messages from background threads (network-recovery monitor, coalescer, participant reset) as well as from a few error paths in the request/response code. By default, info and warning messages go to `std::cout` and errors go to `std::cerr`, all prefixed with `[provizio_dds]`. To route the output into your application's logging system, install a callback:
@@ -641,10 +660,116 @@ service.stop()
   - Keep the default `max_history_depth` on subscribers and services/requests, or
   - Configure ROS 2 QoS to use TRANSIENT_LOCAL durability on the ROS 2 publishers with appropriate history depth for better reliability.
 
+## Reading and Creating PointCloud2 Messages
+
+Utilities for reading and creating `PointCloud2` messages — both generically (any field layout) and in the standard Provizio radar format (see [TOPICS.md of provizio_dds_idls](https://github.com/provizio/provizio_dds_idls/blob/master/TOPICS.md)):
+
+### Python Example
+
+```Python
+import provizio_dds
+
+# Reading Provizio radar point clouds: a structured numpy array, one record per point with named fields
+# x, y, z, radar_relative_radial_velocity, signal_to_noise_ratio, ground_relative_radial_velocity
+# (access by name, e.g. points["x"]). Use read_points_numpy(...) for a plain (N, 6) float matrix.
+points = provizio_dds.point_cloud2.read_points(point_cloud2_message)
+
+# Or as named tuples (slower, but self-descriptive: point.x, point.signal_to_noise_ratio, ...):
+points = provizio_dds.point_cloud2.read_points_list(point_cloud2_message)
+
+# Reading ANY PointCloud2 generically, selecting fields by name:
+xyz = provizio_dds.point_cloud2.read_points(point_cloud2_message, field_names=["x", "y", "z"])
+
+# Creating radar point clouds:
+message = provizio_dds.point_cloud2.make_radar_point_cloud(
+    provizio_dds.point_cloud2.make_header(timestamp_sec, timestamp_nanosec, "provizio_radar_front_center"),
+    [[1.0, 2.0, 3.0, 0.5, 7.0, 0.0]],  # any iterable of per-point field values
+)
+
+# Creating and reading Provizio entity clouds (radar / camera / fused):
+from types import SimpleNamespace
+entity = SimpleNamespace(
+    entity_id=42, entity_class=3, x=1.5, y=-2.5, z=0.5,
+    radar_relative_radial_velocity=10.5, ground_relative_radial_velocity=9.5,
+    orientation=(0.1, 0.2, 0.3, 0.4), size=(4.5, 1.8, 1.5),
+    camera_bbox=(float("nan"),) * 4, entity_confidence=90, entity_class_confidence=80,
+    camera_entity_id=provizio_dds.point_cloud2.NO_ENTITY_ID,
+)
+entities_message = provizio_dds.point_cloud2.make_entities_from(
+    provizio_dds.point_cloud2.make_header(timestamp_sec, timestamp_nanosec, "provizio_radar_front_center"),
+    "radar",
+    [entity],
+)
+entities = provizio_dds.point_cloud2.read_entities(entities_message)
+entity_id = entities[0].entity_id
+orientation = entities[0].orientation  # (x, y, z, w); fields absent from the cloud kind read as NaN
+                                       # (floats) or NO_ENTITY_ID (ids)
+entity_kind = entities[0].kind()  # per-entity: "radar"/"camera"/"fused" (see also entities_kind for the whole cloud)
+kind = provizio_dds.point_cloud2.entities_kind(entities_message)  # "radar", "camera", "fused" or None
+```
+
+Arbitrary field layouts can be created with `provizio_dds.point_cloud2.create_cloud`; the flat-row makers
+`make_radar_entities` / `make_camera_entities` / `make_fused_entities` also exist for pre-flattened data.
+
+For more details see [python/point_cloud2.py](python/point_cloud2.py) and [test/python/accumulation_test.py](test/python/accumulation_test.py).
+
+### C++ Example
+
+```C++
+#include <provizio/dds/point_cloud2.h>
+namespace pc2 = provizio::dds::point_cloud2;
+
+// Reading Provizio radar point clouds:
+const std::vector<pc2::radar_point> radar_points = pc2::read_radar_points(point_cloud2_message);
+
+// Reading ANY PointCloud2 generically, field by field:
+const pc2::cloud_view view{point_cloud2_message};
+const auto x_field = view.field("x");
+for (const auto point : view)
+{
+    const auto x = x_field ? point.get<float>(*x_field) : std::numeric_limits<float>::quiet_NaN();
+    // ...
+}
+
+// Creating radar point clouds (any iterable range of radar_point; contiguous ranges are bulk-copied):
+const auto message = pc2::make_radar_point_cloud(
+    pc2::make_header(timestamp_sec, timestamp_nanosec, "provizio_radar_front_center"), radar_points);
+
+// Creating arbitrary clouds (rows in field order; values are converted to each field's datatype):
+const auto fields = pc2::make_fields({{"x", sensor_msgs::msg::PointField_Constants::FLOAT32},
+                                      {"y", sensor_msgs::msg::PointField_Constants::FLOAT32},
+                                      {"intensity", sensor_msgs::msg::PointField_Constants::UINT16}});
+const auto custom_cloud = pc2::create_cloud(pc2::make_header(0, 0, "frame"), fields,
+                                            std::vector<std::array<float, 3>>{{1.0F, 2.0F, 3.0F}});
+
+// Creating and reading Provizio entity clouds (radar / camera / fused):
+pc2::entity an_entity;
+an_entity.entity_id = 42;
+an_entity.entity_class = 3;
+an_entity.x = 1.5F; an_entity.y = -2.5F; an_entity.z = 0.5F;
+an_entity.orientation = {0.1F, 0.2F, 0.3F, 0.4F};
+an_entity.size = {4.5F, 1.8F, 1.5F};
+an_entity.radar_relative_radial_velocity = 10.5F;
+an_entity.ground_relative_radial_velocity = 9.5F;
+an_entity.entity_confidence = 90; an_entity.entity_class_confidence = 80;
+const auto entities_message =
+    pc2::make_entities(pc2::make_header(timestamp_sec, timestamp_nanosec, "provizio_radar_front_center"),
+                       pc2::entities_kind::radar, std::vector<pc2::entity>{an_entity});
+const std::vector<pc2::entity> entities = pc2::read_entities(entities_message);
+const auto entity_id = entities[0].entity_id;  // fields absent from the cloud kind read as NaN (floats) or
+                                               // pc2::no_entity_id (ids)
+const auto entity_kind = entities[0].kind();  // per-entity: radar/camera/fused (see also get_entities_kind for the whole cloud)
+const auto kind = pc2::get_entities_kind(entities_message);  // entities_kind::radar/camera/fused or nullopt
+```
+
+The flat-row makers `make_radar_entities` / `make_camera_entities` / `make_fused_entities` also exist for pre-flattened data.
+
+For more details see [include/provizio/dds/point_cloud2.h](include/provizio/dds/point_cloud2.h) and [test/point_cloud2/point_cloud2_test.cpp](test/point_cloud2/point_cloud2_test.cpp).
+
 ## Points Accumulation and Multi-Radar Fusion
 
-Point clouds accumulation keeps some of reflected points (normally ones from static objects) "visible" for a number of frames after they were originally received. It makes point clouds much denser and features of objects much clearer - similar to long exposure of dark scenes in photography. Usually, accumulation requires at least 2 types of inputs: point clouds and localization (both odometry and GNSS are supported). In case of static ego or single frame multi-radar fusion, accumulation can be used without odometry/localization inputs. When Provizio radar odometry is used it effectively turns into a SLAM (Simultaneous Localization and Mapping) solution, but external localization/odometry source is also supported.
-Accumulation is also used for fusion of point clouds from multiple radars in a vehicle. In this case sensors extrinsics calibration data is required.
+Point clouds accumulation keeps some of the reflected points (normally ones from static objects) "visible" for a number of frames after they were originally received. It makes point clouds much denser and features of objects much clearer - similar to long exposure of dark scenes in photography. Usually, accumulation requires at least 2 types of inputs: point clouds and localization (both odometry and GNSS are supported). In case of static ego or single frame multi-radar fusion, accumulation can be used without odometry/localization inputs. When Provizio radar odometry is used it effectively turns into a SLAM (Simultaneous Localization and Mapping) solution, but external localization/odometry source is also supported.
+Accumulation is also used for fusion of point clouds from multiple radars in a vehicle. In this case the sensors' extrinsics calibration data is required.
 
 ### Example of Point Clouds Accumulation
 
@@ -656,7 +781,7 @@ Accumulation is also used for fusion of point clouds from multiple radars in a v
 import provizio_dds
 
 max_accumulate_frames_per_radar = 30
-# By default, relies on rt/provizio_radar_odometry as a localization data source and rt/provizio_extrinsics as sensors extrinsics data source
+# By default, relies on rt/provizio_radar_odometry as a localization data source and rt/provizio_extrinsics as the sensors' extrinsics data source
 points_accumulator = provizio_dds.accumulation.DDSPointCloudsAccumulator(max_accumulate_frames_per_radar)
 
 # Then some time later, when data was received
@@ -668,7 +793,63 @@ for point in points_accumulator.get_points_ego_relative():
     print(f"x = {point.position[0]}, y = {point.position[1]}, z = {point.position[2]}, ground_relative_velocity = {point.ground_relative_velocity}, snr = {point.snr}")
 ```
 
+Instead of polling, an `on_point_cloud` callback can be invoked on receiving and accumulating every radar point cloud. It's fired outside the accumulator's internal lock, so `get_points_local_frame_relative` / `get_points_ego_relative` may be called right from the callback:
+
+```Python
+def on_point_cloud(accumulator):
+    print(f"{len(accumulator.get_points_ego_relative())} points accumulated")
+
+points_accumulator = provizio_dds.accumulation.DDSPointCloudsAccumulator(
+    max_accumulate_frames_per_radar, on_point_cloud=on_point_cloud
+)
+```
+
 For more details see [python/accumulation.py](python/accumulation.py) and [test/python/accumulation_test.py](test/python/accumulation_test.py).
+
+### C++ Example
+
+```C++
+#include <provizio/dds/accumulation.h>
+
+const std::size_t max_accumulate_frames_per_radar = 30;
+// By default, relies on rt/provizio_radar_odometry as a localization data source and rt/provizio_extrinsics as the sensors' extrinsics data source
+provizio::dds::accumulation::dds_point_clouds_accumulator points_accumulator{max_accumulate_frames_per_radar};
+
+// Then some time later, when data was received
+std::cout << "Accumulated, relative to the local frame:" << std::endl;
+for (const auto &point : points_accumulator.get_points_local_frame_relative())
+{
+    std::cout << "x = " << point.position[0] << ", y = " << point.position[1] << ", z = " << point.position[2]
+              << ", ground_relative_radial_velocity = " << point.ground_relative_radial_velocity
+              << ", signal_to_noise_ratio = " << point.signal_to_noise_ratio << std::endl;
+}
+std::cout << "Accumulated, relative to the current ego position:" << std::endl;
+for (const auto &point : points_accumulator.get_points_ego_relative())
+{
+    std::cout << "x = " << point.position[0] << ", y = " << point.position[1] << ", z = " << point.position[2]
+              << ", ground_relative_radial_velocity = " << point.ground_relative_radial_velocity
+              << ", signal_to_noise_ratio = " << point.signal_to_noise_ratio << std::endl;
+}
+```
+
+Instead of polling, an `on_point_cloud` callback can be invoked on receiving and accumulating every radar point cloud. It's fired outside the accumulator's internal lock, so the `get_points_*` getters may be called right from the callback. It runs on a DDS thread though: never block in it, and never create or destroy DDS endpoints (publishers, subscribers, participants) from it:
+
+```C++
+provizio::dds::accumulation::dds_accumulation_options options;
+options.on_point_cloud = [](provizio::dds::accumulation::dds_point_clouds_accumulator &accumulator) {
+    std::cout << accumulator.get_points_ego_relative().size() << " points accumulated" << std::endl;
+};
+provizio::dds::accumulation::dds_point_clouds_accumulator points_accumulator{max_accumulate_frames_per_radar,
+                                                                             options};
+```
+
+The C++ accumulation maths uses [Eigen](https://eigen.tuxfamily.org/) when YOUR compiler can see it (auto-detected via `__has_include(<Eigen/Dense>)` at the point your code compiles the accumulation headers — e.g. `find_package(Eigen3)` + linking `Eigen3::Eigen` in your CMake; `install_dependencies.sh` installs it). Without Eigen it falls back to less efficient plain-CPU processing (provizio_dds's CMake warns about it at configure time). Define `PROVIZIO_DDS_DISABLE_EIGEN` (or configure provizio_dds with `DISABLE_EIGEN=ON`) to force the fallback deliberately. Prebuilt provizio_dds binaries are identical either way — the maths-path choice is made when YOUR code compiles, never baked into the library.
+
+#### Localization frame and extrinsics
+
+The localization source has its own extrinsics (sensor → ego frame), read by default from the same `rt/provizio_extrinsics` topic as the radars. For **odometry** the localization frame defaults to `provizio_radar_front_center`: radar-based odometry is published in the front-center radar's frame, so it shares that radar's calibration — the same `rt/provizio_extrinsics` transform is applied to both the odometry and that radar's point clouds. The localization extrinsics is **assumed identity until that frame's transform is received**; when it arrives (or later changes) any already-accumulated frames are **retroactively re-placed**, so none are lost. For **GNSS** (`NavSatFix`) the localization frame is instead learned from the first fix and, having no radar extrinsics, stays ego-relative (identity). When multiple localization sources share the topic, only the one whose `child_frame_id` (odometry) / `header.frame_id` (GNSS) matches `localization_frame_id` is used — the rest are dropped. Set `localization_frame_id` / `localization_extrinsics_topic` to override these defaults.
+
+For more details see [include/provizio/dds/accumulation.h](include/provizio/dds/accumulation.h) and [test/accumulation/accumulation_test.cpp](test/accumulation/accumulation_test.cpp).
 
 ## XML Profiles
 

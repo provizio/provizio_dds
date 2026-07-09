@@ -132,6 +132,23 @@ namespace provizio::dds::detail
         PROVIZIO_DDS_API void inject_kernel_event_for_test();
 
         /**
+         * @brief Inject a synthetic transient flap from a test: drive the reset
+         * decision as if a coalesced burst had STARTED with
+         * @p simulated_burst_start and ended at the current real snapshot. Lets
+         * a test exercise the transient path (a DDS-relevant address that left
+         * and returned within the debounce window, netting to an unchanged
+         * end-snapshot) without manipulating the host's interfaces.
+         *
+         * The reset is performed on the coalescer thread (not inline), so it is
+         * asynchronous: call @c wait_for_idle() afterwards to await completion.
+         *
+         * Out-of-line / @c PROVIZIO_DDS_API'd for the same reason as
+         * @c inject_kernel_event_for_test (the body calls private members the
+         * class does not export wholesale).
+         */
+        PROVIZIO_DDS_API void inject_transient_for_test(const address_snapshot &simulated_burst_start);
+
+        /**
          * @brief Number of resets the coordinator has run so far. Counts only
          * the "snapshot changed → participant rebuild" outcomes (see
          * @c skipped_reset_count_for_test for "snapshot unchanged → no rebuild").
@@ -161,7 +178,7 @@ namespace provizio::dds::detail
 
         void on_kernel_event();
         void coalescer_loop();
-        void run_reset();
+        void run_reset(const address_snapshot &burst_start, bool had_burst_start);
 
         // Lazily constructed when the first recovery-enabled participant registers.
         // The monitor's constructor opens the kernel channel and starts its worker;
@@ -183,6 +200,17 @@ namespace provizio::dds::detail
         std::thread coalescer_thread;
 
         address_snapshot last_known_snapshot;
+
+        // Snapshot captured at the FIRST event of the current coalescing burst,
+        // before a quick flap can revert. A burst whose post-debounce end-snapshot
+        // equals last_known_snapshot but whose start-snapshot differs means a
+        // DDS-relevant address left and returned inside the debounce window — the
+        // Fast-DDS sockets bound to it were torn down while it was gone, so a
+        // rebuild is still required even though the end-state "looks unchanged".
+        // Without this, such a transient is silently coalesced away (the bug this
+        // guards against). Both fields are guarded by coalescer_mutex.
+        address_snapshot burst_start_snapshot;
+        bool burst_start_valid{false};
 
         // Observability counters — always present (see test-hooks comment above
         // for why they are unconditional rather than #ifdef'd).
