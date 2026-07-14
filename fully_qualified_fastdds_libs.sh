@@ -33,9 +33,15 @@ if [[ "${REVERT}" == "revert" ]]; then
     for file in "${LIB_DIR_TO_PATCH}"/libfast*.so.*.*.*; do
         if [[ ! -L "${file}" ]]; then
             file_basename="$(basename "${file}")"
-            ln -fs "${file_basename}" "${LIB_DIR_TO_PATCH}/${file_basename%.*}" #.so.x.y
-            ln -fs "${file_basename}" "${LIB_DIR_TO_PATCH}/${file_basename%.*.*}" #.so.x
-            ln -fs "${file_basename}" "${LIB_DIR_TO_PATCH}/${file_basename%.*.*.*}" #.so
+            # Create the whole chain of softlinks down to the unversioned .so,
+            # whatever the number of version components: Fast-DDS 2 libs use
+            # 3 (e.g. libfastrtps.so.2.10.1) while Fast-DDS 3 libs use 4
+            # (e.g. libfastdds.so.3.6.2.0)
+            link_name="${file_basename}"
+            while [[ "${link_name}" == *.so.* ]]; do
+                link_name="${link_name%.*}"
+                ln -fs "${file_basename}" "${LIB_DIR_TO_PATCH}/${link_name}"
+            done
             echo "Softlinks added for ${file_basename}"
         fi
     done
