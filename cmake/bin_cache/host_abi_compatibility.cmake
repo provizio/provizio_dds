@@ -100,7 +100,8 @@ function(_provizio_dds_host_libstdcxx_versions _path_var _glibcxx_var _cxxabi_va
     set(${_cxxabi_var} "" PARENT_SCOPE)
 
     set(_candidates "")
-    set(_lowest_path "")
+    set(_lowest_glibcxx_path "")
+    set(_lowest_cxxabi_path "")
     set(_lowest_glibcxx "")
     set(_lowest_cxxabi "")
 
@@ -173,19 +174,29 @@ function(_provizio_dds_host_libstdcxx_versions _path_var _glibcxx_var _cxxabi_va
 
         # Take the minimum of each field independently: a candidate can have a higher GLIBCXX
         # but a lower CXXABI than another, and using only the GLIBCXX-lowest candidate's CXXABI
-        # would then overstate what the host guarantees. The reported path follows the
-        # GLIBCXX-lowest candidate, purely so the rejection message names a real file.
+        # would then overstate what the host guarantees. Each minimum remembers the file it came
+        # from so the rejection message can never attribute a version to a library that does not
+        # actually provide it.
         if(NOT _lowest_glibcxx OR _candidate_glibcxx VERSION_LESS "${_lowest_glibcxx}")
             set(_lowest_glibcxx "${_candidate_glibcxx}")
-            set(_lowest_path "${_candidate}")
+            set(_lowest_glibcxx_path "${_candidate}")
         endif(NOT _lowest_glibcxx OR _candidate_glibcxx VERSION_LESS "${_lowest_glibcxx}")
         if(NOT _lowest_cxxabi OR _candidate_cxxabi VERSION_LESS "${_lowest_cxxabi}")
             set(_lowest_cxxabi "${_candidate_cxxabi}")
+            set(_lowest_cxxabi_path "${_candidate}")
         endif(NOT _lowest_cxxabi OR _candidate_cxxabi VERSION_LESS "${_lowest_cxxabi}")
     endforeach(_candidate IN LISTS _resolved_candidates)
 
     if(_lowest_glibcxx)
-        set(${_path_var} "${_lowest_path}" PARENT_SCOPE)
+        # Usually both minima come from the same library and it is named once. When they do not (a
+        # hand-installed or Conda toolchain sitting alongside the system one), name both: the
+        # consumer of this output pairs it with "GLIBCXX_<x> / CXXABI_<y>", so listing the two
+        # paths in the same order keeps every version attributed to the file that provides it.
+        if(_lowest_glibcxx_path STREQUAL "${_lowest_cxxabi_path}")
+            set(${_path_var} "${_lowest_glibcxx_path}" PARENT_SCOPE)
+        else(_lowest_glibcxx_path STREQUAL "${_lowest_cxxabi_path}")
+            set(${_path_var} "${_lowest_glibcxx_path} / ${_lowest_cxxabi_path}" PARENT_SCOPE)
+        endif(_lowest_glibcxx_path STREQUAL "${_lowest_cxxabi_path}")
         set(${_glibcxx_var} "${_lowest_glibcxx}" PARENT_SCOPE)
         set(${_cxxabi_var} "${_lowest_cxxabi}" PARENT_SCOPE)
     endif(_lowest_glibcxx)
