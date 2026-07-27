@@ -168,22 +168,94 @@ else
         collect_all_libs "${TARGET_PATH}/python/provizio_dds_python_types"
     fi
 
-    # Store the build machine's kernel version in the cache
+    # Store the build machine's kernel version in the cache, as build provenance (it says nothing
+    # about which hosts the binaries can run on — abi_requirements below is what decides that)
     uname -r > "${TARGET_PATH}/kernel_version"
+
+    # Store the ABI level the binaries require of a host, so consumers can tell whether they can
+    # use them without needing binutils of their own (see the bin cache section of ../../CMakeLists.txt
+    # and ../../cmake/bin_cache/host_abi_compatibility.cmake).
+    #
+    # The requirement is the highest versioned-symbol tag ("Version needs", i.e. references such as
+    # pthread_kill@GLIBC_2.34, NOT the versions the libraries define themselves) across every ELF
+    # object built here - the general and the Python payloads alike, so both zips can carry the same
+    # numbers (they are built by one toolchain on one machine, so they don't differ in practice).
+    # The bundled libstdc++ / libgcc_s are included in the scan on purpose: they aren't installed by
+    # default (DONT_INSTALL_STDCPP_LIBS), but they are the ones loaded when the cache is consumed
+    # straight from a build tree, so their own glibc requirement is just as real as that of the
+    # Provizio libraries.
+    abi_version_needs() {
+        local root="$1"
+        local binary
+
+        while IFS= read -r binary; do
+            # "|| true": readelf exits non-zero on a non-ELF file (e.g. a GNU ld linker
+            # script named *.so), and under set -e + pipefail that would abort the whole
+            # cache build with the diagnostic suppressed by 2>/dev/null. Skipping the file
+            # is safe — the empty-result checks below are the real gate.
+            readelf --version-info "${binary}" 2>/dev/null | awk '
+                /Version needs section/ { needs = 1; next }
+                /Version (symbols|definition) section/ { needs = 0 }
+                needs && match($0, /Name: [A-Za-z_]+_[0-9.]+/) { print substr($0, RSTART + 6, RLENGTH - 6) }' ||
+                true
+        done < <(find "${root}" -type f \( -name "*.so" -o -name "*.so.*" \))
+    }
+
+    highest_abi_version() {
+        local tag="$1"
+        local needs_file="$2"
+
+        grep -E "^${tag}_[0-9]" "${needs_file}" | sed "s/^${tag}_//" | sort -V | tail -n 1
+    }
+
+    if ! command -v readelf > /dev/null; then
+        echo "readelf (binutils) is required to record the ABI requirements of the bin cache!"
+        exit 1
+    fi
+
+    ABI_VERSION_NEEDS_FILE="$(mktemp)"
+    abi_version_needs "${TARGET_PATH}" > "${ABI_VERSION_NEEDS_FILE}"
+    REQUIRED_GLIBC="$(highest_abi_version GLIBC "${ABI_VERSION_NEEDS_FILE}" || true)"
+    REQUIRED_GLIBCXX="$(highest_abi_version GLIBCXX "${ABI_VERSION_NEEDS_FILE}" || true)"
+    REQUIRED_CXXABI="$(highest_abi_version CXXABI "${ABI_VERSION_NEEDS_FILE}" || true)"
+    rm -f "${ABI_VERSION_NEEDS_FILE}"
+
+    if [ -z "${REQUIRED_GLIBC}" ]; then
+        # Every shipped binary references glibc, so an empty result means the scan itself failed
+        echo "Failed to determine the glibc version required by the binaries in ${TARGET_PATH}!"
+        exit 1
+    fi
+    if [ -z "${REQUIRED_GLIBCXX}" ] || [ -z "${REQUIRED_CXXABI}" ]; then
+        # The C++ payload always references GLIBCXX_/CXXABI_ versioned symbols, so an empty
+        # result likewise means the scan failed. Recording an empty value would silently
+        # disable the consumer-side libstdc++ gate: the cache would be accepted on a host
+        # whose libstdc++ is too old and fail at load time instead of at configure time.
+        echo "Failed to determine the libstdc++ (GLIBCXX/CXXABI) versions required by the binaries in ${TARGET_PATH}!"
+        exit 1
+    fi
+
+    {
+        echo "# Highest versioned-symbol levels the binaries in this cache require of a host."
+        echo "glibc=${REQUIRED_GLIBC}"
+        echo "glibcxx=${REQUIRED_GLIBCXX}"
+        echo "cxxabi=${REQUIRED_CXXABI}"
+    } > "${TARGET_PATH}/abi_requirements"
+    echo "Bin cache ABI requirements: glibc ${REQUIRED_GLIBC}, GLIBCXX_${REQUIRED_GLIBCXX}, CXXABI_${REQUIRED_CXXABI}"
 
     cd "${BIN_CACHE_PATH}"
 
     if [ "${PYTHON}" == "ON" ]; then
-        # Create python-versioned cache zip (python/ + kernel_version only)
+        # Create python-versioned cache zip (python/ + metadata only)
         PYTHON_CACHE_DIR="${BIN_CACHE_PATH}/${PYTHON_CACHE_CONFIG_NAME}"
         mkdir -p "${PYTHON_CACHE_DIR}"
         mv "${TARGET_PATH}/python" "${PYTHON_CACHE_DIR}/python"
         cp "${TARGET_PATH}/kernel_version" "${PYTHON_CACHE_DIR}/kernel_version"
+        cp "${TARGET_PATH}/abi_requirements" "${PYTHON_CACHE_DIR}/abi_requirements"
         zip -r -y "${PYTHON_CACHE_CONFIG_NAME}.zip" "${PYTHON_CACHE_CONFIG_NAME}"
         rm -rf "${PYTHON_CACHE_DIR}"
     fi
 
-    # Create general cache zip (include/, lib/, kernel_version — no python/)
+    # Create general cache zip (include/, lib/, metadata — no python/)
     # Skip if it already exists (e.g., when only rebuilding for a new Python version)
     if [ ! -f "${BIN_CACHE_CONFIG_NAME}.zip" ]; then
         zip -r -y "${BIN_CACHE_CONFIG_NAME}.zip" "${BIN_CACHE_CONFIG_NAME}"

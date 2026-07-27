@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from setuptools import setup
+import ctypes
 import os
 import os.path
 import re
@@ -28,27 +29,142 @@ class CMakeBuildError(Exception):
     pass
 
 
-def extract_version(version):
-    """Extracts the version number (x.y.z) from a version string."""
-    match = re.search(r"^(\d+\.\d+\.\d+)", version)
-    if match:
-        return list(map(int, match.group(1).split(".")))
-    else:
-        raise ValueError("Invalid version format")
+def version_tuple(version):
+    """Turns a dotted numeric version into a tuple of ints for comparison."""
+    match = re.search(r"(\d+(?:\.\d+)*)", version)
+    if not match:
+        raise ValueError(f"Invalid version format: {version}")
+    return tuple(int(part) for part in match.group(1).split("."))
 
 
-def compare_versions(version1, version2):
-    """Compares two versions based on the numerical part (x.y.z)."""
-    v1 = extract_version(version1)
-    v2 = extract_version(version2)
+def cache_abi_requirements(cache_dir):
+    """Reads the ABI levels the prebuilt binaries of a cache require of the host.
 
-    for v1_part, v2_part in zip(v1, v2):
-        if v1_part < v2_part:
-            return -1  # version1 is older
-        elif v1_part > v2_part:
-            return 1  # version1 is newer
+    Returns a {"glibc": ..., "glibcxx": ..., "cxxabi": ...} dict of version strings (missing keys
+    for requirements the cache doesn't declare), or None if the cache doesn't record them at all -
+    in which case its compatibility with this host can't be established.
+    See cmake/bin_cache/host_abi_compatibility.cmake for what these mean and why they, rather than
+    the kernel version of the machine that built the cache, are what decides usability.
+    """
+    requirements_file = os.path.join(cache_dir, "abi_requirements")
+    if not os.path.isfile(requirements_file):
+        return None
 
-    return 0  # versions are equal
+    requirements = {}
+    with open(requirements_file, "r", encoding="utf-8") as file:
+        for line in file:
+            match = re.match(r"^(glibc|glibcxx|cxxabi)=(\d+(?:\.\d+)*)\s*$", line)
+            if match:
+                requirements[match.group(1)] = match.group(2)
+
+    return requirements if "glibc" in requirements else None
+
+
+def host_glibc_version():
+    """Returns the host's glibc version, or None when there is no glibc / it can't be determined."""
+    try:
+        # Only glibc answers this configuration key
+        confstr = os.confstr("CS_GNU_LIBC_VERSION")
+    except (AttributeError, ValueError, OSError):
+        confstr = None
+    if confstr:
+        match = re.search(r"glibc (\d+\.\d+(?:\.\d+)?)", confstr)
+        if match:
+            return match.group(1)
+
+    # Aliased, as the module-level `from sys import platform` already took the plain name
+    import platform as platform_module
+
+    name, version = platform_module.libc_ver()
+    return version if name == "glibc" and version else None
+
+
+def host_libstdcxx_versions():
+    """Returns (path, highest GLIBCXX_, highest CXXABI_) of the libstdc++ this interpreter loads.
+
+    (None, None, None) when it can't be located or read. Loading it the same way the prebuilt
+    extension modules will is the point: whichever libstdc++ ends up in this process (a system one,
+    or one from a Conda / virtualenv prefix taking precedence) is the one that has to satisfy them.
+    """
+    try:
+        ctypes.CDLL("libstdc++.so.6")
+    except OSError:
+        return None, None, None
+
+    library_path = None
+    try:
+        with open("/proc/self/maps", "r", encoding="utf-8") as maps:
+            for line in maps:
+                match = re.search(r"(/\S*/libstdc\+\+\.so\.6[^\s]*)$", line.rstrip())
+                if match:
+                    library_path = match.group(1)
+                    break
+    except OSError:
+        return None, None, None
+
+    if not library_path or not os.path.isfile(library_path):
+        return None, None, None
+
+    # Symbol version names live in .dynstr as plain ASCII, and libstdc++ requires no GLIBCXX_ /
+    # CXXABI_ version of anything else, so every such string in it is one it provides
+    try:
+        with open(library_path, "rb") as library:
+            contents = library.read()
+    except OSError:
+        return None, None, None
+
+    def highest(tag):
+        versions = re.findall((tag + r"_(\d+(?:\.\d+)+)\x00").encode(), contents)
+        if not versions:
+            return None
+        return max((version.decode() for version in versions), key=version_tuple)
+
+    glibcxx = highest("GLIBCXX")
+    cxxabi = highest("CXXABI")
+    if not glibcxx or not cxxabi:
+        return None, None, None
+
+    return library_path, glibcxx, cxxabi
+
+
+def bin_cache_incompatibility(cache_dir):
+    """Returns None if this host can use the prebuilt binaries of a cache, or why it can't."""
+    requirements = cache_abi_requirements(cache_dir)
+    if requirements is None:
+        return "they don't record the ABI level they require, so their compatibility with this host can't be established"
+
+    required_glibc = requirements["glibc"]
+    glibc = host_glibc_version()
+    if not glibc:
+        return f"they require glibc {required_glibc} and this host's glibc version couldn't be determined"
+    if version_tuple(glibc) < version_tuple(required_glibc):
+        return f"they require glibc {required_glibc} or newer, while this host provides glibc {glibc}"
+
+    required_glibcxx = requirements.get("glibcxx")
+    required_cxxabi = requirements.get("cxxabi")
+    if not required_glibcxx and not required_cxxabi:
+        # A C++ cache always requires versioned GLIBCXX_/CXXABI_ symbols, and the cache
+        # builder hard-fails rather than record empty values — so a requirements file
+        # declaring neither can only be a failed scan or a hand-edited file. Accepting it
+        # would silently skip the libstdc++ gate below and fail at load time instead.
+        return (
+            "they declare no libstdc++ (GLIBCXX/CXXABI) requirement, "
+            "so their compatibility with this host can't be established"
+        )
+
+    libstdcxx, glibcxx, cxxabi = host_libstdcxx_versions()
+    required = f"GLIBCXX_{required_glibcxx} / CXXABI_{required_cxxabi}"
+    if not libstdcxx:
+        return f"they require libstdc++ providing {required} and this host's libstdc++ couldn't be located"
+    if (required_glibcxx and version_tuple(glibcxx) < version_tuple(required_glibcxx)) or (
+        required_cxxabi and version_tuple(cxxabi) < version_tuple(required_cxxabi)
+    ):
+        return (
+            f"they require libstdc++ providing {required}, while this host's {libstdcxx} "
+            f"provides GLIBCXX_{glibcxx} / CXXABI_{cxxabi}"
+        )
+
+    return None
 
 # Build the CMake project and copy its artifacts to the destination directory
 source_dir = os.path.dirname(os.path.realpath(__file__))
@@ -82,11 +198,9 @@ else:
             if subprocess.call(["unzip", "-q", python_cache_zip, "-d", build_dir]) != 0:
                 raise Exception("Failed to extract Python bin cache!")
 
-            with open(f"{build_dir}/{python_cache_config_name}/kernel_version", "r") as kernel_version_file:
-                cache_kernel_version = kernel_version_file.read().strip()
-            host_kernel_version = subprocess.check_output(["uname", "-r"], text=True).strip()
+            incompatibility = bin_cache_incompatibility(f"{build_dir}/{python_cache_config_name}")
 
-            if compare_versions(host_kernel_version, cache_kernel_version) >= 0:
+            if incompatibility is None:
                 extracted_python = os.path.join(build_dir, python_cache_config_name, "python")
                 if os.path.isdir(target_dir):
                     shutil.rmtree(target_dir)
@@ -97,7 +211,7 @@ else:
                 print(f"Bin cache located and will be used: {python_cache_config_name}")
                 needs_building = False
             else:
-                print(f"Bin cache located but built using newer Linux kernel")
+                print(f"Bin cache located, but won't be used as {incompatibility}")
                 shutil.rmtree(f"{build_dir}/{python_cache_config_name}")
                 needs_building = True
 
