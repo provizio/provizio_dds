@@ -113,7 +113,7 @@ Dependencies are auto-downloaded and built by CMake when not found:
 - **foonathan_memory_vendor** (built in a subprocess during configure)
 - **provizio_dds_idls** (FetchContent)
 
-A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. It is bypassed when `ENABLE_TESTS=ON`, `STATIC_ANALYSIS=ON`, or `IGNORE_BIN_CACHE=ON`.
+A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. It is bypassed when `ENABLE_TESTS=ON`, `STATIC_ANALYSIS=ON`, or `IGNORE_BIN_CACHE=ON`. On Linux a cache is only used when the host provides the glibc / libstdc++ ABI level its binaries require, which each cache records in its `abi_requirements` file — see `cmake/bin_cache/host_abi_compatibility.cmake`.
 
 ### CMake Options Reference
 
