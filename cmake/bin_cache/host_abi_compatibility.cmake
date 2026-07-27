@@ -59,23 +59,23 @@ function(_provizio_dds_host_glibc_version _out_var)
 
     # getconf reports the version of the glibc it is running against, and the GNU_LIBC_VERSION key
     # exists nowhere else, so a successful answer is unambiguous
-    find_program(GETCONF_EXECUTABLE NAMES getconf)
-    if(GETCONF_EXECUTABLE)
-        execute_process(COMMAND "${GETCONF_EXECUTABLE}" GNU_LIBC_VERSION
+    find_program(PROVIZIO_DDS_GETCONF_EXECUTABLE NAMES getconf)
+    if(PROVIZIO_DDS_GETCONF_EXECUTABLE)
+        execute_process(COMMAND "${PROVIZIO_DDS_GETCONF_EXECUTABLE}" GNU_LIBC_VERSION
             OUTPUT_VARIABLE _getconf_output RESULT_VARIABLE _getconf_result
             ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
         if(_getconf_result EQUAL 0 AND _getconf_output MATCHES "glibc ([0-9]+\\.[0-9]+(\\.[0-9]+)?)")
             set(${_out_var} "${CMAKE_MATCH_1}" PARENT_SCOPE)
             return()
         endif(_getconf_result EQUAL 0 AND _getconf_output MATCHES "glibc ([0-9]+\\.[0-9]+(\\.[0-9]+)?)")
-    endif(GETCONF_EXECUTABLE)
+    endif(PROVIZIO_DDS_GETCONF_EXECUTABLE)
 
     # Fall back to ldd, whose first line ends in the glibc version ("ldd (Ubuntu GLIBC
     # 2.35-0ubuntu3) 2.35"). Other implementations (musl) also have an ldd, so only trust the
     # output if it names glibc.
-    find_program(LDD_EXECUTABLE NAMES ldd)
-    if(LDD_EXECUTABLE)
-        execute_process(COMMAND "${LDD_EXECUTABLE}" --version
+    find_program(PROVIZIO_DDS_LDD_EXECUTABLE NAMES ldd)
+    if(PROVIZIO_DDS_LDD_EXECUTABLE)
+        execute_process(COMMAND "${PROVIZIO_DDS_LDD_EXECUTABLE}" --version
             OUTPUT_VARIABLE _ldd_output RESULT_VARIABLE _ldd_result ERROR_QUIET)
         string(REGEX REPLACE "\n.*" "" _ldd_first_line "${_ldd_output}")
         string(TOUPPER "${_ldd_first_line}" _ldd_first_line_upper)
@@ -84,7 +84,7 @@ function(_provizio_dds_host_glibc_version _out_var)
            AND _ldd_first_line MATCHES "([0-9]+\\.[0-9]+(\\.[0-9]+)?)[ \t]*$")
             set(${_out_var} "${CMAKE_MATCH_1}" PARENT_SCOPE)
         endif()
-    endif(LDD_EXECUTABLE)
+    endif(PROVIZIO_DDS_LDD_EXECUTABLE)
 endfunction()
 
 # Sets _path_var to the host's libstdc++.so.6 and _glibcxx_var / _cxxabi_var to the highest
@@ -171,11 +171,17 @@ function(_provizio_dds_host_libstdcxx_versions _path_var _glibcxx_var _cxxabi_va
             continue()
         endif(NOT _candidate_glibcxx OR NOT _candidate_cxxabi)
 
+        # Take the minimum of each field independently: a candidate can have a higher GLIBCXX
+        # but a lower CXXABI than another, and using only the GLIBCXX-lowest candidate's CXXABI
+        # would then overstate what the host guarantees. The reported path follows the
+        # GLIBCXX-lowest candidate, purely so the rejection message names a real file.
         if(NOT _lowest_glibcxx OR _candidate_glibcxx VERSION_LESS "${_lowest_glibcxx}")
             set(_lowest_glibcxx "${_candidate_glibcxx}")
-            set(_lowest_cxxabi "${_candidate_cxxabi}")
             set(_lowest_path "${_candidate}")
         endif(NOT _lowest_glibcxx OR _candidate_glibcxx VERSION_LESS "${_lowest_glibcxx}")
+        if(NOT _lowest_cxxabi OR _candidate_cxxabi VERSION_LESS "${_lowest_cxxabi}")
+            set(_lowest_cxxabi "${_candidate_cxxabi}")
+        endif(NOT _lowest_cxxabi OR _candidate_cxxabi VERSION_LESS "${_lowest_cxxabi}")
     endforeach(_candidate IN LISTS _resolved_candidates)
 
     if(_lowest_glibcxx)

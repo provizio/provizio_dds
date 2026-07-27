@@ -1101,6 +1101,14 @@ def make_domain_participant(domain_id: int = 0,
             # process, cached).
             self._recovery_enabled = _network_recovery.resolve_network_recovery_enabled(recovery_mode)
 
+            # Set by _reset_hook_locked when a reset left this participant unusable —
+            # its Fast-DDS participant could not be recreated, or an endpoint failed to
+            # rebuild. The coordinator polls it after every reset and retries the
+            # affected participants on its periodic safety-net tick, because nothing in
+            # the event-driven path would ever come back to them otherwise. Mirrors the
+            # C++ domain_participant::needs_network_recovery_retry().
+            self._recovery_retry_needed = False
+
             def _remove_ref(r):
                 with _live_participants_lock:
                     try:
@@ -1620,10 +1628,14 @@ def make_domain_participant(domain_id: int = 0,
                     _network_recovery._emit_log(
                         _network_recovery.LogLevel.ERROR,
                         f"failed to recreate participant on domain {self._domain_id}; "
-                        f"endpoints left in torn-down state",
+                        f"endpoints left in torn-down state, will be retried by the "
+                        f"network-recovery safety-net check",
                     )
                     # Bump generation anyway so any racing teardown observes the mismatch.
                     self._generation += 1
+                    # Flag for the coordinator: this participant is inert until a later
+                    # attempt succeeds, and no further network event is guaranteed.
+                    self._recovery_retry_needed = True
                     return
 
                 self._generation += 1
@@ -1634,14 +1646,23 @@ def make_domain_participant(domain_id: int = 0,
                         self._participant.register_type(type_support)
 
                 # Phase 5: rebuild each endpoint.
+                any_endpoint_failed = False
                 for (_, endpoint) in live:
                     try:
                         endpoint._rebuild_state_after_reset(self._participant)
                     except Exception as ex:
+                        any_endpoint_failed = True
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"endpoint rebuild failed during reset: {ex}",
+                            f"endpoint rebuild failed during reset: {ex}; this endpoint stays "
+                            f"inactive until the network-recovery safety-net check retries the reset",
                         )
+
+                # The participant itself is healthy either way; an endpoint that failed
+                # to come back still needs another attempt, which the coordinator's
+                # safety-net tick will make (a later network event alone cannot be
+                # relied on). See _NetworkRecoveryCoordinator._on_safety_net_tick.
+                self._recovery_retry_needed = any_endpoint_failed
 
     participant = _DomainParticipant(domain_id, initial_discovery_callback,
                                      initial_discovery_kinds, transport)

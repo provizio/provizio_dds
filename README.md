@@ -314,7 +314,14 @@ For details see [include/provizio/dds/domain_participant.h](include/provizio/dds
 
 DDS participants bind their UDP transports to the set of network interfaces present at participant-creation time. If the host's network changes afterwards — the primary interface comes up after the application started, a DHCP lease arrives, a USB Ethernet adapter is plugged in, the host roams to a new network — Fast-DDS does not refresh those bindings, and affected participants stop discovering off-host peers until recreated.
 
-provizio_dds handles this transparently. A process-wide background monitor watches the OS for interface-address changes (netlink on Linux, PF_ROUTE on macOS, `NotifyUnicastIpAddressChange` on Windows), coalesces bursts of events (3 s of quiescence or up to 60 s of debounce), snapshot-diffs to filter out irrelevant churn (Docker / veth bridges, virtual / tunnel interfaces, link-local IPv6), and on a confirmed change tears down and rebuilds the underlying Fast-DDS participant for every participant that opted in. Existing publisher and subscriber handles survive the rebuild — their internal Fast-DDS objects are swapped under the caller-held `shared_ptr` and the user-supplied callbacks are re-attached automatically.
+provizio_dds handles this transparently. A process-wide background monitor watches the OS for interface **address and link-state** changes (netlink `RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR | RTMGRP_LINK` on Linux, `PF_ROUTE` incl. `RTM_IFINFO` on macOS, `NotifyUnicastIpAddressChange` + `NotifyIpInterfaceChange` on Windows), coalesces bursts of events (3 s of quiescence or up to 60 s of debounce), snapshot-diffs to filter out irrelevant churn (Docker / veth bridges, virtual interfaces, link-local IPv6), and on a confirmed change tears down and rebuilds the underlying Fast-DDS participant for every participant that opted in. Existing publisher and subscriber handles survive the rebuild — their internal Fast-DDS objects are swapped under the caller-held `shared_ptr` and the user-supplied callbacks are re-attached automatically.
+
+An interface only counts as present while it is **operationally** up — carrier present, not merely administratively up (`IFF_RUNNING` on Linux/macOS, `OperStatus` on Windows). That deliberately matches how Fast-DDS itself enumerates interfaces, so the snapshot models exactly the set it will bind locators to. It is also why link-state events are subscribed to: powering on a network switch, or replugging a cable, moves an interface in and out of that set while often emitting no address event at all.
+
+Two further safety properties matter in the field:
+
+- **Periodic re-verification.** Whenever no event burst is pending, the monitor re-checks the interface set directly every 30 s (`PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC`, `0` disables). This is the backstop for what a kernel event channel cannot report: an event the kernel dropped under load (netlink `ENOBUFS`), a notification channel that failed unrecoverably (the same check reopens it), and a change that raced the monitor's own startup. Purely event-driven recovery has no way back from any of those — the process would stay unable to communicate for the rest of its life.
+- **Retry of failed rebuilds.** A rebuild that fails part-way (the OS refuses to create the replacement participant, or an endpoint cannot be re-created) leaves that participant inert. The same periodic check retries it — and only it — rather than waiting for a network change that may never come.
 
 Note: IPv6 RFC 4941 temporary / privacy addresses are not filtered by `IFA_F_*` flags today, so on Linux/macOS/Windows hosts with privacy addresses enabled (the default on desktop installs of Ubuntu/Fedora/Mint, macOS, and Windows) the periodic rotation produces a snapshot delta — typically not more than once per 24 h with default kernel settings. In practice this is negligible and doesn't require any changes; if you ever hit a host where it matters, disable `use_tempaddr` on the DDS-carrying interface or opt out per-process via `PROVIZIO_DDS_NETWORK_RECOVERY=off`.
 
@@ -353,7 +360,17 @@ participant = provizio_dds.make_domain_participant(
     0, provizio_dds.NetworkRecoveryMode.OFF)
 ```
 
-The Python implementation uses polling rather than kernel notifications (Python's stdlib has no portable kernel-event subscription API, and recovery is already debounced over a multi-second quiet period — the latency cost of polling is well within the design budget). It applies the same set of loopback / link-local / per-OS adapter-name exclusions as the C++ side, AND on Linux the same `IFLA_INFO_KIND` exclusions (bridge / veth / dummy / vxlan / macvlan / ipvlan / ip6tnl / tun) via a small `RTM_GETLINK` netlink dump on each snapshot. The polling cadence is configurable via `PROVIZIO_DDS_NETWORK_RECOVERY_POLL_INTERVAL_SEC`, default 3 s. See `python/network_recovery.py` for details.
+The Python implementation is event-driven on Linux (its own netlink subscription, same groups as the C++ side) and falls back to polling on macOS / Windows, or on Linux if the netlink socket cannot be opened — Python's stdlib has no portable kernel-event subscription API. Polling cannot observe a sub-interval transient (an address removed and re-added between two polls), which is the one blind spot the event-driven backend does not have. It applies the same operationally-up / loopback / link-local / per-OS adapter-name exclusions as the C++ side, AND on Linux the same `IFLA_INFO_KIND` exclusions (bridge / veth / dummy / vxlan / macvlan / ipvlan) via a small `RTM_GETLINK` netlink dump on each snapshot, plus the same periodic re-verification and failed-rebuild retry. The polling cadence is configurable via `PROVIZIO_DDS_NETWORK_RECOVERY_POLL_INTERVAL_SEC`, default 3 s. See `python/network_recovery.py` for details.
+
+### Interfaces the filters skip
+
+The exclusions above are heuristics aimed at container and virtualization churn, and they are applied to the *change-detection* snapshot only — Fast-DDS still binds to whatever the OS offers. Tunnel interfaces (`tun`, `ip6tnl`) are deliberately **not** excluded, since a VPN endpoint routinely carries real DDS traffic. Bridges are, because `docker0` and `virbr0` are bridges — so if the interface your DDS traffic actually uses *is* a bridge (`br0` on a vehicle PC, `br-lan` on a router-like unit), name it explicitly so changes on it trigger a recovery:
+
+```Bash
+PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES=br0,br-lan my_app
+```
+
+Comma-separated, whitespace around entries ignored. A named interface bypasses the name / kind / adapter-type exclusions but still has to be operationally up, non-loopback, and carrying a non-link-local address. On Windows, match either the adapter's friendly name or its GUID-style name.
 
 To disable auto-recovery process-wide, set the env var before launching:
 
@@ -362,6 +379,15 @@ PROVIZIO_DDS_NETWORK_RECOVERY=off my_app
 ```
 
 Recognised values (case-insensitive): `on` / `1` / `true` / `yes` to enable, `off` / `0` / `false` / `no` to disable. Unset or empty defaults to enabled. An unrecognised value is treated as enabled and logged as a warning.
+
+All auto-recovery environment variables, each read once per process:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `PROVIZIO_DDS_NETWORK_RECOVERY` | `on` | Enable / disable auto-recovery process-wide. |
+| `PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC` | `30` | Cadence of the periodic re-verification — and of everything that rides on it: notification-channel revival and the bounded failed-rebuild retry. `0` disables **all three**, leaving recovery purely event-driven. Values above one day are clamped. Read by C++ everywhere and by Python on its event-driven (Linux) backend. The Python **polling** backends (macOS, Windows, Linux without netlink) ignore it entirely — for a poller the poll *is* the periodic check, so `0` cannot disable the backstop there, and the failed-rebuild retry runs at `..._POLL_INTERVAL_SEC` cadence instead. |
+| `PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES` | *(empty)* | Comma-separated interfaces to include in change detection regardless of the name / kind exclusions. |
+| `PROVIZIO_DDS_NETWORK_RECOVERY_POLL_INTERVAL_SEC` | `3` | Python only: quiet period, and the polling cadence on the non-event-driven backends. |
 
 **Cost when not in use:** if no participant ever enables auto-recovery, the background monitor is never started — no threads, no kernel channels, no per-participant memory beyond a single boolean flag.
 

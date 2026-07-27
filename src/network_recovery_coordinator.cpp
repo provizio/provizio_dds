@@ -15,13 +15,123 @@
 #include "provizio/dds/detail/network_recovery_coordinator.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <exception>
+#include <string>
 
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/logging.h"
 
 namespace provizio::dds::detail
 {
+    namespace
+    {
+        // Consumed (and cleared) by the next create_fastdds_participant call — see
+        // fail_next_participant_creation_for_test. Wrapped in an accessor so the flag is
+        // a function-local static rather than a mutable global (which
+        // cppcoreguidelines-avoid-non-const-global-variables rightly rejects).
+        std::atomic<bool> &forced_participant_creation_failure()
+        {
+            static std::atomic<bool> flag{false};
+            return flag;
+        }
+
+        constexpr const char *safety_net_env_var_name = "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC";
+
+        // Upper bound on the safety-net period. Beyond roughly 9.2e9 seconds, converting
+        // the duration to the nanoseconds that condition_variable::wait_for works in
+        // overflows int64: libstdc++ then returns from wait_for IMMEDIATELY, every time,
+        // which turns the coalescer's "wait for the period, then tick" into an unbounded
+        // busy loop doing a getifaddrs plus a full RTM_GETLINK dump per iteration. A day
+        // is far past any sane cadence, so clamping there keeps the arithmetic safe and
+        // the failure mode impossible. Callers who want "never" have the documented 0.
+        constexpr std::chrono::seconds max_safety_net_period{24 * 60 * 60};
+
+        // Env values are echoed back in warnings; cap what we quote so a pathological
+        // value cannot flood the log, and drop control characters so it cannot forge log
+        // lines in whatever ingests them.
+        std::string sanitise_env_value_for_log(const std::string &raw)
+        {
+            // ASCII C0 controls are everything below the first printable character
+            // (space); DEL sits just past the printable range.
+            constexpr unsigned char first_printable_ascii = 0x20;
+            constexpr unsigned char ascii_delete = 0x7F;
+            constexpr std::size_t max_quoted_length = 32;
+
+            std::string result = raw.substr(0, std::min(raw.size(), max_quoted_length));
+            for (auto &chr : result)
+            {
+                const auto value = static_cast<unsigned char>(chr);
+                if (value < first_printable_ascii || value == ascii_delete)
+                {
+                    chr = '?';
+                }
+            }
+            if (raw.size() > max_quoted_length)
+            {
+                result += "...";
+            }
+            return result;
+        }
+
+        // Resolves the safety-net period from the environment. Any warning is reported
+        // through @p warning rather than logged here: the only caller holds
+        // registry_mutex, and a user log callback that re-enters make_domain_participant
+        // would deadlock on it (see register_participant).
+        std::chrono::seconds resolve_safety_net_period(std::string &warning)
+        {
+            const auto default_period = network_recovery_coordinator::default_safety_net_period;
+
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): startup-only probe, as elsewhere.
+            const auto *raw = std::getenv(safety_net_env_var_name);
+            if (raw == nullptr || *raw == '\0')
+            {
+                return default_period;
+            }
+
+            const std::string value{raw};
+            const auto quoted = sanitise_env_value_for_log(value);
+            const auto reject = [&](const char *reason) {
+                warning = std::string{safety_net_env_var_name} + "=" + quoted + " " + reason +
+                          "; using the default of " + std::to_string(default_period.count()) + "s";
+                return default_period;
+            };
+
+            std::size_t consumed = 0;
+            std::int64_t parsed = 0;
+            try
+            {
+                parsed = std::stoll(value, &consumed);
+            }
+            catch (const std::exception &)
+            {
+                return reject("is not an integer number of seconds");
+            }
+            // stoll stops at the first non-digit and reports success, so "30s" or "0x10"
+            // would otherwise be silently accepted as 30 and 0 — and 0 DISABLES the
+            // safety net, the opposite of what someone writing "0x10" intends.
+            if (consumed != value.size())
+            {
+                return reject("has trailing characters after the number of seconds");
+            }
+            if (parsed < 0)
+            {
+                return reject("is negative");
+            }
+            if (std::chrono::seconds{parsed} > max_safety_net_period)
+            {
+                warning = std::string{safety_net_env_var_name} + "=" + quoted + " exceeds the maximum of " +
+                          std::to_string(max_safety_net_period.count()) + "s; clamping to it (use 0 to disable the " +
+                          "periodic check entirely)";
+                return max_safety_net_period;
+            }
+            return std::chrono::seconds{parsed};
+        }
+    }  // namespace
+
     network_recovery_coordinator &network_recovery_coordinator::instance()
     {
         // Meyers' singleton — lazy, thread-safe (C++11+), destroyed at process exit.
@@ -63,6 +173,7 @@ namespace provizio::dds::detail
         bool initialised_monitor_now = false;
         std::size_t initial_snapshot_size = 0;
         std::string init_error;
+        std::string env_warning;
 
         {
             const std::lock_guard<std::mutex> lock{registry_mutex};
@@ -92,10 +203,19 @@ namespace provizio::dds::detail
             // first and the event fired in between, the snapshot would already
             // reflect the post-event state — the change would silently be lost
             // unless another future event fires.
-            if (!monitor)
+            const std::lock_guard<std::mutex> monitor_lock{monitor_mutex};
+            // The joinable() check is load-bearing, not belt-and-braces: after a monitor
+            // reopen failure in ensure_monitor_alive(), `monitor` is null while the
+            // coalescer thread is alive and JOINABLE — re-initialising here would then
+            // assign to a joinable std::thread (std::terminate) and race the plain writes
+            // to safety_net_period / last_known_snapshot against the live coalescer's
+            // reads. It would also be redundant: while the coalescer runs, every
+            // safety-net tick already retries reopening the kernel channel.
+            if (!monitor && !coalescer_thread.joinable())
             {
                 try
                 {
+                    safety_net_period = resolve_safety_net_period(env_warning);
                     monitor = std::make_unique<network_monitor>([this] { on_kernel_event(); });
                     last_known_snapshot = capture_address_snapshot();
                     coalescer_thread = std::thread{[this] { coalescer_loop(); }};
@@ -142,10 +262,37 @@ namespace provizio::dds::detail
         // callback that re-enters register_participant via
         // make_domain_participant would otherwise deadlock on the recursive
         // acquire above.
+        if (!env_warning.empty())
+        {
+            log_warning() << env_warning;
+        }
         if (initialised_monitor_now)
         {
-            log_info() << "network auto-recovery: enabled (initial snapshot: " << initial_snapshot_size
-                       << " interface address(es))";
+            auto log = log_info();
+            log << "network auto-recovery: enabled (initial snapshot: " << initial_snapshot_size
+                << " interface address(es)";
+            if (safety_net_period.count() > 0)
+            {
+                log << ", safety-net check every " << safety_net_period.count() << "s";
+            }
+            else
+            {
+                log << ", periodic safety-net check disabled";
+            }
+            // Reported from here, not from force_included_interfaces() itself: that runs
+            // inside capture_address_snapshot(), which the block above calls while
+            // holding registry_mutex and monitor_mutex, and logging under those invites a
+            // re-entrant user callback to deadlock (see address_snapshot_env.cpp).
+            const auto &force_included = force_included_interfaces();
+            if (!force_included.empty())
+            {
+                log << ", force-including " << force_included.size() << " interface(s):";
+                for (const auto &name : force_included)
+                {
+                    log << " " << name;
+                }
+            }
+            log << ")";
         }
         else if (!init_error.empty())
         {
@@ -198,6 +345,43 @@ namespace provizio::dds::detail
         coalescer_cv.notify_all();
     }
 
+    void fail_next_participant_creation_for_test() noexcept
+    {
+        forced_participant_creation_failure().store(true, std::memory_order_release);
+    }
+
+    bool consume_forced_participant_creation_failure() noexcept
+    {
+        return forced_participant_creation_failure().exchange(false, std::memory_order_acq_rel);
+    }
+
+    void network_recovery_coordinator::run_safety_net_tick_for_test()
+    {
+        // Out-of-line / exported for the same reason as the other test hooks: the body
+        // calls private members the class does not export wholesale.
+        safety_net_tick();
+    }
+
+    void network_recovery_coordinator::seed_last_known_snapshot_for_test(const address_snapshot &snapshot)
+    {
+        // No lock: last_known_snapshot is single-writer state owned by the coalescer
+        // thread, and this hook is documented as idle-only (the caller wait_for_idle()s
+        // first), so there is no concurrent access to guard against.
+        last_known_snapshot = snapshot;
+    }
+
+    bool network_recovery_coordinator::kill_monitor_for_test()
+    {
+        const std::lock_guard<std::mutex> lock{monitor_mutex};
+        return monitor && monitor->kill_for_test();
+    }
+
+    bool network_recovery_coordinator::monitor_alive_for_test()
+    {
+        const std::lock_guard<std::mutex> lock{monitor_mutex};
+        return monitor && monitor->is_alive();
+    }
+
     void network_recovery_coordinator::on_kernel_event()
     {
         const auto now = std::chrono::steady_clock::now();
@@ -238,11 +422,61 @@ namespace provizio::dds::detail
     void network_recovery_coordinator::coalescer_loop()
     {
         std::unique_lock<std::mutex> lock{coalescer_mutex};
+        // Absolute next-tick deadline, re-armed only when a tick actually runs. A
+        // relative wait_for would restart the full period on EVERY burst wake-up, and
+        // the kernel subscription is unfiltered (every veth/docker link event on the
+        // host raises a burst), so sustained interface churn could postpone the tick
+        // indefinitely — and with it the failed-rebuild retry, which runs only from
+        // ticks. An absolute deadline caps the gap between ticks at one period no
+        // matter how busy the event stream is.
+        auto next_tick = std::chrono::steady_clock::now() + safety_net_period;
         while (!stop_requested)
         {
             if (!has_pending_burst)
             {
-                coalescer_cv.wait(lock, [this] { return has_pending_burst || stop_requested; });
+                if (safety_net_period.count() <= 0)
+                {
+                    coalescer_cv.wait(lock, [this] { return has_pending_burst || stop_requested; });
+                    continue;
+                }
+
+                // wait_until returns the predicate's value, so false means "the tick
+                // deadline passed with still nothing to do" — time for a safety-net tick.
+                const bool woken_by_work =
+                    coalescer_cv.wait_until(lock, next_tick, [this] { return has_pending_burst || stop_requested; });
+                if (woken_by_work)
+                {
+                    continue;
+                }
+                next_tick = std::chrono::steady_clock::now() + safety_net_period;
+
+                // Hold reset_in_progress across the tick so wait_for_idle() cannot
+                // observe an idle coordinator while the tick is rebuilding participants.
+                reset_in_progress = true;
+                lock.unlock();
+                try
+                {
+                    safety_net_tick();
+                }
+                catch (const std::exception &exception)
+                {
+                    // The tick emits log lines, and a user log callback can throw; a
+                    // snapshot capture can throw bad_alloc. Letting either escape this
+                    // thread function would call std::terminate AND leave
+                    // reset_in_progress stuck true, hanging every wait_for_idle() for
+                    // the rest of the process' life. Swallow, report, tick again next
+                    // period.
+                    log_error() << "network auto-recovery: periodic safety-net check failed (" << exception.what()
+                                << "); will retry next period";
+                }
+                catch (...)
+                {
+                    log_error() << "network auto-recovery: periodic safety-net check failed (unknown exception); "
+                                   "will retry next period";
+                }
+                lock.lock();
+                reset_in_progress = false;
+                coalescer_cv.notify_all();
                 continue;
             }
 
@@ -314,6 +548,9 @@ namespace provizio::dds::detail
             log_info() << "network event burst — snapshot unchanged (" << new_snapshot.size()
                        << " interface address(es)), no reset";
             skipped_reset_count.fetch_add(1, std::memory_order_acq_rel);
+            // A burst that changed nothing does not clear a pending retry: the
+            // participant it refers to is still torn down, and the next safety-net
+            // tick is what will pick it up.
             return;
         }
 
@@ -353,7 +590,14 @@ namespace provizio::dds::detail
         }
 
         last_known_snapshot = new_snapshot;
+        // As in safety_net_tick: a real change re-arms bounded retrying.
+        consecutive_retry_passes = 0;
+        retry_exhaustion_reported = false;
+        apply_reset(reset_scope::all);
+    }
 
+    void network_recovery_coordinator::apply_reset(const reset_scope scope)
+    {
         // Snapshot the registry under the lock, then operate on the snapshot. This
         // releases the registry mutex during the (potentially long) per-participant
         // reset, so a participant being destroyed concurrently isn't blocked.
@@ -370,8 +614,16 @@ namespace provizio::dds::detail
             }
         }
 
+        std::size_t reset_participants = 0;
+        std::size_t still_unrecovered = 0;
         for (const auto &participant : live_participants)
         {
+            if (scope == reset_scope::retry_only && !participant->needs_network_recovery_retry())
+            {
+                continue;  // Intact — a retry pass must not disturb it.
+            }
+
+            ++reset_participants;
             try
             {
                 participant->trigger_network_recovery_reset();
@@ -380,9 +632,140 @@ namespace provizio::dds::detail
             {
                 log_error() << "participant reset failed: " << exception.what();
             }
+
+            // The participant reports this itself: an exception is not the only way a
+            // rebuild can fail (create_participant returning nullptr leaves it dead
+            // without throwing), and only the participant knows whether its endpoints
+            // came back.
+            if (participant->needs_network_recovery_retry())
+            {
+                ++still_unrecovered;
+            }
         }
 
-        log_info() << "reset complete (" << live_participants.size() << " participant(s))";
+        // No bookkeeping of who still needs a retry: the next safety-net tick asks the
+        // participants themselves (any_participant_needs_retry). A cached flag here
+        // could only ever go stale — a reset driven straight through
+        // domain_participant::trigger_network_recovery_reset, for instance, never
+        // reaches this function at all, yet can leave a participant torn down.
+        auto log = log_info();
+        log << "reset complete (" << reset_participants << " participant(s)";
+        if (still_unrecovered > 0)
+        {
+            log << ", " << still_unrecovered << " still unrecovered — will retry";
+        }
+        log << ")";
         reset_count.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    void network_recovery_coordinator::safety_net_tick()
+    {
+        // 1. Bring the kernel notification channel back if its worker died. Do this
+        //    first: everything below is a poor substitute for real events.
+        ensure_monitor_alive();
+
+        // 2. Retry participants a previous reset left torn down. They are broken right
+        //    now, independently of whether the network has moved since — but bounded, so
+        //    an endpoint that can never come back does not churn its healthy siblings
+        //    once per period forever (see max_consecutive_retry_passes).
+        if (!any_participant_needs_retry())
+        {
+            consecutive_retry_passes = 0;
+            retry_exhaustion_reported = false;
+        }
+        else if (consecutive_retry_passes < max_consecutive_retry_passes)
+        {
+            ++consecutive_retry_passes;
+            log_info() << "network auto-recovery: retrying participant(s) left unrecovered by a failed rebuild "
+                          "(attempt "
+                       << consecutive_retry_passes << " of " << max_consecutive_retry_passes << ")";
+            apply_reset(reset_scope::retry_only);
+        }
+        else if (!retry_exhaustion_reported)
+        {
+            retry_exhaustion_reported = true;
+            log_error() << "network auto-recovery: gave up rebuilding participant(s) after "
+                        << max_consecutive_retry_passes
+                        << " consecutive attempts; they stay inactive (publish/take report failure) until the next "
+                           "network change. Retrying further would keep tearing down their healthy siblings.";
+        }
+
+        // 3. Re-verify the snapshot directly, catching any change no event reported —
+        //    a dropped netlink datagram (ENOBUFS), an interface transition on a channel
+        //    we do not subscribe to, or a change that raced the monitor's startup.
+        auto new_snapshot = capture_address_snapshot();
+        if (new_snapshot == last_known_snapshot)
+        {
+            // Deliberately silent: this runs on a timer for the life of the process.
+            return;
+        }
+
+        log_info() << "network change detected by the periodic safety-net check — no kernel event reported it ("
+                   << last_known_snapshot.size() << " → " << new_snapshot.size()
+                   << " interface address(es)); resetting recovery-enabled participants";
+        last_known_snapshot = std::move(new_snapshot);
+        // A real change re-arms retrying: the reason a rebuild failed before may well be
+        // gone now, so the give-up above must not be permanent.
+        consecutive_retry_passes = 0;
+        retry_exhaustion_reported = false;
+        apply_reset(reset_scope::all);
+    }
+
+    bool network_recovery_coordinator::any_participant_needs_retry()
+    {
+        const std::lock_guard<std::mutex> lock{registry_mutex};
+        return std::any_of(registered_participants.begin(), registered_participants.end(),
+                           [](const std::weak_ptr<domain_participant> &weak) {
+                               const auto strong = weak.lock();
+                               return strong && strong->needs_network_recovery_retry();
+                           });
+    }
+
+    void network_recovery_coordinator::ensure_monitor_alive()
+    {
+        // Logs are emitted after the lock is released: a user log callback may re-enter
+        // register_participant, which takes registry_mutex → monitor_mutex.
+        bool reopened = false;
+        bool needed_reopen = false;
+        std::string reopen_error;
+
+        {
+            const std::lock_guard<std::mutex> lock{monitor_mutex};
+            if (monitor && monitor->is_alive())
+            {
+                return;
+            }
+
+            needed_reopen = true;
+            try
+            {
+                // Destroy first: the dead worker has already returned, so the join in
+                // ~network_monitor is immediate, and this releases the old channel's fds
+                // before we ask the kernel for new ones.
+                monitor.reset();
+                monitor = std::make_unique<network_monitor>([this] { on_kernel_event(); });
+                reopened = true;
+            }
+            catch (const std::exception &exception)
+            {
+                monitor.reset();
+                reopen_error = exception.what();
+            }
+        }
+
+        if (!needed_reopen)
+        {
+            return;
+        }
+        if (reopened)
+        {
+            log_warning() << "network auto-recovery: the kernel notification channel had died and was reopened; "
+                             "events missed while it was down are covered by this periodic check";
+        }
+        else
+        {
+            log_error() << "network auto-recovery: the kernel notification channel died and could not be reopened ("
+                        << reopen_error << "); recovery continues on the periodic check alone";
+        }
     }
 }  // namespace provizio::dds::detail

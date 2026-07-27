@@ -153,7 +153,17 @@ def bin_cache_incompatibility(cache_dir):
         )
 
     libstdcxx, glibcxx, cxxabi = host_libstdcxx_versions()
-    required = f"GLIBCXX_{required_glibcxx} / CXXABI_{required_cxxabi}"
+    # Name only the requirements actually recorded: a cache that pins one of the two
+    # would otherwise be reported as needing "GLIBCXX_None", which reads like a bug in
+    # the check rather than a property of the cache.
+    required = " / ".join(
+        part
+        for part in (
+            f"GLIBCXX_{required_glibcxx}" if required_glibcxx else None,
+            f"CXXABI_{required_cxxabi}" if required_cxxabi else None,
+        )
+        if part
+    )
     if not libstdcxx:
         return f"they require libstdc++ providing {required} and this host's libstdc++ couldn't be located"
     if (required_glibcxx and version_tuple(glibcxx) < version_tuple(required_glibcxx)) or (

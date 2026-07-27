@@ -331,7 +331,7 @@ def test_survives_reset():
 
     # Trigger a recovery reset on A. Use the same synthetic-snapshot trick
     # the existing reset tests use — see python_network_recovery_test.py.
-    pa._reset_hook(frozenset(), frozenset([("synthetic", "1.2.3.4")]))
+    pa._reset_hook(frozenset(), frozenset([("synthetic", "1.2.3.4", 24)]))
 
     if not _wait_for(writer_seen, DISCOVERY_TIMEOUT_SEC):
         print(

@@ -36,6 +36,28 @@ namespace provizio::dds
 namespace provizio::dds::detail
 {
     /**
+     * @brief Test-only: make the next Fast-DDS participant creation performed by any
+     * @c domain_participant fail once, as if the OS had refused the resources. Lets a
+     * test drive the partially-failed reset path — and the coordinator's retry of it —
+     * deterministically.
+     *
+     * Process-wide and self-clearing: the next creation attempt consumes the flag.
+     * Deliberately a free function in @c detail rather than a member of
+     * @c domain_participant: a hook that sabotages participant creation has no place on
+     * the customer-facing class (and MSVC rejects a @c PROVIZIO_DDS_API member of an
+     * already-dll-exported class outright).
+     */
+    PROVIZIO_DDS_API void fail_next_participant_creation_for_test() noexcept;
+
+    /**
+     * @brief Consume the flag set by @c fail_next_participant_creation_for_test.
+     * Internal: called by @c domain_participant::create_fastdds_participant.
+     *
+     * @return true if the caller should behave as though creation failed.
+     */
+    PROVIZIO_DDS_API bool consume_forced_participant_creation_failure() noexcept;
+
+    /**
      * @file network_recovery_coordinator.h
      * @brief Process-wide registry of recovery-enabled @c domain_participant instances,
      * coalescing logic, and the orchestrator that performs the actual reset on
@@ -59,6 +81,15 @@ namespace provizio::dds::detail
      *     and then captures a fresh @c address_snapshot.
      *   - If the snapshot differs from the last known snapshot, the coalescer
      *     walks the live participant list and triggers reset on each.
+     *   - Whenever no burst is pending, the same thread wakes every
+     *     @c safety_net_period to re-verify the snapshot directly. This is the
+     *     backstop for everything the event channel cannot tell us: an event the
+     *     kernel dropped (netlink @c ENOBUFS), a monitor worker that died on an
+     *     unrecoverable channel error (which the tick also reopens), a change on an
+     *     interface whose events we never subscribed to, and a participant left
+     *     unrecovered by a rebuild that failed mid-reset. Purely event-driven
+     *     recovery has no way back from any of those — the process would stay
+     *     unable to communicate for its whole lifetime.
      */
     // No class-level PROVIZIO_DDS_API: the class has std::mutex /
     // std::condition_variable / std::thread / std::vector<std::weak_ptr<...>> /
@@ -85,6 +116,19 @@ namespace provizio::dds::detail
          * any recovery at all.
          */
         static constexpr std::chrono::seconds max_debounce{60};
+
+        /**
+         * @brief How often the coalescer re-verifies the address snapshot when no
+         * event burst is pending — the safety net described in the file comment.
+         * 30 seconds: frequent enough that a missed event costs a bounded outage
+         * rather than a permanent one, cheap enough to be irrelevant (one
+         * @c getifaddrs plus one @c RTM_GETLINK dump per tick).
+         *
+         * Overridable per process via @c PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC;
+         * set that to @c 0 to disable the periodic check and rely purely on kernel
+         * events.
+         */
+        static constexpr std::chrono::seconds default_safety_net_period{30};
 
         /**
          * @brief Returns the per-process singleton, constructing it on first call.
@@ -149,9 +193,61 @@ namespace provizio::dds::detail
         PROVIZIO_DDS_API void inject_transient_for_test(const address_snapshot &simulated_burst_start);
 
         /**
-         * @brief Number of resets the coordinator has run so far. Counts only
-         * the "snapshot changed → participant rebuild" outcomes (see
-         * @c skipped_reset_count_for_test for "snapshot unchanged → no rebuild").
+         * @brief Run one safety-net tick synchronously on the calling thread, as if
+         * @c safety_net_period had elapsed with no pending burst: reopen the monitor if
+         * its worker died, retry participants left dead by a failed rebuild, and reset
+         * everything if the live snapshot no longer matches the last known one.
+         *
+         * Test-only. Lets a test exercise the periodic path without waiting out the
+         * real period, and without the flakiness of a timing-dependent sleep.
+         *
+         * @warning Only safe while the coordinator is idle (no burst pending, no reset
+         * running) — it mutates the same last-known-snapshot state the coalescer thread
+         * owns. Call @c wait_for_idle() first, as the tests do.
+         */
+        PROVIZIO_DDS_API void run_safety_net_tick_for_test();
+
+        /**
+         * @brief Overwrite the last-known snapshot the next diff compares against, so a
+         * test can simulate "the host's addresses changed but no event told us" without
+         * touching the host's interfaces — the exact condition the safety-net tick
+         * exists to catch.
+         *
+         * Test-only.
+         *
+         * @warning Only safe while the coordinator is idle; see
+         * @c run_safety_net_tick_for_test.
+         *
+         * @param snapshot Value to store as the last known snapshot.
+         */
+        PROVIZIO_DDS_API void seed_last_known_snapshot_for_test(const address_snapshot &snapshot);
+
+        /**
+         * @brief Force the kernel notification channel's worker to exit as if it had hit
+         * an unrecoverable error, so a test can verify the safety-net tick notices and
+         * reopens it. No-op where the OS owns the notification thread (Windows).
+         *
+         * Test-only.
+         *
+         * @return true if a monitor existed and was killed.
+         */
+        PROVIZIO_DDS_API bool kill_monitor_for_test();
+
+        /**
+         * @brief Whether the kernel notification channel is currently being watched.
+         * Test-only observability for the monitor-revival path.
+         */
+        PROVIZIO_DDS_API bool monitor_alive_for_test();
+
+        /**
+         * @brief Number of reset PASSES the coordinator has run so far, whether
+         * triggered by a coalesced event burst, by the periodic safety-net check, or by
+         * a retry of a previously failed rebuild (see @c skipped_reset_count_for_test
+         * for "snapshot unchanged → no rebuild").
+         *
+         * Counts passes, not participants: a retry pass whose target expired in the
+         * meantime still counts, and a single safety-net tick can increment it twice
+         * (once for a retry pass, once for a snapshot-changed pass).
          */
         std::uint64_t reset_count_for_test() const noexcept
         {
@@ -176,15 +272,31 @@ namespace provizio::dds::detail
         network_recovery_coordinator();
         ~network_recovery_coordinator();
 
+        /// Which participants a reset pass walks.
+        enum class reset_scope
+        {
+            all,        ///< Every registered participant — the normal network-changed path.
+            retry_only  ///< Only those reporting @c needs_network_recovery_retry().
+        };
+
         void on_kernel_event();
         void coalescer_loop();
         void run_reset(const address_snapshot &burst_start, bool had_burst_start);
+        void apply_reset(reset_scope scope);
+        void safety_net_tick();
+        void ensure_monitor_alive();
+        bool any_participant_needs_retry();
 
         // Lazily constructed when the first recovery-enabled participant registers.
         // The monitor's constructor opens the kernel channel and starts its worker;
         // its destructor cleans both up. Held by unique_ptr so the coordinator's
         // life doesn't pay for monitor construction in processes that never register
-        // a recovery-enabled participant.
+        // a recovery-enabled participant. Guarded by monitor_mutex, because the
+        // coalescer thread replaces it when a worker dies (ensure_monitor_alive)
+        // while register_participant may be creating it concurrently. Lock order is
+        // registry_mutex → monitor_mutex; no log call may be made while holding
+        // either (a user log callback can re-enter register_participant).
+        std::mutex monitor_mutex;
         std::unique_ptr<network_monitor> monitor;
 
         std::mutex registry_mutex;
@@ -211,6 +323,24 @@ namespace provizio::dds::detail
         // guards against). Both fields are guarded by coalescer_mutex.
         address_snapshot burst_start_snapshot;
         bool burst_start_valid{false};
+
+        // How long the coalescer waits for events before running a safety-net tick.
+        // Resolved once from the environment on the first monitor start (in
+        // register_participant); zero disables the tick.
+        std::chrono::seconds safety_net_period{default_safety_net_period};
+
+        // Bound on how many times in a row the safety net will retry participants that
+        // report needs_network_recovery_retry(). A retry rebuilds the WHOLE participant,
+        // so an endpoint that can never be re-created would otherwise tear down and
+        // rebuild its healthy siblings — losing discovery and in-flight samples — once
+        // per period for the rest of the process' life. After this many fruitless passes
+        // we report once and stand down; a genuine network change re-arms retrying.
+        static constexpr unsigned int max_consecutive_retry_passes{5};
+
+        // Both coalescer-thread-owned (every writer runs in safety_net_tick / run_reset),
+        // so they need no lock.
+        unsigned int consecutive_retry_passes{0};
+        bool retry_exhaustion_reported{false};
 
         // Observability counters — always present (see test-hooks comment above
         // for why they are unconditional rather than #ifdef'd).
