@@ -15,6 +15,7 @@
 #include "provizio/dds/domain_participant.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -483,6 +484,15 @@ namespace provizio::dds
 
     eprosima::fastdds::dds::DomainParticipant *domain_participant::create_fastdds_participant()
     {
+        if (detail::consume_forced_participant_creation_failure())
+        {
+            // Test hook: behave exactly as Fast-DDS does when it cannot create a
+            // participant — return null without throwing.
+            log_error() << "participant creation failed on domain " << domain_id
+                        << " (forced by fail_next_participant_creation_for_test)";
+            return nullptr;
+        }
+
         auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
         // Pass the (possibly null) discovery listener to Fast-DDS at create
         // time so it's attached BEFORE the new participant starts internal
@@ -1062,11 +1072,15 @@ namespace provizio::dds
             if (participant == nullptr)
             {
                 log_error() << "failed to recreate participant on domain " << domain_id
-                            << "; endpoints left in torn-down state";
+                            << "; endpoints left in torn-down state, will be retried by the "
+                               "network-recovery safety-net check";
                 // Bump generation anyway so any in-flight teardown observing the
                 // mismatch skips its Fast-DDS-side deletes (the contained entities
                 // were freed by delete_contained_entities above).
                 generation.fetch_add(1, std::memory_order_acq_rel);
+                // Flag for the coordinator: this participant is inert until a later
+                // attempt succeeds, and no further network event is guaranteed to come.
+                recovery_retry_needed.store(true, std::memory_order_release);
                 return;
             }
 
@@ -1094,6 +1108,7 @@ namespace provizio::dds
             }
 
             // Phase 5: rebuild child endpoints against the new participant.
+            bool any_endpoint_failed = false;
             for (const auto &endpoint : live_endpoints)
             {
                 try
@@ -1102,11 +1117,17 @@ namespace provizio::dds
                 }
                 catch (const std::exception &exception)
                 {
+                    any_endpoint_failed = true;
                     log_error() << "endpoint rebuild failed on domain " << domain_id << ": " << exception.what()
-                                << "; this endpoint stays inactive (publish/take return failure) until the next "
-                                   "network-recovery reset rebuilds it";
+                                << "; this endpoint stays inactive (publish/take return failure) until the "
+                                   "network-recovery safety-net check retries the reset";
                 }
             }
+
+            // The participant itself is healthy either way; an endpoint that failed to
+            // come back still needs another attempt, which the coordinator's safety-net
+            // tick will make (a later network event alone cannot be relied on).
+            recovery_retry_needed.store(any_endpoint_failed, std::memory_order_release);
         }  // close the registration_mutex / reset_mutex scope BEFORE live_endpoints destructs
     }
 

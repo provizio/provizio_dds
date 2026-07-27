@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import math
 import os
 import queue
 import select
@@ -329,9 +330,16 @@ def refresh_fastdds_interface_cache() -> bool:
 # ---------------------------------------------------------------------------
 
 
-# Address-set type. Two snapshots are equal if their contents match
-# order-independently; frozenset gives us this for free.
-AddressSnapshot = FrozenSet[Tuple[str, str]]
+# Address-set type: (interface name, address text, CIDR prefix length). Two
+# snapshots are equal if their contents match order-independently; frozenset gives
+# us this for free.
+#
+# The prefix length is part of the identity because Fast-DDS derives its
+# netmask-based locator filtering from it — re-subnetting an interface without
+# changing its address (192.168.1.10/24 -> /16) changes which peers Fast-DDS treats
+# as on-link, so it has to count as a network change. Mirrors the C++
+# detail::interface_address.
+AddressSnapshot = FrozenSet[Tuple[str, str, int]]
 
 
 def _capture_address_snapshot() -> AddressSnapshot:
@@ -342,18 +350,34 @@ def _capture_address_snapshot() -> AddressSnapshot:
     Common to all:
       - Loopback interfaces.
       - IPv6 link-local ``fe80::/10`` addresses.
+      - Interfaces that are not *operationally* up — carrier-down as well as
+        administratively down (POSIX ``IFF_RUNNING``, Windows ``OperStatus``).
+        This mirrors Fast-DDS' own ``IPFinder::getIPs``, which also keys on
+        ``IFF_RUNNING``: the snapshot exists to model the interface set Fast-DDS
+        will bind to, so it must filter on the same flag. Keying on the weaker
+        ``IFF_UP`` would make a switch power-cycle or cable replug invisible to
+        the diff — the address stays in the snapshot across the outage while
+        Fast-DDS silently stops binding a locator to it — and no participant
+        would ever be rebuilt.
 
     Linux / macOS (via getifaddrs):
       - Names matching Docker / Kubernetes / LXC conventions
         (docker*, br-*, cni*, kube*, lxc*, flannel*, weave*, veth*).
+      - Linux: container / virtual interface kinds (bridge, veth, dummy, vxlan,
+        macvlan, ipvlan). Tunnel kinds are deliberately NOT excluded — a VPN
+        endpoint routinely carries real DDS traffic.
       - macOS: Apple-internal NICs (utun, awdl, llw, gif, stf, anpi, ap[0-9]).
 
     Windows (via GetAdaptersAddresses):
       - Interfaces with IfType not in {Ethernet, IEEE80211, PPP}.
       - Friendly-name / description match for known virtual adapters.
 
-    Returns an empty snapshot if the OS call fails or the host has only
-    loopback up.
+    Interfaces named in ``PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES`` bypass
+    the name / kind / adapter-type heuristics above — see
+    :func:`_force_included_interfaces`.
+
+    Returns an empty snapshot if the OS call fails or the host has no
+    operationally-up non-loopback interface.
     """
 
     if sys.platform == "win32":
@@ -393,12 +417,54 @@ _LINUX_NAME_PREFIXES = (
 
 
 # Linux interface "kinds" (IFLA_INFO_KIND values) that identify container /
-# virtual / tunnel interfaces and are excluded from the snapshot, matching the
-# C++ side in src/address_snapshot_linux.cpp. Physical Ethernet / Wi-Fi have
-# no kind attribute and fall through.
+# virtual interfaces and are excluded from the snapshot, matching the C++ side in
+# src/address_snapshot_linux.cpp. Physical Ethernet / Wi-Fi have no kind attribute
+# and fall through.
+#
+# Tunnel kinds ("tun", "ip6tnl") are deliberately absent: a VPN or tunnel endpoint
+# routinely carries real DDS traffic and, unlike container plumbing, is not a churn
+# source (libvirt's per-VM vnetN devices are of kind tun but hold no address of
+# their own, so they never enter the snapshot anyway).
 _LINUX_EXCLUDED_KINDS = frozenset(
-    {"bridge", "veth", "dummy", "vxlan", "macvlan", "ipvlan", "ip6tnl", "tun"}
+    {"bridge", "veth", "dummy", "vxlan", "macvlan", "ipvlan"}
 )
+
+
+_EXTRA_INTERFACES_ENV = "PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES"
+_extra_interfaces_cache: "Optional[FrozenSet[str]]" = None
+_extra_interfaces_lock = threading.Lock()
+
+
+def _force_included_interfaces() -> FrozenSet[str]:
+    """Interface names force-included via
+    ``PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES`` (comma-separated, e.g.
+    ``"br0,virbr2"``). Such an interface bypasses every name / kind / adapter-type
+    exclusion, but still has to be operationally up, carry a non-link-local
+    address, and not be loopback.
+
+    The escape hatch exists because the exclusions are heuristics: a host whose
+    primary NIC *is* a bridge (``br0`` on a vehicle PC) would otherwise have its
+    only DDS-relevant interface filtered out, and no change on it would ever
+    trigger a recovery. Broadening the defaults instead is not an option —
+    ``docker0`` / ``virbr0`` are bridges too, and their churn is exactly the noise
+    the filters exist to drop.
+
+    Read once per process; mirrors the C++ ``detail::force_included_interfaces``.
+
+    Deliberately does NOT log: it is called from :func:`_capture_address_snapshot`,
+    which ``register_participant`` calls while holding ``_registry_lock``. Emitting a
+    log line there would run the user's callback under that lock, and a callback that
+    constructs another participant — a documented, supported pattern — would deadlock
+    re-entering ``register_participant``. The coordinator reports the force-included
+    set from its own after-the-lock log instead.
+    """
+
+    global _extra_interfaces_cache
+    with _extra_interfaces_lock:
+        if _extra_interfaces_cache is None:
+            raw = os.environ.get(_EXTRA_INTERFACES_ENV, "")
+            _extra_interfaces_cache = frozenset(entry.strip() for entry in raw.split(",") if entry.strip())
+        return _extra_interfaces_cache
 
 
 # Netlink / rtnetlink constants we need. Re-declared here rather than reading
@@ -689,10 +755,67 @@ _Ifaddrs._fields_ = [
 ]
 
 
-# IFF_LOOPBACK / IFF_UP — defined in net/if.h. Hard-coded to avoid an
-# additional ctypes lookup against libc constants that differ by platform.
-_IFF_UP_VALUE = 0x1
+# IFF_LOOPBACK / IFF_RUNNING — defined in net/if.h, and identical on Linux and
+# macOS. Hard-coded to avoid an additional ctypes lookup against libc constants that
+# differ by platform. IFF_RUNNING (operationally up: administratively up AND carrier
+# present) is the flag Fast-DDS' IPFinder filters on, so it is the one that governs
+# snapshot membership — see _capture_address_snapshot.
+_IFF_RUNNING_VALUE = 0x40
 _IFF_LOOPBACK_VALUE = 0x8
+
+
+def _prefix_length_from_netmask(netmask_ptr) -> int:
+    """CIDR prefix length of a ``getifaddrs`` netmask, e.g. 24 for 255.255.255.0.
+
+    Returns 0 for a null mask (some point-to-point / tunnel devices report none) or
+    a family other than AF_INET / AF_INET6. Mirrors the C++
+    ``detail::prefix_length_from_netmask``.
+    """
+
+    if not netmask_ptr:
+        return 0
+    family = netmask_ptr.contents.sa_family
+    if family == _AF_INET:
+        address_offset = _SockaddrIn.sin_addr.offset
+        width = 4
+    elif family == _AF_INET6:
+        address_offset = _SockaddrIn6.sin6_addr.offset
+        width = 16
+    else:
+        return 0
+
+    available = width
+    if _IS_BSD_SOCKADDR:
+        # BSD-family getifaddrs copies each sockaddr using only its self-reported
+        # sa_len, and a netmask is the canonical short one: trailing all-zero bytes are
+        # omitted, so a /8 mask can be as little as sin_len = offsetof(sin_addr) + 1.
+        # Omitted bytes are zero by definition and prefix counting stops at the first
+        # zero bit, so clamping loses nothing. Linux has no sa_len and glibc always
+        # materialises a full-size mask, so the clamp is a no-op there.
+        available = min(width, max(0, netmask_ptr.contents.sa_len - address_offset))
+    if available <= 0:
+        return 0
+
+    # Read ONLY the bytes that are actually present. Casting to _SockaddrIn /
+    # _SockaddrIn6 and taking bytes(...sin_addr) would materialise the full fixed-size
+    # field FIRST and clamp afterwards — i.e. the out-of-bounds read would already have
+    # happened, reaching into the neighbouring sockaddr of the same buffer or past the
+    # allocation entirely for the last entry.
+    mask = ctypes.string_at(ctypes.addressof(netmask_ptr.contents) + address_offset, available)
+
+    bits = 0
+    for byte in mask:
+        # The kernel only ever produces contiguous masks, so counting whole 0xFF
+        # bytes and then the leading bits of the first partial byte is exact.
+        if byte == 0xFF:
+            bits += 8
+            continue
+        for shift in range(7, -1, -1):
+            if not byte & (1 << shift):
+                break
+            bits += 1
+        break
+    return bits
 
 _AF_INET = socket.AF_INET
 _AF_INET6 = socket.AF_INET6
@@ -740,6 +863,8 @@ def _capture_snapshot_posix() -> AddressSnapshot:
         except (AttributeError, OSError):
             if_nametoindex = None
 
+    force_included = _force_included_interfaces()
+
     result: set = set()
     try:
         cur = head
@@ -747,13 +872,19 @@ def _capture_snapshot_posix() -> AddressSnapshot:
             entry = cur.contents
             name = entry.ifa_name.decode("ascii", errors="replace") if entry.ifa_name else ""
             flags = entry.ifa_flags
-            if (flags & _IFF_LOOPBACK_VALUE) != 0 or (flags & _IFF_UP_VALUE) == 0:
+            if (flags & _IFF_LOOPBACK_VALUE) != 0 or (flags & _IFF_RUNNING_VALUE) == 0:
                 cur = entry.ifa_next
                 continue
-            if not name or name_excluded(name):
+            if not name:
                 cur = entry.ifa_next
                 continue
-            if if_nametoindex is not None:
+            # A force-included interface skips the name / kind heuristics but not the
+            # loopback, carrier and link-local checks.
+            is_force_included = name in force_included
+            if not is_force_included and name_excluded(name):
+                cur = entry.ifa_next
+                continue
+            if not is_force_included and if_nametoindex is not None:
                 idx = if_nametoindex(entry.ifa_name)
                 kind = kinds_by_index.get(int(idx), "")
                 if _linux_kind_excluded(kind):
@@ -772,7 +903,7 @@ def _capture_snapshot_posix() -> AddressSnapshot:
                         cur = entry.ifa_next
                         continue
                 if addr_text:
-                    result.add((name, addr_text))
+                    result.add((name, addr_text, _prefix_length_from_netmask(entry.ifa_netmask)))
             cur = entry.ifa_next
     finally:
         freeifaddrs(head)
@@ -796,6 +927,7 @@ _WIN_EXCLUDED_DESCRIPTIONS = (
 # IfOperStatusUp and the kept IfTypes — values from iptypes.h.
 _IF_OPER_STATUS_UP = 1
 _IF_TYPE_ETHERNET_CSMACD = 6
+_IF_TYPE_SOFTWARE_LOOPBACK = 24
 _IF_TYPE_PPP = 23
 _IF_TYPE_IEEE80211 = 71
 _KEPT_IF_TYPES = (_IF_TYPE_ETHERNET_CSMACD, _IF_TYPE_PPP, _IF_TYPE_IEEE80211)
@@ -834,20 +966,23 @@ def _capture_snapshot_windows() -> AddressSnapshot:
     class IP_ADAPTER_UNICAST_ADDRESS(ctypes.Structure):
         pass
 
-    # Fields up to and including Address — anything we don't need beyond
-    # Address is collapsed into a single tail array. We also include
-    # DadState (offset varies). To stay portable across SDK versions, we
-    # treat unknown fields as a void block and only read by struct layout.
+    # The whole struct is declared through OnLinkPrefixLength, which the snapshot
+    # needs for the prefix length. The enum-typed fields (PrefixOrigin, SuffixOrigin,
+    # DadState) are c_int, the lifetimes are c_ulong, and OnLinkPrefixLength is the
+    # trailing UINT8 — matching iptypes.h. We don't filter on DadState in Python, the
+    # same simplification the POSIX path takes.
     IP_ADAPTER_UNICAST_ADDRESS._fields_ = [
         ("Length", ctypes.c_ulong),
         ("Flags", ctypes.c_ulong),
         ("Next", ctypes.POINTER(IP_ADAPTER_UNICAST_ADDRESS)),
         ("Address", SOCKET_ADDRESS),
-        # We only need the head of the struct; remaining fields (PrefixOrigin,
-        # SuffixOrigin, DadState, ValidLifetime, PreferredLifetime, LeaseLifetime,
-        # OnLinkPrefixLength) sum to 7 * 4 bytes on x64 (some are ulong, one is
-        # uchar). We don't filter on DadState in Python — same simplification
-        # the original Linux/macOS paths take.
+        ("PrefixOrigin", ctypes.c_int),
+        ("SuffixOrigin", ctypes.c_int),
+        ("DadState", ctypes.c_int),
+        ("ValidLifetime", ctypes.c_ulong),
+        ("PreferredLifetime", ctypes.c_ulong),
+        ("LeaseLifetime", ctypes.c_ulong),
+        ("OnLinkPrefixLength", ctypes.c_ubyte),
     ]
 
     class IP_ADAPTER_ADDRESSES(ctypes.Structure):
@@ -907,15 +1042,30 @@ def _capture_snapshot_windows() -> AddressSnapshot:
     if ret != NO_ERROR:
         return frozenset()
 
+    force_included = _force_included_interfaces()
+
     result: set = set()
     adapter = ctypes.cast(buffer, ctypes.POINTER(IP_ADAPTER_ADDRESSES))
     while adapter:
         a = adapter.contents
-        if a.OperStatus == _IF_OPER_STATUS_UP and a.IfType in _KEPT_IF_TYPES:
+        # OperStatus is Windows' operational (carrier-aware) state, the counterpart of
+        # POSIX IFF_RUNNING: a disconnected adapter reports down and is dropped here.
+        # Loopback is excluded unconditionally, BEFORE the force-include bypass below —
+        # matching the POSIX IFF_LOOPBACK check and the documented contract that a
+        # force-included interface still cannot be loopback.
+        if a.OperStatus == _IF_OPER_STATUS_UP and a.IfType != _IF_TYPE_SOFTWARE_LOOPBACK:
             friendly = a.FriendlyName or ""
             description = a.Description or ""
-            if not _description_excluded_win(friendly) and not _description_excluded_win(description):
-                name = a.AdapterName.decode("ascii", errors="replace") if a.AdapterName else friendly
+            name = a.AdapterName.decode("ascii", errors="replace") if a.AdapterName else friendly
+            # Match a force-include on either the GUID-ish AdapterName or the friendly
+            # name — a user cannot reasonably be expected to know the former.
+            is_force_included = name in force_included or friendly in force_included
+            passes_heuristics = (
+                a.IfType in _KEPT_IF_TYPES
+                and not _description_excluded_win(friendly)
+                and not _description_excluded_win(description)
+            )
+            if is_force_included or passes_heuristics:
                 uni = a.FirstUnicastAddress
                 while uni:
                     u = uni.contents
@@ -932,7 +1082,9 @@ def _capture_snapshot_windows() -> AddressSnapshot:
                             if addr_text and _is_link_local_ipv6(addr_text):
                                 addr_text = None
                         if addr_text:
-                            result.add((name, addr_text))
+                            # OnLinkPrefixLength is already a CIDR prefix length, so
+                            # unlike the POSIX path there is no netmask to convert.
+                            result.add((name, addr_text, int(u.OnLinkPrefixLength)))
                     uni = u.Next
         adapter = a.Next
     return frozenset(result)
@@ -1077,15 +1229,95 @@ def submit_off_thread(task: "Callable[[], None]") -> None:
 # None (they cannot observe a sub-interval transient).
 OnNetworkEvent = Callable[[AddressSnapshot, AddressSnapshot, Optional[AddressSnapshot]], None]
 
+# Invoked by the monitor on every safety-net tick, before the snapshot re-check, so
+# the coordinator can retry participants a previous reset left torn down.
+OnSafetyNetTick = Callable[[], None]
+
 # Coalescing parameters, mirroring the C++ network_recovery_coordinator
 # quiet_period / max_debounce. The quiet period is the env-configurable
 # detection interval (also the polling cadence on non-event-driven backends).
 _MAX_DEBOUNCE_SEC = 60.0
 
+# How often an event-driven monitor re-verifies the snapshot directly when no burst
+# is pending, mirroring the C++ default_safety_net_period. This is the backstop for
+# everything the event channel cannot report: a dropped netlink datagram (ENOBUFS),
+# a socket that died on an unrecoverable error (the tick reopens it), a change on a
+# channel we do not subscribe to, and a participant left unrecovered by a rebuild
+# that failed. Without it, any one of those leaves the process unable to
+# communicate for the rest of its life.
+#
+# Set PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC to 0 to disable the periodic
+# check — which also disables the socket-revival path that rides on it.
+_SAFETY_NET_ENV = "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC"
+_DEFAULT_SAFETY_NET_SEC = 30.0
+
+
+# Upper bound on both the safety-net period and the poll interval. `select.select`
+# raises OverflowError for a timeout that does not fit the platform's time type, and
+# `inf` / `nan` slip through a naive `value < 0` check — `nan` compares False against
+# everything, so it would silently disable the safety net, and `inf` would kill the
+# monitor thread outright. A day is far past any sane cadence.
+_MAX_INTERVAL_SEC = 24 * 60 * 60.0
+
+
+def _sanitise_env_value_for_log(raw: str) -> str:
+    """Cap and de-control-character an env value before quoting it in a warning, so a
+    pathological value cannot flood the log or forge log lines downstream."""
+    capped = raw[:32]
+    cleaned = "".join("?" if ord(c) < 0x20 or ord(c) == 0x7F else c for c in capped)
+    return cleaned + "..." if len(raw) > 32 else cleaned
+
+
+def _resolve_positive_interval(env_name: str, default: float, allow_zero: bool) -> float:
+    """Shared parser for the two cadence env variables. Rejects non-numbers, negatives,
+    ``nan`` and ``inf``, and clamps to :data:`_MAX_INTERVAL_SEC`; every rejection falls
+    back to @p default with a single warning."""
+
+    raw = os.environ.get(env_name)
+    if not raw:
+        return default
+
+    quoted = _sanitise_env_value_for_log(raw)
+
+    def reject(reason: str) -> float:
+        _emit_log(LogLevel.WARNING, f"{env_name}={quoted} {reason}; using the default {default}s")
+        return default
+
+    try:
+        value = float(raw)
+    except (ValueError, TypeError):
+        return reject("is not a number of seconds")
+    # isfinite rejects both nan and inf. Checked before the comparisons below, because
+    # every comparison against nan is False and would fall through as "valid".
+    if not math.isfinite(value):
+        return reject("is not a finite number of seconds")
+    if value < 0 or (value == 0 and not allow_zero):
+        return reject("is not a positive number of seconds" if not allow_zero else "is negative")
+    if value > _MAX_INTERVAL_SEC:
+        _emit_log(
+            LogLevel.WARNING,
+            f"{env_name}={quoted} exceeds the maximum of {_MAX_INTERVAL_SEC}s; clamping to it"
+            + (" (use 0 to disable the periodic check entirely)" if allow_zero else ""),
+        )
+        return _MAX_INTERVAL_SEC
+    return value
+
+
+def _resolve_safety_net_period() -> float:
+    """Read the safety-net cadence from
+    ``PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC``; 0 disables it. Unparseable,
+    negative, non-finite or oversized values are logged once and ignored."""
+
+    return _resolve_positive_interval(_SAFETY_NET_ENV, _DEFAULT_SAFETY_NET_SEC, allow_zero=True)
+
 
 class _PollingNetworkMonitor:
     """Fallback monitor: polls :func:`_capture_address_snapshot` on an interval
     and reports a burst whenever the result changes from the last observed value.
+
+    Being a poller, it is its own safety net — every interval is a direct re-check —
+    so it needs no separate periodic tick beyond calling ``on_safety_net_tick`` for
+    the coordinator's failed-rebuild retries.
 
     LIMITATION: a sub-interval transient (an address removed and re-added between
     two polls) is invisible — both polls observe the same set, so no burst is
@@ -1094,8 +1326,14 @@ class _PollingNetworkMonitor:
     if the netlink socket cannot be opened.
     """
 
-    def __init__(self, on_event: OnNetworkEvent, poll_interval_sec: float):
+    def __init__(
+        self,
+        on_event: OnNetworkEvent,
+        poll_interval_sec: float,
+        on_safety_net_tick: Optional[OnSafetyNetTick] = None,
+    ):
         self._on_event = on_event
+        self._on_safety_net_tick = on_safety_net_tick
         self._poll_interval_sec = poll_interval_sec
         self._stop_event = threading.Event()
         # Initial snapshot is captured BEFORE the worker thread starts so
@@ -1107,31 +1345,69 @@ class _PollingNetworkMonitor:
     def initial_snapshot(self) -> AddressSnapshot:
         return self._last_snapshot
 
+    def is_alive(self) -> bool:
+        """A poller has no kernel channel that can die, so it is alive while its
+        thread runs. Mirrors :meth:`_NetlinkNetworkMonitor.is_alive`."""
+        return self._thread.is_alive()
+
     def stop(self) -> None:
         self._stop_event.set()
         self._thread.join()
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._poll_interval_sec):
+            self._safety_net_check()
+
+    def _safety_net_check(self) -> None:
+        """One poll: let the coordinator retry failed rebuilds, then re-verify the
+        snapshot. For a poller this *is* the safety net — there is no separate event
+        channel — so it is also what :meth:`run_safety_net_tick_for_test` runs."""
+
+        if self._on_safety_net_tick is not None:
             try:
-                new_snapshot = _capture_address_snapshot()
+                self._on_safety_net_tick()
             except Exception as ex:
-                _emit_log(LogLevel.WARNING, f"network monitor: snapshot capture failed ({ex})")
-                continue
-            if new_snapshot != self._last_snapshot:
-                old = self._last_snapshot
-                self._last_snapshot = new_snapshot
-                try:
-                    self._on_event(old, new_snapshot, None)  # no burst-start: poll can't see transients
-                except Exception as ex:
-                    _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
+                _emit_log(LogLevel.ERROR, f"network monitor: safety-net tick raised ({ex})")
+        try:
+            new_snapshot = _capture_address_snapshot()
+        except Exception as ex:
+            _emit_log(LogLevel.WARNING, f"network monitor: snapshot capture failed ({ex})")
+            return
+        if new_snapshot != self._last_snapshot:
+            old = self._last_snapshot
+            self._last_snapshot = new_snapshot
+            try:
+                self._on_event(old, new_snapshot, None)  # no burst-start: poll can't see transients
+            except Exception as ex:
+                _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
+
+    def run_safety_net_tick_for_test(self) -> None:
+        """Test-only: run one poll synchronously on the calling thread, so the same
+        tests cover this backend as cover the event-driven one. Present here as well as
+        on :class:`_NetlinkNetworkMonitor` so the coordinator's hook behaves identically
+        on macOS / Windows, where polling is the only backend."""
+        self._safety_net_check()
+
+    def kill_for_test(self) -> bool:
+        """No kernel channel to kill — a poller re-reads the interface list every
+        interval and so has nothing that can die short of its thread. Reported as False
+        so the revival test skips rather than asserting a property this backend cannot
+        have."""
+        return False
 
 
 class _NetlinkNetworkMonitor:
     """Linux event-driven monitor. Subscribes an ``AF_NETLINK`` / ``NETLINK_ROUTE``
-    socket to ``RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR`` and coalesces the
-    resulting ``RTM_NEWADDR`` / ``RTM_DELADDR`` bursts, mirroring the C++
-    network_monitor + coordinator coalescer.
+    socket to ``RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR | RTMGRP_LINK`` and coalesces
+    the resulting bursts, mirroring the C++ network_monitor + coordinator coalescer.
+
+    The link group matters as much as the address groups: the snapshot only admits
+    operationally-up interfaces (``IFF_RUNNING``, as Fast-DDS' ``IPFinder`` does), so
+    a switch being powered on or a cable replugged changes the snapshot while
+    emitting only ``RTM_NEWLINK``. Subscribing to addresses alone would leave this
+    loop asleep through exactly the transition that needs a rebuild. The extra
+    wake-ups a flapping link causes are harmless — the coordinator's snapshot diff
+    drops every burst that nets out to no change.
 
     Crucially it captures a snapshot at the FIRST event of each burst — before a
     quick flap can revert — and reports it as ``burst_start``. That is what lets
@@ -1140,25 +1416,47 @@ class _NetlinkNetworkMonitor:
     sockets bound to that address were torn down while it was gone and must be
     rebuilt. A pure end-state diff (what polling and the old code did) skips it.
 
-    Like the C++ side, the netlink payload is NOT parsed — any address event is
-    just a trigger; the actual decision is made from the captured snapshots, so
-    the existing filters (loopback / link-local / container kinds) apply for free
-    and container/veth churn cannot cause spurious resets.
+    Like the C++ side, the netlink payload is NOT parsed — any event is just a
+    trigger; the actual decision is made from the captured snapshots, so the
+    existing filters (loopback / link-local / container kinds) apply for free and
+    container/veth churn cannot cause spurious resets.
+
+    When no burst is pending, the loop also wakes every ``safety_net_sec`` to
+    re-verify the snapshot directly and to reopen a socket that died — see
+    ``_SAFETY_NET_ENV``.
     """
 
+    _RTMGRP_LINK = 0x1
     _RTMGRP_IPV4_IFADDR = 0x10
     _RTMGRP_IPV6_IFADDR = 0x100
+    _GROUPS = _RTMGRP_LINK | _RTMGRP_IPV4_IFADDR | _RTMGRP_IPV6_IFADDR
 
-    def __init__(self, on_event: OnNetworkEvent, quiet_period_sec: float):
+    def __init__(
+        self,
+        on_event: OnNetworkEvent,
+        quiet_period_sec: float,
+        on_safety_net_tick: Optional[OnSafetyNetTick] = None,
+        safety_net_sec: Optional[float] = None,
+    ):
         self._on_event = on_event
+        self._on_safety_net_tick = on_safety_net_tick
         self._quiet = quiet_period_sec
-        self._last_known: AddressSnapshot = _capture_address_snapshot()
+        self._safety_net = _resolve_safety_net_period() if safety_net_sec is None else safety_net_sec
+        # Open and bind the socket BEFORE capturing the baseline snapshot. Any event
+        # that fires from here on is queued on the (bound) socket and delivered to the
+        # loop, which then captures a fresh snapshot and diffs it against the baseline.
+        # In the other order, an event landing between the capture and the bind would
+        # be lost AND already reflected in the baseline — so the change would never be
+        # noticed, which is precisely the boot-time race this monitor exists for.
+        # Mirrors the ordering the C++ coordinator's register_participant documents.
+        #
         # Subscribing to the multicast groups can raise OSError; the caller
         # (_make_network_monitor) falls back to polling on failure.
-        self._sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_ROUTE)
+        self._sock: Optional[socket.socket] = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_ROUTE)
         self._stop_r = self._stop_w = -1
         try:
-            self._sock.bind((0, self._RTMGRP_IPV4_IFADDR | self._RTMGRP_IPV6_IFADDR))
+            self._sock.bind((0, self._GROUPS))
+            self._last_known: AddressSnapshot = _capture_address_snapshot()
             # Self-pipe to wake the select() loop for a clean shutdown (mirrors the
             # C++ eventfd). Closing the socket from another thread is not a reliable
             # way to unblock a blocked recv/select on every kernel.
@@ -1177,6 +1475,68 @@ class _NetlinkNetworkMonitor:
     def initial_snapshot(self) -> AddressSnapshot:
         return self._last_known
 
+    def is_alive(self) -> bool:
+        """Whether the kernel channel is currently being watched. False between a
+        socket dying on an unrecoverable error and the next safety-net tick
+        reopening it (and permanently, if reopening keeps failing) — mirrors the C++
+        ``network_monitor::is_alive``."""
+        return self._sock is not None and self._thread.is_alive()
+
+    def _reopen_socket(self) -> None:
+        """Re-establish the netlink channel after an unrecoverable error. Leaves
+        ``_sock`` as None if it fails, so the next tick tries again."""
+        try:
+            sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_ROUTE)
+        except OSError as ex:
+            _emit_log(LogLevel.ERROR, f"network monitor: could not recreate the netlink socket ({ex})")
+            return
+        try:
+            sock.bind((0, self._GROUPS))
+        except OSError as ex:
+            sock.close()
+            _emit_log(LogLevel.ERROR, f"network monitor: could not rebind the netlink socket ({ex})")
+            return
+        self._sock = sock
+        _emit_log(
+            LogLevel.WARNING,
+            "network monitor: the netlink channel had died and was reopened; events missed "
+            "while it was down are covered by the periodic safety-net check",
+        )
+
+    def _safety_net_check(self) -> None:
+        """One periodic tick: revive the socket, let the coordinator retry failed
+        rebuilds, then re-verify the snapshot directly to catch anything no event
+        reported."""
+
+        if self._sock is None:
+            self._reopen_socket()
+
+        if self._on_safety_net_tick is not None:
+            try:
+                self._on_safety_net_tick()
+            except Exception as ex:
+                _emit_log(LogLevel.ERROR, f"network monitor: safety-net tick raised ({ex})")
+
+        try:
+            new_snapshot = _capture_address_snapshot()
+        except Exception as ex:
+            _emit_log(LogLevel.WARNING, f"network monitor: snapshot capture failed ({ex})")
+            return
+        if new_snapshot == self._last_known:
+            # Deliberately silent: this runs on a timer for the life of the process.
+            return
+
+        _emit_log(
+            LogLevel.INFO,
+            "network monitor: change found by the periodic safety-net check — no kernel event "
+            f"reported it ({len(self._last_known)} → {len(new_snapshot)} interface address(es))",
+        )
+        try:
+            self._on_event(self._last_known, new_snapshot, None)
+        except Exception as ex:
+            _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
+        self._last_known = new_snapshot
+
     def _run(self) -> None:
         pending = False
         burst_start: AddressSnapshot = frozenset()
@@ -1189,23 +1549,65 @@ class _NetlinkNetworkMonitor:
                 now = time.monotonic()
                 wake_at = min(last_event_mono + self._quiet, first_event_mono + _MAX_DEBOUNCE_SEC)
                 timeout = max(0.0, wake_at - now)
+            elif self._safety_net > 0:
+                timeout = self._safety_net
 
+            # Read the socket ONCE per iteration and use that value throughout: it can be
+            # replaced under us (kill_for_test from another thread, or a revival from a
+            # tick), and the error paths below must only ever discard the socket they
+            # actually failed on — never a freshly reopened one.
+            sock = self._sock
+            watched = [self._stop_r] if sock is None else [sock, self._stop_r]
             try:
-                readable, _, _ = select.select([self._sock, self._stop_r], [], [], timeout)
+                readable, _, _ = select.select(watched, [], [], timeout)
+            except OverflowError as ex:
+                # A timeout the platform's time type cannot represent. The resolvers
+                # clamp their inputs, so this is belt-and-braces — but it must not kill
+                # the thread, which is what an uncaught exception here used to do.
+                _emit_log(LogLevel.WARNING, f"network monitor: select() timeout out of range ({ex}); using 30s")
+                self._safety_net = min(self._safety_net, _DEFAULT_SAFETY_NET_SEC)
+                continue
+            except ValueError as ex:
+                # select() raises ValueError (not OSError) for a socket whose fd is
+                # already -1 — reachable when another thread closes it between the read
+                # of self._sock above and this call. Not terminal: drop that socket and
+                # let the periodic check reopen it. An uncaught ValueError here used to
+                # kill the worker thread outright, which is exactly the permanent-outage
+                # failure mode this feature exists to prevent.
+                _emit_log(LogLevel.WARNING, f"network monitor: select() on a closed socket ({ex}); reopening")
+                self._close_socket(sock)
+                continue
             except OSError as ex:
                 # EINTR: select was interrupted by a signal — retry rather than tear
-                # down the monitor. Anything else is genuinely terminal.
+                # down the monitor.
                 if ex.errno == errno.EINTR:
                     continue
-                _emit_log(LogLevel.ERROR, f"network monitor: select() failed ({ex}); auto-recovery disabled")
-                break
+                # EBADF means one of the fds we are watching is gone. If it is the stop
+                # pipe (stop() closes it after a join that can time out while a slow
+                # snapshot or reset hook is still running) there is nothing left to watch
+                # and retrying would spin, one ERROR log per iteration. Terminal.
+                if ex.errno == errno.EBADF:
+                    _emit_log(LogLevel.ERROR, f"network monitor: select() on a closed descriptor ({ex}); stopping")
+                    self._close_socket()
+                    break
+                # Anything else is terminal for this socket, but not for recovery:
+                # drop the socket and let the periodic check keep working (and try to
+                # reopen it). Killing the monitor here is what used to leave a process
+                # without auto-recovery for the rest of its life.
+                _emit_log(
+                    LogLevel.ERROR,
+                    f"network monitor: select() failed ({ex}); falling back to the periodic "
+                    f"safety-net check and retrying the netlink channel",
+                )
+                self._close_socket(sock)
+                continue
 
             if self._stop_r in readable:
                 break
 
-            if self._sock in readable:
+            if sock is not None and sock in readable:
                 try:
-                    self._sock.recv(65536)  # content ignored — any address event is a trigger
+                    sock.recv(65536)  # content ignored — any address event is a trigger
                 except OSError as ex:
                     # Mirror the C++ Linux monitor's recv classification. EINTR/EAGAIN
                     # are spurious — retry. ENOBUFS means the kernel's netlink multicast
@@ -1221,8 +1623,14 @@ class _NetlinkNetworkMonitor:
                     if ex.errno == errno.ENOBUFS:
                         _emit_log(LogLevel.WARNING, "network monitor: netlink recv lost events (ENOBUFS); continuing")
                         continue
-                    _emit_log(LogLevel.ERROR, f"network monitor: recv() failed ({ex}); auto-recovery disabled")
-                    break
+                    # Terminal for this socket only — see the select() branch above.
+                    _emit_log(
+                        LogLevel.ERROR,
+                        f"network monitor: recv() failed ({ex}); falling back to the periodic "
+                        f"safety-net check and retrying the netlink channel",
+                    )
+                    self._close_socket(sock)
+                    continue
                 now = time.monotonic()
                 if not pending:
                     pending = True
@@ -1237,8 +1645,14 @@ class _NetlinkNetworkMonitor:
                 last_event_mono = now
                 continue
 
-            # select() timed out → the burst has gone quiet (or hit max_debounce).
-            if pending and (
+            # select() timed out. Either the burst has gone quiet (or hit
+            # max_debounce), or there was no burst at all and it is time for a
+            # safety-net tick.
+            if not pending:
+                self._safety_net_check()
+                continue
+
+            if (
                 last_event_mono + self._quiet <= time.monotonic()
                 or first_event_mono + _MAX_DEBOUNCE_SEC <= time.monotonic()
             ):
@@ -1257,33 +1671,70 @@ class _NetlinkNetworkMonitor:
                 pending = False
                 burst_start = frozenset()
 
+    def _close_socket(self, expected: "Optional[socket.socket]" = None) -> None:
+        """Drop the netlink socket, leaving the loop running on its periodic check.
+        ``_safety_net_check`` reopens it on the next tick.
+
+        @param expected When given, do nothing unless it is still the current socket.
+        The worker's error paths pass the socket they actually failed on, so a socket
+        that has meanwhile been reopened (by a tick, or after ``kill_for_test``) is
+        never closed by a stale failure.
+        """
+        if expected is not None and self._sock is not expected:
+            return
+        sock, self._sock = self._sock, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def run_safety_net_tick_for_test(self) -> None:
+        """Test-only: run one safety-net tick synchronously on the calling thread.
+        Only safe while the monitor is idle — see the C++
+        ``run_safety_net_tick_for_test``."""
+        self._safety_net_check()
+
+    def kill_for_test(self) -> bool:
+        """Test-only: drop the netlink socket as if it had failed unrecoverably, so
+        the revival path can be exercised without a real kernel fault. The loop keeps
+        running; the next tick reopens the socket."""
+        if self._sock is None:
+            return False
+        self._close_socket()
+        return True
+
     def stop(self) -> None:
         try:
             os.write(self._stop_w, b"x")
         except OSError:
             pass
         self._thread.join(timeout=2.0)
-        for closer in (lambda: self._sock.close(), lambda: os.close(self._stop_r), lambda: os.close(self._stop_w)):
+        for closer in (self._close_socket, lambda: os.close(self._stop_r), lambda: os.close(self._stop_w)):
             try:
                 closer()
             except OSError:
                 pass
 
 
-def _make_network_monitor(on_event: OnNetworkEvent, interval_sec: float):
+def _make_network_monitor(
+    on_event: OnNetworkEvent,
+    interval_sec: float,
+    on_safety_net_tick: Optional[OnSafetyNetTick] = None,
+):
     """Construct the platform-appropriate monitor: event-driven netlink on Linux,
     polling elsewhere. Falls back to polling on Linux if the netlink socket cannot
     be opened (e.g. a sandbox without ``AF_NETLINK``)."""
     if sys.platform.startswith("linux"):
         try:
-            return _NetlinkNetworkMonitor(on_event, interval_sec)
+            return _NetlinkNetworkMonitor(on_event, interval_sec, on_safety_net_tick)
         except OSError as ex:
             _emit_log(
                 LogLevel.WARNING,
                 f"network monitor: netlink unavailable ({ex}); falling back to polling "
                 f"(sub-interval transient flaps may be missed)",
             )
-    return _PollingNetworkMonitor(on_event, interval_sec)
+    return _PollingNetworkMonitor(on_event, interval_sec, on_safety_net_tick)
 
 
 # ---------------------------------------------------------------------------
@@ -1299,22 +1750,11 @@ _DEFAULT_POLL_INTERVAL_SEC = 3.0
 def _resolve_poll_interval() -> float:
     """Read the per-process polling cadence from
     ``PROVIZIO_DDS_NETWORK_RECOVERY_POLL_INTERVAL_SEC``; fall back to the
-    default. Unparseable values are logged once and ignored."""
-    raw = os.environ.get(_POLL_INTERVAL_ENV)
-    if not raw:
-        return _DEFAULT_POLL_INTERVAL_SEC
-    try:
-        v = float(raw)
-        if v <= 0:
-            raise ValueError("non-positive")
-        return v
-    except (ValueError, TypeError):
-        _emit_log(
-            LogLevel.WARNING,
-            f"{_POLL_INTERVAL_ENV}={raw} is not a positive number; "
-            f"using default {_DEFAULT_POLL_INTERVAL_SEC}s",
-        )
-        return _DEFAULT_POLL_INTERVAL_SEC
+    default. Unparseable, non-positive, non-finite or oversized values are logged once
+    and ignored — ``nan`` in particular used to slip through the ``v <= 0`` check and
+    make the polling backend spin on a zero-length wait."""
+
+    return _resolve_positive_interval(_POLL_INTERVAL_ENV, _DEFAULT_POLL_INTERVAL_SEC, allow_zero=False)
 
 
 class _NetworkRecoveryCoordinator:
@@ -1415,7 +1855,9 @@ class _NetworkRecoveryCoordinator:
             if self._monitor is None:
                 try:
                     init_poll_interval = _resolve_poll_interval()
-                    self._monitor = _make_network_monitor(self._on_network_event, init_poll_interval)
+                    self._monitor = _make_network_monitor(
+                        self._on_network_event, init_poll_interval, self._on_safety_net_tick
+                    )
                     initialised_monitor_now = True
                     initial_snapshot_size = len(self._monitor.initial_snapshot())
                 except Exception as ex:
@@ -1429,7 +1871,15 @@ class _NetworkRecoveryCoordinator:
                 LogLevel.INFO,
                 f"network auto-recovery: enabled "
                 f"(initial snapshot: {initial_snapshot_size} interface address(es), "
-                f"poll interval {init_poll_interval}s)",
+                f"poll interval {init_poll_interval}s"
+                # Reported from here, not from _force_included_interfaces() itself, which
+                # runs under _registry_lock via the initial snapshot capture — see there.
+                + (
+                    f", force-including: {' '.join(sorted(_force_included_interfaces()))}"
+                    if _force_included_interfaces()
+                    else ""
+                )
+                + ")",
             )
         elif init_error is not None:
             _emit_log(
@@ -1438,6 +1888,45 @@ class _NetworkRecoveryCoordinator:
                 f"auto-recovery unavailable until the next recovery-enabled "
                 f"participant creation retries the initialization",
             )
+
+    def _on_safety_net_tick(self) -> None:
+        """Called by the monitor on each periodic tick, before its own snapshot
+        re-check. Retries participants a previous reset left torn down: their
+        Fast-DDS state is gone right now, independently of whether the network has
+        moved since, and no further event is guaranteed to arrive. Mirrors the
+        ``retry_pending`` branch of the C++ ``safety_net_tick``."""
+
+        hooks = self._live_hooks()
+        retry = [hook for hook in hooks if getattr(hook.__self__, "_recovery_retry_needed", False)]
+        if not retry:
+            return
+
+        _emit_log(
+            LogLevel.INFO,
+            f"network auto-recovery: retrying {len(retry)} participant(s) left unrecovered "
+            f"by a failed rebuild",
+        )
+        with self._idle_lock:
+            self._reset_in_progress = True
+        try:
+            snapshot = _capture_address_snapshot()
+            for hook in retry:
+                try:
+                    hook(snapshot, snapshot)
+                except Exception as ex:
+                    _emit_log(LogLevel.ERROR, f"participant reset retry failed: {ex}")
+        finally:
+            with self._idle_lock:
+                self.reset_count += 1
+                self._reset_in_progress = False
+                self._idle_cv.notify_all()
+
+    def _live_hooks(self) -> "list":
+        """Resolve the weak registry to the bound reset hooks still alive, dropping
+        entries whose participant has been garbage-collected."""
+        with self._registry_lock:
+            resolved = [m() for m in self._registered]
+        return [hook for hook in resolved if hook is not None]
 
     def _on_network_event(self, old: AddressSnapshot, new: AddressSnapshot,
                           burst_start: Optional[AddressSnapshot] = None) -> None:
@@ -1489,9 +1978,7 @@ class _NetworkRecoveryCoordinator:
         # participant being destroyed concurrently doesn't deadlock on us.
         # Resolving the WeakMethod returns None if the participant has
         # been GC'd since registration — those entries are dropped here.
-        with self._registry_lock:
-            live = [m() for m in self._registered]
-        live = [hook for hook in live if hook is not None]
+        live = self._live_hooks()
 
         for hook in live:
             try:
@@ -1537,5 +2024,37 @@ class _NetworkRecoveryCoordinator:
         and the (synthetic) burst-start differs from it."""
 
         snapshot = _capture_address_snapshot()
-        burst_start = frozenset(snapshot) | {("provizio_test_transient_if", "203.0.113.7")}  # TEST-NET-3
+        burst_start = frozenset(snapshot) | {("provizio_test_transient_if", "203.0.113.7", 24)}  # TEST-NET-3
         self._on_network_event(snapshot, snapshot, burst_start)
+
+    def run_safety_net_tick_for_test(self) -> bool:
+        """Test-only: run one safety-net tick synchronously — reopen a dead monitor
+        channel, retry participants left unrecovered by a failed rebuild, and reset
+        everything if the live snapshot no longer matches the last known one.
+
+        Only safe while the coordinator is idle; call :meth:`wait_for_idle` first.
+
+        Returns False if no monitor has been started yet.
+        """
+
+        monitor = self._monitor
+        if monitor is None:
+            return False
+        # Both backends implement this — the netlink one as its periodic re-verify, the
+        # polling one as a single poll — so the same tests cover every platform.
+        monitor.run_safety_net_tick_for_test()
+        return True
+
+    def kill_monitor_for_test(self) -> bool:
+        """Test-only: drop the monitor's kernel channel as if it had failed
+        unrecoverably, so the revival path can be exercised. Returns False where
+        there is nothing to kill."""
+
+        monitor = self._monitor
+        kill = getattr(monitor, "kill_for_test", None) if monitor is not None else None
+        return bool(kill()) if kill is not None else False
+
+    def monitor_alive_for_test(self) -> bool:
+        """Test-only: whether the monitor's kernel channel is currently watched."""
+        monitor = self._monitor
+        return bool(monitor is not None and monitor.is_alive())

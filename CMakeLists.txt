@@ -754,6 +754,7 @@ else(HAS_BIN_CACHE)
     set(PROVIZIO_DDS_SOURCES
         src/network_recovery_coordinator.cpp
         src/accumulation.cpp
+        src/address_snapshot_env.cpp
         src/detail/localization_filter.cpp
         src/domain_participant.cpp
         src/logging.cpp

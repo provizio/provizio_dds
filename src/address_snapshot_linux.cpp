@@ -17,6 +17,8 @@
 
 #if defined(__linux__)
 
+#include "detail/netmask_prefix.h"
+
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
@@ -71,8 +73,13 @@ namespace provizio::dds::detail
             // Interface "kinds" reported via IFLA_INFO_KIND that are excluded from snapshots.
             // Physical Ethernet and Wi-Fi have NO IFLA_INFO_KIND attribute, so the "no kind"
             // case is the inclusion default (handled above).
+            //
+            // Tunnel kinds (tun, ip6tnl) are deliberately absent: a VPN or tunnel endpoint
+            // routinely carries real DDS traffic, and unlike container plumbing it is not a
+            // churn source (libvirt's per-VM vnetN devices are of kind tun but hold no
+            // address of their own, so they never enter the snapshot anyway).
             static const std::unordered_set<std::string_view> excluded_kinds{
-                "bridge", "veth", "dummy", "vxlan", "macvlan", "ipvlan", "ip6tnl", "tun",
+                "bridge", "veth", "dummy", "vxlan", "macvlan", "ipvlan",
             };
             return excluded_kinds.find(kind) != excluded_kinds.end();
         }
@@ -251,6 +258,8 @@ namespace provizio::dds::detail
 
         // First pass: which interfaces are virtual / container by kind?
         const auto kinds_by_index = fetch_link_kinds();
+        // Hoisted: one lookup of the (immutable) force-include set for the whole walk.
+        const auto &force_included = force_included_interfaces();
 
         ifaddrs *ifa_head = nullptr;
         if (::getifaddrs(&ifa_head) != 0)
@@ -269,7 +278,15 @@ namespace provizio::dds::detail
             {
                 continue;
             }
-            if ((ifa->ifa_flags & IFF_UP) == 0)
+            // IFF_RUNNING (operationally up: administratively up AND carrier present),
+            // NOT the weaker IFF_UP. Fast-DDS' IPFinder::getIPs — the only enumeration
+            // behind its UDP locators — filters on exactly this flag, and the snapshot's
+            // whole job is to model that interface set. Keying on IFF_UP instead would
+            // leave a carrier-down interface's address in the snapshot, so a switch
+            // power-cycle or cable unplug/replug would net out to "nothing changed"
+            // while Fast-DDS had in fact stopped (and later could resume) binding a
+            // locator to it — and no participant rebuild would ever be triggered.
+            if ((ifa->ifa_flags & IFF_RUNNING) == 0)
             {
                 continue;
             }
@@ -281,28 +298,36 @@ namespace provizio::dds::detail
             }
 
             const std::string name{ifa->ifa_name};
-            if (name_excluded_by_prefix(name))
-            {
-                continue;
-            }
+            // A force-included interface skips the name-prefix and kind heuristics
+            // (see force_included_interfaces) but not the loopback / carrier /
+            // link-local checks above and below.
+            const bool is_force_included = force_included.find(name) != force_included.end();
 
-            // if_nametoindex returns 0 on failure; kernel-assigned indices
-            // start at 1, so 0 cannot legitimately appear in kinds_by_index.
-            // Treat the failure as "no kind known" (kind_excluded("") below
-            // is false for an empty string) rather than risk a spurious hit.
-            const unsigned int raw_idx = ::if_nametoindex(name.c_str());
-            const int idx = raw_idx == 0 ? -1 : static_cast<int>(raw_idx);
-            const auto kind_it = kinds_by_index.find(idx);
-            // Value (not const&): one arm of the ternary is a prvalue
-            // `std::string{}`, so the result is a prvalue regardless. Binding
-            // it to a `const std::string&` would technically lifetime-extend
-            // the temporary, but the rules are fiddly enough that some
-            // compilers (and lint passes) flag it; using a plain value here
-            // is the same cost (one move) and obviously correct.
-            const std::string kind = (kind_it == kinds_by_index.end()) ? std::string{} : kind_it->second;
-            if (kind_excluded(kind))
+            if (!is_force_included)
             {
-                continue;
+                if (name_excluded_by_prefix(name))
+                {
+                    continue;
+                }
+
+                // if_nametoindex returns 0 on failure; kernel-assigned indices
+                // start at 1, so 0 cannot legitimately appear in kinds_by_index.
+                // Treat the failure as "no kind known" (kind_excluded("") below
+                // is false for an empty string) rather than risk a spurious hit.
+                const unsigned int raw_idx = ::if_nametoindex(name.c_str());
+                const int idx = raw_idx == 0 ? -1 : static_cast<int>(raw_idx);
+                const auto kind_it = kinds_by_index.find(idx);
+                // Value (not const&): one arm of the ternary is a prvalue
+                // `std::string{}`, so the result is a prvalue regardless. Binding
+                // it to a `const std::string&` would technically lifetime-extend
+                // the temporary, but the rules are fiddly enough that some
+                // compilers (and lint passes) flag it; using a plain value here
+                // is the same cost (one move) and obviously correct.
+                const std::string kind = (kind_it == kinds_by_index.end()) ? std::string{} : kind_it->second;
+                if (kind_excluded(kind))
+                {
+                    continue;
+                }
             }
 
             std::array<char, INET6_ADDRSTRLEN> addr_text{};
@@ -336,7 +361,7 @@ namespace provizio::dds::detail
                 }
             }
 
-            snapshot.insert({name, std::string{addr_text.data()}});
+            snapshot.insert({name, std::string{addr_text.data()}, prefix_length_from_netmask(ifa->ifa_netmask)});
         }
 
         ::freeifaddrs(ifa_head);

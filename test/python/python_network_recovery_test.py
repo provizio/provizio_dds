@@ -161,8 +161,8 @@ def test_snapshot():
     snap = nr._capture_address_snapshot()
     # On a CI container with only loopback up the snapshot may be empty —
     # that's fine; the assertion is "loopback addresses must not appear".
-    for (name, address) in snap:
-        assert address not in ("127.0.0.1", "::1"), (name, address)
+    for (name, address, prefix_length) in snap:
+        assert address not in ("127.0.0.1", "::1"), (name, address, prefix_length)
     _log(f"snapshot: PASS ({len(snap)} address(es))")
     return 0
 
@@ -209,7 +209,7 @@ def test_reset_roundtrip():
     # Trigger the reset directly via the participant's recovery hook. This
     # is the same code path the polling-based monitor would drive on a
     # confirmed network change.
-    participant._reset_hook(frozenset(), frozenset([("synthetic", "1.2.3.4")]))
+    participant._reset_hook(frozenset(), frozenset([("synthetic", "1.2.3.4", 24)]))
 
     # After reset, publish-receive must resume on the freshly-rebuilt
     # DataReader / DataWriter.
@@ -272,7 +272,7 @@ def test_reset_disabled():
     # stops the monitor from calling it — a manual call still tears down and
     # rebuilds). Trigger one reset and confirm pub/sub resumes on the rebuilt
     # endpoints.
-    participant._reset_hook(frozenset(), frozenset([("synthetic", "1.2.3.4")]))
+    participant._reset_hook(frozenset(), frozenset([("synthetic", "1.2.3.4", 24)]))
     with received_lock:
         received.clear()
         received_event.clear()
@@ -348,7 +348,7 @@ def test_reset_refreshes_fastdds_interface_cache():
     try:
         before = call_count[0]
         participant._reset_hook(
-            frozenset(), frozenset([("synthetic", "1.2.3.4")])
+            frozenset(), frozenset([("synthetic", "1.2.3.4", 24)])
         )
         after = call_count[0]
     finally:
@@ -478,6 +478,240 @@ def test_coalescer_resets_on_transient_flap():
     return 0
 
 
+def test_snapshot_prefix_length():
+    """The prefix length is part of the snapshot identity, so re-subnetting an
+    interface without changing its address counts as a network change (Fast-DDS
+    derives its netmask-based locator filtering from the prefix)."""
+    from provizio_dds import network_recovery as nr
+
+    snapshot = nr._capture_address_snapshot()
+
+    with_prefix = 0
+    for entry in snapshot:
+        assert len(entry) == 3, entry
+        name, addr, prefix = entry
+        assert isinstance(prefix, int), entry
+        # Hard invariant: a prefix cannot exceed the address family's width.
+        max_prefix = 32 if ":" not in addr else 128
+        assert 0 <= prefix <= max_prefix, entry
+        if prefix > 0:
+            with_prefix += 1
+    # Softer: a CI container can legitimately have an empty snapshot, and exotic
+    # point-to-point devices report no mask — but if anything was found, at least one
+    # entry must carry a real prefix, or we aren't reading netmasks at all.
+    if snapshot:
+        assert with_prefix > 0, snapshot
+
+    # A netmask-only change must be a *different* snapshot, i.e. it must reach the
+    # coordinator as a change rather than being dismissed as "nothing happened".
+    # Comparing two hand-built frozensets would be a tautology, so drive the real
+    # decision path: same interface and address, different prefix.
+    from provizio_dds import network_recovery as nr_mod
+
+    coordinator = nr_mod._NetworkRecoveryCoordinator.instance()
+    slash24 = frozenset({("provizio_test_if", "192.0.2.10", 24)})
+    slash16 = frozenset({("provizio_test_if", "192.0.2.10", 16)})
+    reset_before = coordinator.reset_count
+    skipped_before = coordinator.skipped_reset_count
+    coordinator.inject_change_for_test(slash24, slash16)
+    assert coordinator.reset_count == reset_before + 1, (coordinator.reset_count, reset_before)
+    assert coordinator.skipped_reset_count == skipped_before, (coordinator.skipped_reset_count, skipped_before)
+    # ... while an identical prefix is correctly judged unchanged.
+    coordinator.inject_change_for_test(slash24, slash24)
+    assert coordinator.reset_count == reset_before + 1, (coordinator.reset_count, reset_before)
+    assert coordinator.skipped_reset_count == skipped_before + 1, (coordinator.skipped_reset_count, skipped_before)
+
+    _log(f"snapshot_prefix_length: PASS ({len(snapshot)} entries, {with_prefix} with a prefix)")
+    return 0
+
+
+def test_netmask_read_is_bounded():
+    """Regression: on BSD / macOS ``getifaddrs`` stores each netmask truncated to its
+    significant bytes (``sa_len`` omits trailing zeros), so the prefix helper must read
+    only the bytes that are actually present. Reading the full fixed-size field and
+    clamping afterwards is too late — the out-of-bounds access has already happened,
+    reaching into the neighbouring sockaddr of the same buffer or past the allocation
+    entirely for the last entry.
+
+    Runs on every platform: the BSD layout is simulated, so Linux CI covers the macOS
+    behaviour that cannot otherwise be exercised here."""
+    import ctypes
+
+    from provizio_dds import network_recovery as nr
+
+    # The module picks its sockaddr layout at import from the platform, so simulating BSD
+    # means swapping both the flag and the struct: there, sa_len is byte 0 and sa_family
+    # byte 1, and reading the Linux layout's 16-bit sa_family off a BSD buffer is garbage.
+    class BsdSockaddr(ctypes.Structure):
+        _fields_ = [
+            ("sa_len", ctypes.c_ubyte),
+            ("sa_family", ctypes.c_ubyte),
+            ("sa_data", ctypes.c_ubyte * 14),
+        ]
+
+    buf = BsdSockaddr()
+    buf.sa_family = nr._AF_INET
+    # Fill everything past the header with 0xFF. Bytes beyond sa_len stand in for the
+    # neighbouring sockaddr: if they are read, the prefix comes out as /32 instead of /8.
+    for index in range(14):
+        buf.sa_data[index] = 0xFF
+    pointer = ctypes.cast(ctypes.byref(buf), ctypes.POINTER(BsdSockaddr))
+
+    original_flag, original_struct = nr._IS_BSD_SOCKADDR, nr._Sockaddr
+    nr._IS_BSD_SOCKADDR, nr._Sockaddr = True, BsdSockaddr
+    try:
+        buf.sa_len = 5  # offsetof(sin_addr) == 4, plus ONE significant mask byte
+        short_mask = nr._prefix_length_from_netmask(pointer)
+        buf.sa_len = 8  # a full four-byte mask
+        full_mask = nr._prefix_length_from_netmask(pointer)
+        buf.sa_len = 4  # no mask bytes at all
+        empty_mask = nr._prefix_length_from_netmask(pointer)
+    finally:
+        nr._IS_BSD_SOCKADDR, nr._Sockaddr = original_flag, original_struct
+
+    assert short_mask == 8, f"expected /8 from the single present byte, got /{short_mask}"
+    assert full_mask == 32, full_mask
+    assert empty_mask == 0, empty_mask
+
+    _log(f"netmask_read_is_bounded: PASS (/{short_mask}, /{full_mask}, /{empty_mask})")
+    return 0
+
+
+def test_extra_interfaces_env():
+    """PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES parsing: whitespace trimmed,
+    empty entries dropped. Runs in its own process — the value is parsed once."""
+    from provizio_dds import network_recovery as nr
+
+    names = nr._force_included_interfaces()
+    assert names == frozenset({"docker0", "br-test", "veth9"}), names
+
+    _log(f"extra_interfaces_env: PASS ({len(names)} force-included)")
+    return 0
+
+
+def test_netlink_binds_before_snapshot():
+    """Regression: the netlink socket must be bound BEFORE the baseline snapshot is
+    captured. In the other order, an address change landing in between is both
+    missed by the socket and already reflected in the baseline — so it is never
+    noticed at all, which is exactly the boot-time race the monitor exists for."""
+    from provizio_dds import network_recovery as nr
+
+    if not sys.platform.startswith("linux"):
+        _log("netlink_binds_before_snapshot: SKIP (netlink is Linux-only)")
+        return 0
+
+    order = []
+    real_bind = nr.socket.socket.bind
+    real_capture = nr._capture_address_snapshot
+
+    def tracking_bind(self, address):
+        order.append("bind")
+        return real_bind(self, address)
+
+    def tracking_capture():
+        order.append("capture")
+        return real_capture()
+
+    nr.socket.socket.bind = tracking_bind
+    nr._capture_address_snapshot = tracking_capture
+    try:
+        monitor = nr._NetlinkNetworkMonitor(lambda *_: None, 3.0, None, 0.0)
+    finally:
+        nr.socket.socket.bind = real_bind
+        nr._capture_address_snapshot = real_capture
+    try:
+        assert order[:2] == ["bind", "capture"], order
+    finally:
+        monitor.stop()
+
+    _log(f"netlink_binds_before_snapshot: PASS (order={order[:2]})")
+    return 0
+
+
+def test_safety_net_detects_missed_change():
+    """The periodic tick must catch a change no kernel event reported — a dropped
+    netlink datagram, a transition on a channel we don't subscribe to, or a change
+    that raced the monitor's startup. Simulated by making the live capture return a
+    set the monitor's last-known value cannot match."""
+    from provizio_dds import network_recovery as nr
+
+    participant = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert participant is not None
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+
+    reset_before = coordinator.reset_count
+    real_capture = nr._capture_address_snapshot
+    # TEST-NET-3, RFC 5737 — never routable.
+    fake = frozenset({("provizio_test_missing_if", "203.0.113.9", 24)})
+    nr._capture_address_snapshot = lambda: fake
+    try:
+        assert coordinator.run_safety_net_tick_for_test()
+        assert coordinator.reset_count == reset_before + 1, (coordinator.reset_count, reset_before)
+
+        # The tick stores what it found, so an immediately following one is a no-op —
+        # otherwise every period would rebuild every participant.
+        assert coordinator.run_safety_net_tick_for_test()
+        assert coordinator.reset_count == reset_before + 1, (coordinator.reset_count, reset_before)
+    finally:
+        nr._capture_address_snapshot = real_capture
+
+    _log("safety_net_detects_missed_change: PASS")
+    return 0
+
+
+def test_safety_net_reopens_dead_monitor():
+    """A monitor that gave up on an unrecoverable channel error used to leave the
+    process without auto-recovery for the rest of its life. The periodic tick must
+    reopen it."""
+    from provizio_dds import network_recovery as nr
+
+    participant = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert participant is not None
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+
+    assert coordinator.monitor_alive_for_test()
+    if not coordinator.kill_monitor_for_test():
+        _log("safety_net_reopens_dead_monitor: SKIP (no killable channel on this backend)")
+        return 0
+    assert not coordinator.monitor_alive_for_test()
+
+    assert coordinator.run_safety_net_tick_for_test()
+    assert coordinator.monitor_alive_for_test()
+
+    _log("safety_net_reopens_dead_monitor: PASS")
+    return 0
+
+
+def test_safety_net_retries_failed_rebuild():
+    """A reset that fails part-way leaves the participant inert with its endpoints
+    torn down, and no further network event is guaranteed to arrive. The periodic
+    tick must retry it — and only it."""
+    from provizio_dds import network_recovery as nr
+
+    participant = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert participant is not None
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+
+    assert not participant._recovery_retry_needed
+
+    # Simulate the aftermath of a rebuild that could not recreate the participant.
+    participant._recovery_retry_needed = True
+    reset_before = coordinator.reset_count
+
+    assert coordinator.run_safety_net_tick_for_test()
+    # The retry ran a full reset of this participant, which cleared the flag.
+    assert not participant._recovery_retry_needed
+    assert coordinator.reset_count > reset_before, (coordinator.reset_count, reset_before)
+
+    # With nothing left to retry and no snapshot change, a further tick is a no-op.
+    reset_after = coordinator.reset_count
+    assert coordinator.run_safety_net_tick_for_test()
+    assert coordinator.reset_count == reset_after, (coordinator.reset_count, reset_after)
+
+    _log("safety_net_retries_failed_rebuild: PASS")
+    return 0
+
+
 _TESTS = {
     "logging": test_logging,
     "env_recovery": test_env_recovery,
@@ -493,6 +727,13 @@ _TESTS = {
     "reset_refreshes_fastdds_interface_cache": test_reset_refreshes_fastdds_interface_cache,
     "teardown_deferred": test_teardown_deferred,
     "coalescer_resets_on_transient_flap": test_coalescer_resets_on_transient_flap,
+    "snapshot_prefix_length": test_snapshot_prefix_length,
+    "netmask_read_is_bounded": test_netmask_read_is_bounded,
+    "extra_interfaces_env": test_extra_interfaces_env,
+    "netlink_binds_before_snapshot": test_netlink_binds_before_snapshot,
+    "safety_net_detects_missed_change": test_safety_net_detects_missed_change,
+    "safety_net_reopens_dead_monitor": test_safety_net_reopens_dead_monitor,
+    "safety_net_retries_failed_rebuild": test_safety_net_retries_failed_rebuild,
 }
 
 

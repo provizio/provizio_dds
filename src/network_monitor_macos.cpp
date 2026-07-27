@@ -60,6 +60,9 @@ namespace provizio::dds::detail
         int stop_pipe[2]{-1, -1};
         std::thread worker;
         std::atomic<bool> stopping{false};
+        // Raised by the constructor, cleared by the worker when it leaves its loop —
+        // see network_monitor::is_alive() and the Linux backend's equivalent.
+        std::atomic<bool> alive{false};
         on_event_callback callback;
 
         bool open_channel()
@@ -81,6 +84,22 @@ namespace provizio::dds::detail
             return true;
         }
 
+        // Closes the channel even when the object is destroyed without
+        // ~network_monitor having run — the constructor can throw after open_channel()
+        // succeeded (std::thread construction may fail under thread pressure), and
+        // ensure_monitor_alive() retries periodically, so leaking the routing socket
+        // and both pipe ends per attempt would eventually exhaust the fd table.
+        ~impl()
+        {
+            close_channel();
+        }
+
+        impl() = default;
+        impl(const impl &) = delete;
+        impl(impl &&) = delete;
+        impl &operator=(const impl &) = delete;
+        impl &operator=(impl &&) = delete;
+
         void close_channel()
         {
             if (route_fd >= 0)
@@ -99,6 +118,12 @@ namespace provizio::dds::detail
         }
 
         void run()
+        {
+            run_loop();
+            alive.store(false, std::memory_order_release);
+        }
+
+        void run_loop()
         {
             std::vector<char> buffer(2048);
             pollfd fds[2];
@@ -155,9 +180,12 @@ namespace provizio::dds::detail
                                   << " inconsistent with recv length " << got;
                     continue;
                 }
-                // RTM_NEWADDR and RTM_DELADDR are the only events we care about.
-                // RTM_IFINFO (link state) is deliberately ignored.
-                if (hdr->rtm_type == RTM_NEWADDR || hdr->rtm_type == RTM_DELADDR)
+                // Address changes plus RTM_IFINFO, which is how a carrier / interface-flag
+                // transition arrives. RTM_IFINFO matters because capture_address_snapshot
+                // only admits IFF_RUNNING interfaces (as Fast-DDS' IPFinder does), so
+                // plugging a cable back in changes the snapshot without any address event.
+                // The coordinator's snapshot diff absorbs the extra wake-ups.
+                if (hdr->rtm_type == RTM_NEWADDR || hdr->rtm_type == RTM_DELADDR || hdr->rtm_type == RTM_IFINFO)
                 {
                     if (callback)
                     {
@@ -176,7 +204,28 @@ namespace provizio::dds::detail
             throw std::runtime_error{"network_monitor: failed to open PF_ROUTE socket: " + err};
         }
         the_impl->callback = std::move(callback);
+        the_impl->alive.store(true, std::memory_order_release);
         the_impl->worker = std::thread{[impl_ptr = the_impl.get()] { impl_ptr->run(); }};
+    }
+
+    bool network_monitor::is_alive() const noexcept
+    {
+        return the_impl && the_impl->alive.load(std::memory_order_acquire);
+    }
+
+    bool network_monitor::kill_for_test() noexcept
+    {
+        if (!the_impl || the_impl->stop_pipe[1] < 0)
+        {
+            return false;
+        }
+        // Deliberately does NOT set `stopping`: the point is to leave the monitor object
+        // in the state a dead worker leaves it in, which is what is_alive() reports on.
+        // The write result IS propagated: a caller told "signalled" must be able to rely
+        // on the worker actually waking, or a failed wake surfaces as a test timeout with
+        // no explanation.
+        const char one = 1;
+        return ::write(the_impl->stop_pipe[1], &one, 1) == 1;
     }
 
     network_monitor::~network_monitor()

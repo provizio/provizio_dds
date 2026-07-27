@@ -119,26 +119,51 @@ namespace provizio::dds::detail
         for (auto *adapter = reinterpret_cast<IP_ADAPTER_ADDRESSES *>(buffer.data()); adapter != nullptr;
              adapter = adapter->Next)
         {
+            // OperStatus is Windows' operational (carrier-aware) state, the counterpart of
+            // POSIX IFF_RUNNING — a disconnected adapter reports IfOperStatusDown and is
+            // dropped here, matching what the IP Helper API reports to Fast-DDS.
             if (adapter->OperStatus != IfOperStatusUp)
             {
                 continue;
             }
 
-            const bool is_ethernet_or_wifi = adapter->IfType == IF_TYPE_ETHERNET_CSMACD ||
-                                             adapter->IfType == IF_TYPE_IEEE80211 || adapter->IfType == IF_TYPE_PPP;
-            if (!is_ethernet_or_wifi)
+            // Loopback is excluded unconditionally, BEFORE the force-include bypass below
+            // — the POSIX backends check IFF_LOOPBACK the same way, and the documented
+            // contract for force-including an interface is that it still cannot be
+            // loopback. Without this, force-including "Loopback Pseudo-Interface 1" would
+            // put 127.0.0.1 in the snapshot, since the only other loopback guards are the
+            // IfType whitelist and the description match that the bypass skips.
+            if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
             {
                 continue;
             }
 
             const std::string friendly = wide_to_utf8(adapter->FriendlyName);
             const std::string description = wide_to_utf8(adapter->Description);
-            if (description_excluded(friendly) || description_excluded(description))
-            {
-                continue;
-            }
-
             const std::string adapter_name{adapter->AdapterName != nullptr ? adapter->AdapterName : ""};
+
+            // A force-included adapter (matched on either its GUID-ish AdapterName or its
+            // friendly name — a user cannot reasonably be expected to know the former)
+            // skips the adapter-type and description heuristics, but not the OperStatus,
+            // DAD-state and link-local checks. See force_included_interfaces.
+            const auto &force_included = force_included_interfaces();
+            const bool is_force_included = force_included.find(adapter_name) != force_included.end() ||
+                                           force_included.find(friendly) != force_included.end();
+
+            if (!is_force_included)
+            {
+                const bool is_ethernet_or_wifi = adapter->IfType == IF_TYPE_ETHERNET_CSMACD ||
+                                                 adapter->IfType == IF_TYPE_IEEE80211 || adapter->IfType == IF_TYPE_PPP;
+                if (!is_ethernet_or_wifi)
+                {
+                    continue;
+                }
+
+                if (description_excluded(friendly) || description_excluded(description))
+                {
+                    continue;
+                }
+            }
 
             for (auto *uni = adapter->FirstUnicastAddress; uni != nullptr; uni = uni->Next)
             {
@@ -181,7 +206,10 @@ namespace provizio::dds::detail
                     }
                 }
 
-                snapshot.insert({adapter_name.empty() ? friendly : adapter_name, std::string{addr_text.data()}});
+                // OnLinkPrefixLength is already the CIDR prefix length, so unlike the
+                // POSIX backends there is no netmask to convert.
+                snapshot.insert({adapter_name.empty() ? friendly : adapter_name, std::string{addr_text.data()},
+                                 static_cast<unsigned int>(uni->OnLinkPrefixLength)});
             }
         }
 

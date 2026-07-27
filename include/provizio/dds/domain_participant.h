@@ -332,6 +332,26 @@ namespace provizio::dds
         void trigger_network_recovery_reset();
 
         /**
+         * @brief Whether the last @c trigger_network_recovery_reset left this
+         * participant unusable and so needs to be retried.
+         *
+         * A reset can fail part-way: the old Fast-DDS participant is destroyed and its
+         * endpoints torn down, and then either the replacement participant cannot be
+         * created or an individual endpoint fails to rebuild. The participant is then
+         * inert — publish / take report failure — and nothing in the event-driven path
+         * would ever come back to it, because the network need not change again.
+         * @c detail::network_recovery_coordinator polls this after every reset and
+         * retries the affected participants on its periodic safety-net tick.
+         *
+         * @return true if a retry is outstanding; false when the participant is intact
+         *         (including before any reset has ever run).
+         */
+        bool needs_network_recovery_retry() const noexcept
+        {
+            return recovery_retry_needed.load(std::memory_order_acquire);
+        }
+
+        /**
          * @brief Monotonically increasing identifier for the underlying Fast-DDS
          * participant. Starts at 1 on construction, increments by 1 on every
          * successful recreation in @c trigger_network_recovery_reset. Used by
@@ -497,6 +517,11 @@ namespace provizio::dds
         std::shared_mutex reset_mutex;
         eprosima::fastdds::dds::DomainParticipant *participant{nullptr};
         std::atomic<std::uint64_t> generation{0};
+
+        // See needs_network_recovery_retry(). Written only by
+        // trigger_network_recovery_reset (under the exclusive lifecycle lock), read by
+        // the coordinator's coalescer thread — hence atomic rather than plain bool.
+        std::atomic<bool> recovery_retry_needed{false};
 
         // Mutual exclusion between `register_endpoint` and
         // `trigger_network_recovery_reset`. Serializes the two so a reset cannot

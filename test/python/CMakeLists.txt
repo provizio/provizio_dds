@@ -273,7 +273,8 @@ add_test(NAME accumulation_test COMMAND
 set(_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV)
 foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         reset_refreshes_fastdds_interface_cache teardown_deferred
-        coalescer_resets_on_transient_flap)
+        coalescer_resets_on_transient_flap snapshot_prefix_length
+        netmask_read_is_bounded netlink_binds_before_snapshot)
     add_test(NAME python_network_recovery_${_nrt_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler
         ./python_network_recovery_test.py ${_nrt_case}
@@ -292,6 +293,25 @@ foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
     else()
         set_tests_properties(python_network_recovery_${_nrt_case} PROPERTIES TIMEOUT 30)
     endif()
+endforeach()
+
+# The safety-net tick cases drive run_safety_net_tick_for_test() from the test thread,
+# which is only safe while the coordinator is idle — so they disable the monitor's own
+# periodic tick rather than race it. Mirrors the C++ entries in
+# test/network_recovery/CMakeLists.txt.
+foreach(_nrt_tick_case safety_net_detects_missed_change safety_net_reopens_dead_monitor
+        safety_net_retries_failed_rebuild)
+    add_test(NAME python_network_recovery_${_nrt_tick_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        ./python_network_recovery_test.py ${_nrt_tick_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    set(_tick_env "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
+    if(WIN32)
+        list(APPEND _tick_env "PATH=${PROVIZIO_DDS_TEST_PATH}")
+    endif()
+    set_tests_properties(python_network_recovery_${_nrt_tick_case}
+        PROPERTIES TIMEOUT 45 ENVIRONMENT "${_tick_env}")
 endforeach()
 
 # Discovered-endpoints / type-registry suite — Python mirror of the C++
@@ -402,6 +422,22 @@ _python_nr_env_test(python_network_recovery_env_off     env_off     "off")
 _python_nr_env_test(python_network_recovery_env_truthy  env_truthy  "yes")
 _python_nr_env_test(python_network_recovery_env_falsy   env_falsy   "NO")
 _python_nr_env_test(python_network_recovery_env_garbage env_garbage "banana")
+
+# Force-included interfaces — same one-shot-per-process caching, so it needs its own
+# process too. The value deliberately carries stray whitespace and an empty entry.
+# Written out rather than routed through _python_nr_env_test because it overrides a
+# different variable.
+add_test(NAME python_network_recovery_extra_interfaces_env COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler
+    ./python_network_recovery_test.py extra_interfaces_env
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set(_extra_if_env "PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES=docker0, br-test ,,veth9")
+if(WIN32)
+    list(APPEND _extra_if_env "PATH=${PROVIZIO_DDS_TEST_PATH}")
+endif()
+set_tests_properties(python_network_recovery_extra_interfaces_env
+    PROPERTIES TIMEOUT 30 ENVIRONMENT "${_extra_if_env}")
 
 # 1.10.x Python API source-compat: ensures `ReturnCode_t.RETCODE_OK`,
 # `pub_sub_type.getName()`, and other camelCase / enum-class spellings
