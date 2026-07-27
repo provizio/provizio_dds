@@ -158,15 +158,19 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
         endif(PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
 
         if(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
-            execute_process(COMMAND uname -r OUTPUT_VARIABLE HOST_KERNEL_VERSION)
+            execute_process(COMMAND uname -r OUTPUT_VARIABLE HOST_KERNEL_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
             file(READ "${BIN_CACHE_PATH}/kernel_version" CACHE_KERNEL_VERSION)
+            string(STRIP "${CACHE_KERNEL_VERSION}" CACHE_KERNEL_VERSION)
             # The prebuilt cache is normally only used when the host kernel is at
             # least as new as the kernel it was built on. The cached libraries are
             # pure userspace (Fast DDS / Fast CDR over sockets + shared memory) and
             # do not depend on the build kernel's version, so FORCE_BIN_CACHE (CMake
             # option or environment variable) lets hosts whose kernel lags the CI
             # cache-build kernel still use the prebuilt binaries.
-            if(FORCE_BIN_CACHE OR (DEFINED ENV{FORCE_BIN_CACHE} AND NOT "$ENV{FORCE_BIN_CACHE}" STREQUAL "FALSE"))
+            # Evaluate the env var through a normal variable so if() applies standard
+            # boolean semantics (OFF/0/FALSE/NO/empty are false; ON/1/TRUE are true).
+            set(FORCE_BIN_CACHE_ENV "$ENV{FORCE_BIN_CACHE}")
+            if(FORCE_BIN_CACHE OR FORCE_BIN_CACHE_ENV)
                 set(USE_BIN_CACHE TRUE)
                 message(STATUS "FORCE_BIN_CACHE set: using prebuilt binaries regardless of the cache build kernel (${CACHE_KERNEL_VERSION})")
             elseif("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
