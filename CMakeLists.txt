@@ -43,6 +43,7 @@ if(PYTHON_PACKAGES_INSTALL_DIR)
     string(REPLACE "\\" "/" PYTHON_PACKAGES_INSTALL_DIR "${PYTHON_PACKAGES_INSTALL_DIR}")
 endif()
 set(IGNORE_BIN_CACHE OFF CACHE BOOL "Enable to force build from sources instead of using prebuilt cache")
+set(FORCE_BIN_CACHE OFF CACHE BOOL "Use the prebuilt cache even when it was built on a newer Linux kernel than the host (the cached libraries are userspace and kernel-version independent); also honoured via the FORCE_BIN_CACHE environment variable")
 set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binaries, skip standard C++ libraries")
 set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
 set(DISABLE_EIGEN OFF CACHE BOOL "Force plain-CPU linear algebra in point clouds accumulation for this build even when Eigen3 is installed (consumers make their own choice at compile time — the accumulation maths path is header-only)")
@@ -159,17 +160,30 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
         if(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
             execute_process(COMMAND uname -r OUTPUT_VARIABLE HOST_KERNEL_VERSION)
             file(READ "${BIN_CACHE_PATH}/kernel_version" CACHE_KERNEL_VERSION)
-            if("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
+            # The prebuilt cache is normally only used when the host kernel is at
+            # least as new as the kernel it was built on. The cached libraries are
+            # pure userspace (Fast DDS / Fast CDR over sockets + shared memory) and
+            # do not depend on the build kernel's version, so FORCE_BIN_CACHE (CMake
+            # option or environment variable) lets hosts whose kernel lags the CI
+            # cache-build kernel still use the prebuilt binaries.
+            if(FORCE_BIN_CACHE OR (DEFINED ENV{FORCE_BIN_CACHE} AND NOT "$ENV{FORCE_BIN_CACHE}" STREQUAL "FALSE"))
+                set(USE_BIN_CACHE TRUE)
+                message(STATUS "FORCE_BIN_CACHE set: using prebuilt binaries regardless of the cache build kernel (${CACHE_KERNEL_VERSION})")
+            elseif("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
+                set(USE_BIN_CACHE TRUE)
+            else()
+                set(USE_BIN_CACHE FALSE)
+                message(STATUS "Prebuilt binaries located, but won't be used as they were built in a newer Linux kernel (set FORCE_BIN_CACHE=ON to override)")
+            endif()
+
+            if(USE_BIN_CACHE)
                 set(HAS_BIN_CACHE TRUE)
 
                 if(NOT INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS)
                     # Softlinks need to be added, as cache doesn't include them
                     execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/fully_qualified_fastdds_libs.sh" "${BIN_CACHE_PATH}/lib" "revert")
                 endif(NOT INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS)
-
-            else("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
-                message(STATUS "Prebuilt binaries located, but won't be used as they were built in a newer Linux kernel")
-            endif("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
+            endif()
         endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
     elseif(WIN32)
         # Find PowerShell
