@@ -14,3 +14,26 @@ nonnull-attribute:SerializedPayload.cpp
 # internal issue, leaving it unsuppressed makes UBSan symbolize a stack trace on every periodic firing,
 # which on macOS is slow enough to stall the timed-event thread and break pub/sub delivery timing.
 float-cast-overflow:TimedEvent.cpp
+
+# Fast-DDS' DomainParticipantImpl::disable() calls set_listener(nullptr, <default timeout>) to drain
+# in-flight listener callbacks, and that default is on the order of std::chrono::seconds::max().
+# libstdc++ 9 implements condition_variable::wait_until(steady_clock) by converting the deadline
+# through system_clock (system_clock::now() + (deadline - steady_clock::now())), so adding ~9.2e18
+# nanoseconds to system_clock's epoch-based ~1.78e18 overflows int64. Benign — the value means "wait
+# indefinitely" — and confined to Fast-DDS: it is reached from every participant destruction, so it can
+# surface in any test. Only libstdc++ 9 converts via system_clock (11+ has a dedicated steady_clock
+# path), which is why it appears solely on the gcc-9 jetson-20.04 Debug jobs.
+#
+# Suppressed for the same reason as the TimedEvent entry above: leaving it unsuppressed makes UBSan
+# symbolize a 25-frame stack across libfastdds.so, and on a slow aarch64 runner that stall is enough to
+# break pub/sub delivery timing (observed as a reliable_pub_sub ctest timeout whose baseline is ~6.5s).
+#
+# Scoped to the MODULE, not to `chrono`, deliberately: the overflow is located in a <chrono> header but
+# compiled into libfastdds.so, and a `signed-integer-overflow:chrono` entry would also mask a genuine
+# overflow in provizio_dds' own chrono arithmetic (the network-recovery coalescer does deadline maths).
+# Substring matching makes this cover the versioned SONAME (libfastdds.so.3.6) too.
+#
+# The cost of the module scope: this hides EVERY signed-integer overflow anywhere in libfastdds.so,
+# not just the set_listener one — if a future Fast-DDS upgrade introduces a genuine overflow in that
+# library, the sanitizer jobs will no longer catch it. Re-evaluate this entry on Fast-DDS bumps.
+signed-integer-overflow:libfastdds.so
