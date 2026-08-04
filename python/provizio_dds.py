@@ -314,6 +314,12 @@ def _register_large_sample_qos_defaults():
         "MultiEchoLaserScanPubSubType",  # sensor_msgs/msg/MultiEchoLaserScan
         "PointCloud2PubSubType",      # sensor_msgs/msg/PointCloud2
         "OccupancyGridPubSubType",    # nav_msgs/msg/OccupancyGrid
+        # A freespace polygon is a sequence of vertices, so a dense one runs to several
+        # KB and fragments over UDP; without the async + KEEP_LAST(4) override a
+        # reliable writer's single history slot is overwritten before a momentarily
+        # slow reader has acknowledged the previous sample's fragments.
+        "PolygonStampedPubSubType",   # geometry_msgs/msg/PolygonStamped
+        "PolygonInstanceStampedPubSubType",  # geometry_msgs/msg/PolygonInstanceStamped
     )
     for type_name in large_sample_pub_sub_type_names:
         try:

@@ -392,6 +392,22 @@ foreach(_dt_case defaults env_overrides env_invalid multi_participant)
     endif()
 endforeach()
 
+# Cross-language parity of the large-sample QoS default overrides: the Python
+# registration must cover the C++ qos_defaults<T> specialization list exactly (the
+# header, passed from the source tree, is the source of truth). Import-only — no
+# DDS participants — so it returns in milliseconds.
+add_test(NAME python_large_sample_qos_parity COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler
+    ./python_qos_parity_test.py "${CMAKE_SOURCE_DIR}/include/provizio/dds/qos_defaults.h"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+if(WIN32)
+    set_tests_properties(python_large_sample_qos_parity PROPERTIES TIMEOUT 30
+        ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
+else()
+    set_tests_properties(python_large_sample_qos_parity PROPERTIES TIMEOUT 30)
+endif()
+
 # Crash-safety of throwing user callbacks (Python mirror of the C++
 # test/callback_exceptions/ suite): a raising user callback must be reported
 # through the configurable logger and must NOT abort the process / silently stop a

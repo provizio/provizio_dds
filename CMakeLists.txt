@@ -760,6 +760,7 @@ else(HAS_BIN_CACHE)
         src/logging.cpp
         src/network_recovery.cpp
         src/point_cloud2.cpp
+        src/qos_defaults_checks.cpp
         src/request_response.cpp
         src/topic.cpp
     )

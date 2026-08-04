@@ -189,7 +189,7 @@ For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/
 - Durability and history depth are now configured **independently** (they used to be a single combined parameter):
   - `durability_kind` selects the DDS durability QoS — pass `TRANSIENT_LOCAL_DURABILITY_QOS` for late-joiner delivery or `VOLATILE_DURABILITY_QOS` to force volatile. Leave it unset (`std::nullopt` in C++, omit / `None` in Python) to keep the Fast-DDS / XML-profile default.
   - `history_depth` controls the KEEP_LAST history depth only. Pass `use_default_history_depth` (`-1`; `USE_DEFAULT_HISTORY_DEPTH` in Python), or any non-positive value, to keep the default depth (the per-type default where one exists — see the large-data note below — otherwise Fast-DDS's default); pass a positive value for an explicit KEEP_LAST depth.
-- Large-sample types (`sensor_msgs::msg::Image`, `CompressedImage`, `MultiEchoLaserScan`, `PointCloud2`, and `nav_msgs::msg::OccupancyGrid`) default to **ASYNCHRONOUS** publishing with a small **KEEP_LAST(4)** history, so a multi-megabyte write hands off to the participant's async sender thread and a momentarily slow consumer doesn't drop frames. These are writer-local defaults and do not affect reader/writer matching or ROS 2 interoperability.
+- Large-sample types (`sensor_msgs::msg::Image`, `CompressedImage`, `MultiEchoLaserScan`, `PointCloud2`, `nav_msgs::msg::OccupancyGrid`, and the `geometry_msgs::msg::PolygonStamped` / `PolygonInstanceStamped` freespace polygons) default to **ASYNCHRONOUS** publishing with a small **KEEP_LAST(4)** history, so a multi-megabyte write hands off to the participant's async sender thread and a momentarily slow consumer doesn't drop frames. These are writer-local defaults and do not affect reader/writer matching or ROS 2 interoperability.
 - You can optionally receive subscriber match/unmatch notifications. See `provizio::dds::make_publisher` (C++) or `provizio_dds.Publisher` (Python) for parameters.
 
 ## Receiving Data
@@ -424,8 +424,6 @@ participant_udp_only = provizio_dds.make_domain_participant(transport=provizio_d
 ```
 
 The large-sample message types listed under [Publishing Data](#publishing-data) additionally default to asynchronous publishing with a small KEEP_LAST history, which complements the enlarged socket buffers for high-throughput data.
-
-For details see [include/provizio/dds/domain_participant.h](include/provizio/dds/domain_participant.h).
 
 ## Discovery Tuning
 

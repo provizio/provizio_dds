@@ -138,6 +138,11 @@ namespace nav_msgs::msg
 {
     class OccupancyGridPubSubType;
 }  // namespace nav_msgs::msg
+namespace geometry_msgs::msg
+{
+    class PolygonInstanceStampedPubSubType;
+    class PolygonStampedPubSubType;
+}  // namespace geometry_msgs::msg
 
 namespace provizio::dds
 {
@@ -178,6 +183,21 @@ namespace provizio::dds
     {
     };
     template <> struct qos_defaults<::nav_msgs::msg::OccupancyGridPubSubType> final : detail::large_sample_qos_defaults
+    {
+    };
+    // A freespace polygon is a sequence of vertices, so a dense one runs to several KB
+    // and fragments over UDP. Without this specialization it would take the primary
+    // template's synchronous publish and Fast-DDS's KEEP_LAST(1) writer history, which
+    // leaves a reliable writer no room to retransmit: the single history slot is
+    // overwritten by the next sample before a momentarily slow reader has acknowledged
+    // the fragments of the previous one.
+    template <>
+    struct qos_defaults<::geometry_msgs::msg::PolygonInstanceStampedPubSubType> final
+        : detail::large_sample_qos_defaults
+    {
+    };
+    template <>
+    struct qos_defaults<::geometry_msgs::msg::PolygonStampedPubSubType> final : detail::large_sample_qos_defaults
     {
     };
 }  // namespace provizio::dds
