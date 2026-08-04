@@ -28,12 +28,24 @@ if ($WithPython -ne "OFF") {
     $swigVersion = "4.4.1"
     $swigInstallDir = "C:\swig"
     $swigZip = Join-Path $env:TEMP "swigwin-$swigVersion.zip"
-    $swigUrl = "https://sourceforge.net/projects/swig/files/swigwin/swigwin-$swigVersion/swigwin-$swigVersion.zip/download"
+    # The generic redirect lets SourceForge pick a geo mirror, and a single mirror can
+    # refuse connections for hours (recurring CI failure: "curl: (28) Failed to connect
+    # to pilotfiber.dl.sourceforge.net"). Retry each URL, then fall back to the master
+    # mirror and the plain downloads redirector rather than failing on the first pick.
+    $swigUrls = @(
+        "https://sourceforge.net/projects/swig/files/swigwin/swigwin-$swigVersion/swigwin-$swigVersion.zip/download",
+        "https://master.dl.sourceforge.net/project/swig/swigwin/swigwin-$swigVersion/swigwin-$swigVersion.zip?viasf=1",
+        "https://downloads.sourceforge.net/project/swig/swigwin/swigwin-$swigVersion/swigwin-$swigVersion.zip"
+    )
 
     Write-Host "Installing SWIG $swigVersion..."
     # Use curl.exe (available on all modern Windows) — Invoke-WebRequest chokes on
     # SourceForge redirects in PowerShell 7 on Windows Server.
-    & curl.exe -fsSL -o $swigZip $swigUrl
+    foreach ($swigUrl in $swigUrls) {
+        & curl.exe -fsSL --connect-timeout 20 --retry 3 --retry-all-errors --retry-delay 3 -o $swigZip $swigUrl
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $swigZip)) { break }
+        Write-Host "Download failed from $swigUrl (curl exit $LASTEXITCODE); trying the next mirror..."
+    }
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $swigZip)) { throw "Failed to download SWIG $swigVersion" }
 
     Expand-Archive -Path $swigZip -DestinationPath $env:TEMP -Force
