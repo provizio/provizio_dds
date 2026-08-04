@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -44,6 +45,7 @@
 #include <fastdds/rtps/builtin/data/PublicationBuiltinTopicData.hpp>
 #include <fastdds/rtps/builtin/data/SubscriptionBuiltinTopicData.hpp>
 #include <fastdds/rtps/reader/ReaderDiscoveryStatus.hpp>
+#include <fastdds/rtps/transport/shared_mem/SharedMemTransportDescriptor.hpp>
 #include <fastdds/rtps/writer/WriterDiscoveryStatus.hpp>
 
 namespace provizio::dds
@@ -175,6 +177,106 @@ namespace provizio::dds
                             << default_udp_socket_buffer_size;
             }
             return default_udp_socket_buffer_size;
+        }
+
+#ifdef __linux__
+        // Single unsigned value from a /proc or /sys file, or 0 if it can't be read.
+        std::uint64_t read_kernel_value(const char *const path)
+        {
+            std::ifstream file{path};
+            std::uint64_t value = 0;
+            if (file >> value)
+            {
+                return value;
+            }
+            return 0;
+        }
+#endif  // __linux__
+
+        // The kernel silently clamps SO_RCVBUF/SO_SNDBUF to net.core.rmem_max/wmem_max
+        // (SO_RCVBUFFORCE, which would bypass it, needs CAP_NET_ADMIN). On a stock host
+        // those default to ~208 KB, so the buffer chosen above can be reduced by two
+        // orders of magnitude with nothing to show for it: large samples then lose
+        // fragments under load and reliable delivery stalls or turns bursty. Report the
+        // shortfall once per process, naming the sysctl to raise, rather than letting the
+        // requested size look effective when it is not.
+        void warn_if_socket_buffers_are_capped([[maybe_unused]] const std::uint32_t requested)
+        {
+#ifdef __linux__
+            static std::once_flag warned;
+            std::call_once(warned, [requested] {
+                const std::uint64_t rmem_max = read_kernel_value("/proc/sys/net/core/rmem_max");
+                const std::uint64_t wmem_max = read_kernel_value("/proc/sys/net/core/wmem_max");
+                for (const auto &limit :
+                     {std::make_pair("net.core.rmem_max", rmem_max), std::make_pair("net.core.wmem_max", wmem_max)})
+                {
+                    if (limit.second != 0 && limit.second < requested)
+                    {
+                        log_warning() << "requested " << requested << "-byte UDP socket buffers but " << limit.first
+                                      << " is " << limit.second << ", so the kernel caps them there; large samples "
+                                      << "(camera frames, point clouds) may lose fragments under load. Raise it, e.g. "
+                                      << "sysctl -w " << limit.first << "=" << requested;
+                    }
+                }
+            });
+#endif  // __linux__
+        }
+
+        // Shared-memory segment size, configured separately from the UDP socket buffer
+        // size. Fast-DDS derives the SHM segment from BuiltinTransportsOptions'
+        // sockets_buffer_size, so a large UDP buffer silently inflates every
+        // participant's segment too (16 MiB of socket buffer produces a ~33.5 MiB
+        // segment against Fast-DDS's ~537 KiB default). Multiplied by the participants on
+        // a host that is not a big machine, that exhausts /dev/shm — and once it is full,
+        // SHM transport registration fails for every new participant, silently degrading
+        // all same-host traffic to UDP. Keeping the two knobs separate lets a
+        // memory-constrained target shrink the segment without giving up UDP buffering.
+        // The default preserves the historical size, so behaviour is unchanged unless set.
+        constexpr std::uint32_t unset_shm_segment_size = 0;
+
+        std::uint32_t resolve_shm_segment_size()
+        {
+            const char *const env = std::getenv("PROVIZIO_DDS_SHM_SEGMENT_SIZE");  // NOLINT: getenv required
+            if (env != nullptr && *env != '\0')
+            {
+                char *end = nullptr;
+                const std::uint64_t parsed = std::strtoull(env, &end, 10);  // NOLINT: C numeric parse
+                if (end != nullptr && *end == '\0' && parsed > 0U &&
+                    parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+                {
+                    return static_cast<std::uint32_t>(parsed);
+                }
+                log_error() << "ignoring invalid PROVIZIO_DDS_SHM_SEGMENT_SIZE='" << env << "'";
+            }
+            return unset_shm_segment_size;
+        }
+
+        // Report a /dev/shm that cannot fit a handful more segments of the size this
+        // participant is about to allocate. Exhaustion shows up only as an obscure
+        // "Failed to create segment" from Fast-DDS followed by silent UDP fallback.
+        void warn_if_shared_memory_is_nearly_full()
+        {
+#ifdef __linux__
+            static std::once_flag warned;
+            std::call_once(warned, [] {
+                std::error_code error;
+                const auto space = std::filesystem::space("/dev/shm", error);
+                if (error || space.capacity == 0)
+                {
+                    return;
+                }
+                constexpr std::uintmax_t bytes_per_mebibyte = std::uintmax_t{1024} * std::uintmax_t{1024};
+                constexpr std::uintmax_t low_water_bytes = std::uintmax_t{256} * bytes_per_mebibyte;
+                if (space.available < low_water_bytes)
+                {
+                    log_warning() << "/dev/shm has only " << (space.available / bytes_per_mebibyte) << " MiB free of "
+                                  << (space.capacity / bytes_per_mebibyte)
+                                  << " MiB; shared-memory transport registration can fail and fall back to UDP. "
+                                  << "Stale fastdds_* segments from participants that did not exit cleanly are the "
+                                  << "usual cause";
+                }
+            });
+#endif  // __linux__
         }
 
         // Name of the env variable Fast-DDS reads to locate its XML profiles file.
@@ -457,10 +559,34 @@ namespace provizio::dds
 #endif
                 const bool use_shared_memory = platform_allows_shm && (transport != transport_mode::udp_only);
                 eprosima::fastdds::rtps::BuiltinTransportsOptions transport_options;
-                transport_options.sockets_buffer_size = resolve_udp_socket_buffer_size();
+                const std::uint32_t socket_buffer_size = resolve_udp_socket_buffer_size();
+                transport_options.sockets_buffer_size = socket_buffer_size;
                 cached_qos.setup_transports(use_shared_memory ? eprosima::fastdds::rtps::BuiltinTransports::DEFAULT
                                                               : eprosima::fastdds::rtps::BuiltinTransports::UDPv4,
                                             transport_options);
+                warn_if_socket_buffers_are_capped(socket_buffer_size);
+
+                if (use_shared_memory)
+                {
+                    // setup_transports leaves the descriptors it built in user_transports, so
+                    // the shared-memory segment can be resized here without reimplementing
+                    // (and drifting from) the rest of what it configures.
+                    const std::uint32_t shm_segment_size = resolve_shm_segment_size();
+                    if (shm_segment_size != unset_shm_segment_size)
+                    {
+                        for (const auto &descriptor : cached_qos.transport().user_transports)
+                        {
+                            const auto shm =
+                                std::dynamic_pointer_cast<eprosima::fastdds::rtps::SharedMemTransportDescriptor>(
+                                    descriptor);
+                            if (shm)
+                            {
+                                shm->segment_size(shm_segment_size);
+                            }
+                        }
+                    }
+                    warn_if_shared_memory_is_nearly_full();
+                }
             }
         }
 
