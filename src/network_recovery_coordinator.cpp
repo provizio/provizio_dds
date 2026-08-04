@@ -22,6 +22,7 @@
 #include <exception>
 #include <string>
 
+#include "detail/env_utils.h"
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/logging.h"
 
@@ -50,33 +51,6 @@ namespace provizio::dds::detail
         // the failure mode impossible. Callers who want "never" have the documented 0.
         constexpr std::chrono::seconds max_safety_net_period{24 * 60 * 60};
 
-        // Env values are echoed back in warnings; cap what we quote so a pathological
-        // value cannot flood the log, and drop control characters so it cannot forge log
-        // lines in whatever ingests them.
-        std::string sanitise_env_value_for_log(const std::string &raw)
-        {
-            // ASCII C0 controls are everything below the first printable character
-            // (space); DEL sits just past the printable range.
-            constexpr unsigned char first_printable_ascii = 0x20;
-            constexpr unsigned char ascii_delete = 0x7F;
-            constexpr std::size_t max_quoted_length = 32;
-
-            std::string result = raw.substr(0, std::min(raw.size(), max_quoted_length));
-            for (auto &chr : result)
-            {
-                const auto value = static_cast<unsigned char>(chr);
-                if (value < first_printable_ascii || value == ascii_delete)
-                {
-                    chr = '?';
-                }
-            }
-            if (raw.size() > max_quoted_length)
-            {
-                result += "...";
-            }
-            return result;
-        }
-
         // Resolves the safety-net period from the environment. Any warning is reported
         // through @p warning rather than logged here: the only caller holds
         // registry_mutex, and a user log callback that re-enters make_domain_participant
@@ -93,7 +67,7 @@ namespace provizio::dds::detail
             }
 
             const std::string value{raw};
-            const auto quoted = sanitise_env_value_for_log(value);
+            const auto quoted = detail::sanitise_env_value_for_log(value);
             const auto reject = [&](const char *reason) {
                 warning = std::string{safety_net_env_var_name} + "=" + quoted + " " + reason +
                           "; using the default of " + std::to_string(default_period.count()) + "s";

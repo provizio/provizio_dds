@@ -28,6 +28,7 @@
 #include <string>
 #include <utility>
 
+#include "detail/env_utils.h"
 #include "provizio/dds/detail/network_recovery_coordinator.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/logging.h"
@@ -106,14 +107,13 @@ namespace provizio::dds
             {
                 return fallback;
             }
-            char *end = nullptr;
-            const std::uint64_t parsed = std::strtoull(env, &end, 10);  // NOLINT: C numeric parse
-            if (end != nullptr && *end == '\0' && parsed > 0U &&
-                parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+            const std::uint32_t parsed = detail::parse_positive_u32(env);
+            if (parsed != 0U)
             {
-                return static_cast<std::uint32_t>(parsed);
+                return parsed;
             }
-            log_warning() << "ignoring invalid " << name << "='" << env << "'; using default " << fallback;
+            log_warning() << "ignoring invalid " << name << "='" << detail::sanitise_env_value_for_log(env)
+                          << "'; using default " << fallback;
             return fallback;
         }
 
@@ -166,14 +166,13 @@ namespace provizio::dds
             const char *const env = std::getenv("PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE");  // NOLINT: getenv required
             if (env != nullptr && *env != '\0')
             {
-                char *end = nullptr;
-                const std::uint64_t parsed = std::strtoull(env, &end, 10);  // NOLINT: C numeric parse
-                if (end != nullptr && *end == '\0' && parsed > 0U &&
-                    parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+                const std::uint32_t parsed = detail::parse_positive_u32(env);
+                if (parsed != 0U)
                 {
-                    return static_cast<std::uint32_t>(parsed);
+                    return parsed;
                 }
-                log_error() << "ignoring invalid PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE='" << env << "'; using default "
+                log_error() << "ignoring invalid PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE='"
+                            << detail::sanitise_env_value_for_log(env) << "'; using default "
                             << default_udp_socket_buffer_size;
             }
             return default_udp_socket_buffer_size;
@@ -239,16 +238,98 @@ namespace provizio::dds
             const char *const env = std::getenv("PROVIZIO_DDS_SHM_SEGMENT_SIZE");  // NOLINT: getenv required
             if (env != nullptr && *env != '\0')
             {
-                char *end = nullptr;
-                const std::uint64_t parsed = std::strtoull(env, &end, 10);  // NOLINT: C numeric parse
-                if (end != nullptr && *end == '\0' && parsed > 0U &&
-                    parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+                const std::uint32_t parsed = detail::parse_positive_u32(env);
+                if (parsed != 0U)
                 {
-                    return static_cast<std::uint32_t>(parsed);
+                    return parsed;
                 }
-                log_error() << "ignoring invalid PROVIZIO_DDS_SHM_SEGMENT_SIZE='" << env << "'";
+                log_error() << "ignoring invalid PROVIZIO_DDS_SHM_SEGMENT_SIZE='"
+                            << detail::sanitise_env_value_for_log(env) << "'";
             }
             return unset_shm_segment_size;
+        }
+
+        // Send-side cap for RTPS message size (bytes), overridable via
+        // PROVIZIO_DDS_MAX_MESSAGE_SIZE. Maps to the Fast-DDS "fastdds.max_message_size"
+        // participant property, which caps OUTPUT messages only — reception of larger
+        // datagrams from differently-configured peers is unaffected, so mixed deployments
+        // (including default-configured ROS 2 peers) stay compatible.
+        //
+        // The default (1400) keeps every UDP datagram within a single ~1500-byte-MTU link
+        // frame: a sample above the cap is sent as individually-NACKable RTPS DATA_FRAG
+        // submessages instead of one large UDP datagram that the IP layer splits into many
+        // link frames. With IP fragmentation, losing ANY link frame loses the whole datagram
+        // (first-try survival (1-p)^N at per-frame loss p), every reliable retransmission
+        // re-runs that same gauntlet, and each incomplete datagram parks ~its full size in
+        // the receiver kernel's reassembly cache (net.ipv4.ipfrag_high_thresh, 4 MB stock)
+        // for net.ipv4.ipfrag_time (30 s stock) — under sustained loss the cache fills within
+        // seconds and refuses all new reassemblies host-wide, gating every fragmented topic
+        // in ~30 s windows while single-frame topics keep flowing. Measured at 10% injected
+        // frame loss with 28 KB point clouds: ~36% delivered in 30 s blackout cycles with the
+        // cap left at Fast-DDS's 65500 maximum vs 99%+ with 1400, p90 latency 160 ms.
+        //
+        // The cost is per-datagram sender/receiver overhead on very large samples: a multi-MB
+        // sample pays roughly 10x the CPU at 1400 vs 65500 (a 6 MB frame becomes ~4500
+        // datagrams instead of ~100). Hosts publishing such bulk streams (raw camera frames)
+        // over clean links can raise the cap up to 65500 (Fast-DDS's own maximum and
+        // historical single-datagram behaviour) to trade loss resilience back for CPU.
+        constexpr std::uint32_t default_max_message_size = 1400;
+
+        // Floor for the cap: Fast-DDS requires a complete participant-discovery (PDP)
+        // announcement to fit in one RTPS message, but validates that only for transport
+        // descriptors (~568 bytes with default locator counts), NOT for the
+        // fastdds.max_message_size property — a property below it breaks discovery with
+        // no diagnostic at all. 576 (the classic IPv4 minimum-reassembly datagram size)
+        // sits safely above that requirement. Note the PDP announcement grows with the
+        // participant's own locator count (~56 bytes per additional addressed interface),
+        // and the PDP writer is best-effort stateless — no fragmentation — so ANY value of
+        // this cap has an interface-count ceiling: the 1400 default accommodates roughly
+        // 15 addressed interfaces beyond the baseline; hosts with more must raise the cap.
+        constexpr std::uint32_t minimum_max_message_size = 576;
+
+        // Fast-DDS's own hard ceiling for an RTPS message (its s_maximumMessageSize):
+        // the property is min()'d against the transports' maximum anyway, so anything
+        // above it can only be a typo — clamp with a warning rather than let Fast-DDS
+        // silently ignore the excess.
+        constexpr std::uint32_t maximum_max_message_size = 65500;
+
+        // Accepted values below this leave thin headroom for the participant's own
+        // discovery announcement (~612 bytes baseline with FASTDDS_STATISTICS compiled
+        // in, as it is here, +~56 bytes per additional addressed interface) — legal,
+        // but close enough to the silent-discovery-breakage line to deserve a warning.
+        constexpr std::uint32_t thin_discovery_headroom_max_message_size = 1000;
+
+        std::uint32_t resolve_max_message_size()
+        {
+            const char *const env = std::getenv("PROVIZIO_DDS_MAX_MESSAGE_SIZE");  // NOLINT: getenv required
+            if (env != nullptr && *env != '\0')
+            {
+                const std::uint32_t parsed = detail::parse_positive_u32(env);
+                if (parsed >= minimum_max_message_size)
+                {
+                    if (parsed > maximum_max_message_size)
+                    {
+                        log_warning() << "PROVIZIO_DDS_MAX_MESSAGE_SIZE=" << detail::sanitise_env_value_for_log(env)
+                                      << " exceeds Fast-DDS's maximum RTPS message size; clamping to "
+                                      << maximum_max_message_size;
+                        return maximum_max_message_size;
+                    }
+                    if (parsed < thin_discovery_headroom_max_message_size)
+                    {
+                        log_warning() << "PROVIZIO_DDS_MAX_MESSAGE_SIZE=" << parsed
+                                      << " leaves thin headroom for the participant discovery announcement "
+                                         "(~612 bytes baseline, ~56 more per additional addressed interface); "
+                                         "discovery breaks with no diagnostic if it no longer fits";
+                    }
+                    return parsed;
+                }
+                log_error() << "ignoring invalid PROVIZIO_DDS_MAX_MESSAGE_SIZE='"
+                            << detail::sanitise_env_value_for_log(env)
+                            << "' (must be an integer >= " << minimum_max_message_size
+                            << ", so a discovery announcement fits in one message); using default "
+                            << default_max_message_size;
+            }
+            return default_max_message_size;
         }
 
         // Report a /dev/shm that cannot fit a handful more segments of the size this
@@ -529,6 +610,12 @@ namespace provizio::dds
                               << duration_to_seconds(discovery_config.leaseDuration) * ms_per_second_f
                               << " ms); peers may be declared lost between announcements";
             }
+
+            // Output-message-size cap (see resolve_max_message_size). Applied outside the
+            // FASTDDS_BUILTIN_TRANSPORTS guard below: it caps the RTPS output path whichever
+            // transports carry it, so a user-selected transport set still honours it.
+            cached_qos.properties().properties().emplace_back("fastdds.max_message_size",
+                                                              std::to_string(resolve_max_message_size()));
 
             // Transport tuning (skipped entirely when FASTDDS_BUILTIN_TRANSPORTS hands
             // control to the user). Two things happen here:

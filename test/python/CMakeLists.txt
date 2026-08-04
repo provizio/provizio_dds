@@ -392,6 +392,23 @@ foreach(_dt_case defaults env_overrides env_invalid multi_participant)
     endif()
 endforeach()
 
+# Participant transport tuning — Python mirror of the C++ test/transport_tuning/
+# subcommands: the MTU-sized default of the send-side RTPS message-size cap
+# (fastdds.max_message_size), the PROVIZIO_DDS_MAX_MESSAGE_SIZE env override, and the
+# fallback to the default on malformed input. Each subcommand is its own ctest entry so
+# per-case failure stays isolated. Every case creates one (or a handful of) participants
+# and only reads its QoS back, so it returns near-instantly.
+set(_PYTHON_TRANSPORT_TUNING_TEST_NAMES)
+foreach(_tt_case defaults env_override env_invalid)
+    add_test(NAME python_transport_tuning_${_tt_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        ./python_transport_tuning_test.py ${_tt_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    list(APPEND _PYTHON_TRANSPORT_TUNING_TEST_NAMES python_transport_tuning_${_tt_case})
+    set_tests_properties(python_transport_tuning_${_tt_case} PROPERTIES TIMEOUT 30)
+endforeach()
+
 # Cross-language parity of the large-sample QoS default overrides: the Python
 # registration must cover the C++ qos_defaults<T> specialization list exactly (the
 # header, passed from the source tree, is the source of truth). Import-only — no
@@ -550,6 +567,7 @@ if(WIN32)
         ${_PYTHON_DISCOVERED_ENDPOINTS_TEST_NAMES}
         ${_PYTHON_MATCH_PUBLISHER_TEST_NAMES}
         ${_PYTHON_DISCOVERY_TUNING_TEST_NAMES}
+        ${_PYTHON_TRANSPORT_TUNING_TEST_NAMES}
         ${_PYTHON_CALLBACK_EXCEPTIONS_TEST_NAMES}
         python_pub_python_sub python_pub_python_sub_type_reuse
         python_pub_cpp_sub cpp_pub_python_sub
