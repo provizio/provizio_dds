@@ -24,7 +24,12 @@ done_text = "DONE"
 mutex = threading.Lock()
 has_been_matched = False
 is_matched = False
-max_time_to_match = 60  # As we'll be testing in REALLY congested networks
+# Sized to the discovery-retry tail at the harshest profile — see the derivation in
+# congested_network_subscriber.py. Kept equal to the subscriber's budget so the
+# publisher waits for the same match event instead of publishing into the void (its
+# pre-match samples are lost to the volatile late-joining reader anyway), and so the
+# DONE retransmission window at the end covers a late-matching subscriber.
+max_time_to_match = 360
 wait_matched_before_publishing = (
     5  # So the subscriber recognizes matching on their side
 )

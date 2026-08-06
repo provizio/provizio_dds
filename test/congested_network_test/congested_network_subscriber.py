@@ -26,7 +26,15 @@ has_been_matched = False
 is_matched = False
 done = False
 times_received = 0
-max_time_to_match = 90  # As we'll be testing in REALLY congested networks
+# Match budget for REALLY congested networks, sized to the discovery-retry tail
+# observed in CI at the harshest profile (Discovery Server, 75% loss, 250 ms delay):
+# matching there is retry-driven (100 ms client announcements + reliable metatraffic
+# retransmission cycles), so time-to-match is roughly geometric — ~11% of runs missed
+# the former 90 s budget (~50% job failure across the six-run loop), and each further
+# 90 s multiplies the miss odds by ~0.11. 360 s puts a single run at ~1.5e-4 and a
+# six-run job at ~0.1%, while green runs pay nothing: the wait exits the moment
+# matching happens. Only genuinely-broken runs sit out the full budget.
+max_time_to_match = 360
 time_test_started = time.time()
 
 
