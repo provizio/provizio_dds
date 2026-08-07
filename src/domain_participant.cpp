@@ -15,9 +15,11 @@
 #include "provizio/dds/domain_participant.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -26,6 +28,7 @@
 #include <string>
 #include <utility>
 
+#include "detail/env_utils.h"
 #include "provizio/dds/detail/network_recovery_coordinator.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/logging.h"
@@ -43,6 +46,7 @@
 #include <fastdds/rtps/builtin/data/PublicationBuiltinTopicData.hpp>
 #include <fastdds/rtps/builtin/data/SubscriptionBuiltinTopicData.hpp>
 #include <fastdds/rtps/reader/ReaderDiscoveryStatus.hpp>
+#include <fastdds/rtps/transport/shared_mem/SharedMemTransportDescriptor.hpp>
 #include <fastdds/rtps/writer/WriterDiscoveryStatus.hpp>
 
 namespace provizio::dds
@@ -103,14 +107,13 @@ namespace provizio::dds
             {
                 return fallback;
             }
-            char *end = nullptr;
-            const std::uint64_t parsed = std::strtoull(env, &end, 10);  // NOLINT: C numeric parse
-            if (end != nullptr && *end == '\0' && parsed > 0U &&
-                parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+            const std::uint32_t parsed = detail::parse_positive_u32(env);
+            if (parsed != 0U)
             {
-                return static_cast<std::uint32_t>(parsed);
+                return parsed;
             }
-            log_warning() << "ignoring invalid " << name << "='" << env << "'; using default " << fallback;
+            log_warning() << "ignoring invalid " << name << "='" << detail::sanitise_env_value_for_log(env)
+                          << "'; using default " << fallback;
             return fallback;
         }
 
@@ -163,17 +166,198 @@ namespace provizio::dds
             const char *const env = std::getenv("PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE");  // NOLINT: getenv required
             if (env != nullptr && *env != '\0')
             {
-                char *end = nullptr;
-                const std::uint64_t parsed = std::strtoull(env, &end, 10);  // NOLINT: C numeric parse
-                if (end != nullptr && *end == '\0' && parsed > 0U &&
-                    parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+                const std::uint32_t parsed = detail::parse_positive_u32(env);
+                if (parsed != 0U)
                 {
-                    return static_cast<std::uint32_t>(parsed);
+                    return parsed;
                 }
-                log_error() << "ignoring invalid PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE='" << env << "'; using default "
+                log_error() << "ignoring invalid PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE='"
+                            << detail::sanitise_env_value_for_log(env) << "'; using default "
                             << default_udp_socket_buffer_size;
             }
             return default_udp_socket_buffer_size;
+        }
+
+#ifdef __linux__
+        // Single unsigned value from a /proc or /sys file, or 0 if it can't be read.
+        std::uint64_t read_kernel_value(const char *const path)
+        {
+            std::ifstream file{path};
+            std::uint64_t value = 0;
+            if (file >> value)
+            {
+                return value;
+            }
+            return 0;
+        }
+#endif  // __linux__
+
+        // The kernel silently clamps SO_RCVBUF/SO_SNDBUF to net.core.rmem_max/wmem_max
+        // (SO_RCVBUFFORCE, which would bypass it, needs CAP_NET_ADMIN). On a stock host
+        // those default to ~208 KB, so the buffer chosen above can be reduced by two
+        // orders of magnitude with nothing to show for it: large samples then lose
+        // fragments under load and reliable delivery stalls or turns bursty. Report the
+        // shortfall once per process, naming the sysctl to raise, rather than letting the
+        // requested size look effective when it is not.
+        void warn_if_socket_buffers_are_capped([[maybe_unused]] const std::uint32_t requested)
+        {
+#ifdef __linux__
+            static std::once_flag warned;
+            std::call_once(warned, [requested] {
+                const std::uint64_t rmem_max = read_kernel_value("/proc/sys/net/core/rmem_max");
+                const std::uint64_t wmem_max = read_kernel_value("/proc/sys/net/core/wmem_max");
+                for (const auto &limit :
+                     {std::make_pair("net.core.rmem_max", rmem_max), std::make_pair("net.core.wmem_max", wmem_max)})
+                {
+                    if (limit.second != 0 && limit.second < requested)
+                    {
+                        log_warning() << "requested " << requested << "-byte UDP socket buffers but " << limit.first
+                                      << " is " << limit.second << ", so the kernel caps them there; large samples "
+                                      << "(camera frames, point clouds) may lose fragments under load. Raise it, e.g. "
+                                      << "sysctl -w " << limit.first << "=" << requested;
+                    }
+                }
+            });
+#endif  // __linux__
+        }
+
+        // Shared-memory segment size, configured separately from the UDP socket buffer
+        // size. Fast-DDS derives the SHM segment from BuiltinTransportsOptions'
+        // sockets_buffer_size, so a large UDP buffer silently inflates every
+        // participant's segment too (16 MiB of socket buffer produces a ~33.5 MiB
+        // segment against Fast-DDS's ~537 KiB default). Multiplied by the participants on
+        // a host that is not a big machine, that exhausts /dev/shm — and once it is full,
+        // SHM transport registration fails for every new participant, silently degrading
+        // all same-host traffic to UDP. Keeping the two knobs separate lets a
+        // memory-constrained target shrink the segment without giving up UDP buffering.
+        // The default preserves the historical size, so behaviour is unchanged unless set.
+        constexpr std::uint32_t unset_shm_segment_size = 0;
+
+        std::uint32_t resolve_shm_segment_size()
+        {
+            const char *const env = std::getenv("PROVIZIO_DDS_SHM_SEGMENT_SIZE");  // NOLINT: getenv required
+            if (env != nullptr && *env != '\0')
+            {
+                const std::uint32_t parsed = detail::parse_positive_u32(env);
+                if (parsed != 0U)
+                {
+                    return parsed;
+                }
+                log_error() << "ignoring invalid PROVIZIO_DDS_SHM_SEGMENT_SIZE='"
+                            << detail::sanitise_env_value_for_log(env) << "'";
+            }
+            return unset_shm_segment_size;
+        }
+
+        // Send-side cap for RTPS message size (bytes), overridable via
+        // PROVIZIO_DDS_MAX_MESSAGE_SIZE. Maps to the Fast-DDS "fastdds.max_message_size"
+        // participant property, which caps OUTPUT messages only — reception of larger
+        // datagrams from differently-configured peers is unaffected, so mixed deployments
+        // (including default-configured ROS 2 peers) stay compatible.
+        //
+        // The default (1400) keeps every UDP datagram within a single ~1500-byte-MTU link
+        // frame: a sample above the cap is sent as individually-NACKable RTPS DATA_FRAG
+        // submessages instead of one large UDP datagram that the IP layer splits into many
+        // link frames. With IP fragmentation, losing ANY link frame loses the whole datagram
+        // (first-try survival (1-p)^N at per-frame loss p), every reliable retransmission
+        // re-runs that same gauntlet, and each incomplete datagram parks ~its full size in
+        // the receiver kernel's reassembly cache (net.ipv4.ipfrag_high_thresh, 4 MB stock)
+        // for net.ipv4.ipfrag_time (30 s stock) — under sustained loss the cache fills within
+        // seconds and refuses all new reassemblies host-wide, gating every fragmented topic
+        // in ~30 s windows while single-frame topics keep flowing. Measured at 10% injected
+        // frame loss with 28 KB point clouds: ~36% delivered in 30 s blackout cycles with the
+        // cap left at Fast-DDS's 65500 maximum vs 99%+ with 1400, p90 latency 160 ms.
+        //
+        // The cost is per-datagram sender/receiver overhead on very large samples: a multi-MB
+        // sample pays roughly 10x the CPU at 1400 vs 65500 (a 6 MB frame becomes ~4500
+        // datagrams instead of ~100). Hosts publishing such bulk streams (raw camera frames)
+        // over clean links can raise the cap up to 65500 (Fast-DDS's own maximum and
+        // historical single-datagram behaviour) to trade loss resilience back for CPU.
+        constexpr std::uint32_t default_max_message_size = 1400;
+
+        // Floor for the cap: Fast-DDS requires a complete participant-discovery (PDP)
+        // announcement to fit in one RTPS message, but validates that only for transport
+        // descriptors (~568 bytes with default locator counts), NOT for the
+        // fastdds.max_message_size property — a property below it breaks discovery with
+        // no diagnostic at all. 576 (the classic IPv4 minimum-reassembly datagram size)
+        // sits safely above that requirement. Note the PDP announcement grows with the
+        // participant's own locator count (~56 bytes per additional addressed interface),
+        // and the PDP writer is best-effort stateless — no fragmentation — so ANY value of
+        // this cap has an interface-count ceiling: the 1400 default accommodates roughly
+        // 15 addressed interfaces beyond the baseline; hosts with more must raise the cap.
+        constexpr std::uint32_t minimum_max_message_size = 576;
+
+        // Fast-DDS's own hard ceiling for an RTPS message (its s_maximumMessageSize):
+        // the property is min()'d against the transports' maximum anyway, so anything
+        // above it can only be a typo — clamp with a warning rather than let Fast-DDS
+        // silently ignore the excess.
+        constexpr std::uint32_t maximum_max_message_size = 65500;
+
+        // Accepted values below this leave thin headroom for the participant's own
+        // discovery announcement (~612 bytes baseline with FASTDDS_STATISTICS compiled
+        // in, as it is here, +~56 bytes per additional addressed interface) — legal,
+        // but close enough to the silent-discovery-breakage line to deserve a warning.
+        constexpr std::uint32_t thin_discovery_headroom_max_message_size = 1000;
+
+        std::uint32_t resolve_max_message_size()
+        {
+            const char *const env = std::getenv("PROVIZIO_DDS_MAX_MESSAGE_SIZE");  // NOLINT: getenv required
+            if (env != nullptr && *env != '\0')
+            {
+                const std::uint32_t parsed = detail::parse_positive_u32(env);
+                if (parsed >= minimum_max_message_size)
+                {
+                    if (parsed > maximum_max_message_size)
+                    {
+                        log_warning() << "PROVIZIO_DDS_MAX_MESSAGE_SIZE=" << detail::sanitise_env_value_for_log(env)
+                                      << " exceeds Fast-DDS's maximum RTPS message size; clamping to "
+                                      << maximum_max_message_size;
+                        return maximum_max_message_size;
+                    }
+                    if (parsed < thin_discovery_headroom_max_message_size)
+                    {
+                        log_warning() << "PROVIZIO_DDS_MAX_MESSAGE_SIZE=" << parsed
+                                      << " leaves thin headroom for the participant discovery announcement "
+                                         "(~612 bytes baseline, ~56 more per additional addressed interface); "
+                                         "discovery breaks with no diagnostic if it no longer fits";
+                    }
+                    return parsed;
+                }
+                log_error() << "ignoring invalid PROVIZIO_DDS_MAX_MESSAGE_SIZE='"
+                            << detail::sanitise_env_value_for_log(env)
+                            << "' (must be an integer >= " << minimum_max_message_size
+                            << ", so a discovery announcement fits in one message); using default "
+                            << default_max_message_size;
+            }
+            return default_max_message_size;
+        }
+
+        // Report a /dev/shm that cannot fit a handful more segments of the size this
+        // participant is about to allocate. Exhaustion shows up only as an obscure
+        // "Failed to create segment" from Fast-DDS followed by silent UDP fallback.
+        void warn_if_shared_memory_is_nearly_full()
+        {
+#ifdef __linux__
+            static std::once_flag warned;
+            std::call_once(warned, [] {
+                std::error_code error;
+                const auto space = std::filesystem::space("/dev/shm", error);
+                if (error || space.capacity == 0)
+                {
+                    return;
+                }
+                constexpr std::uintmax_t bytes_per_mebibyte = std::uintmax_t{1024} * std::uintmax_t{1024};
+                constexpr std::uintmax_t low_water_bytes = std::uintmax_t{256} * bytes_per_mebibyte;
+                if (space.available < low_water_bytes)
+                {
+                    log_warning() << "/dev/shm has only " << (space.available / bytes_per_mebibyte) << " MiB free of "
+                                  << (space.capacity / bytes_per_mebibyte)
+                                  << " MiB; shared-memory transport registration can fail and fall back to UDP. "
+                                  << "Stale fastdds_* segments from participants that did not exit cleanly are the "
+                                  << "usual cause";
+                }
+            });
+#endif  // __linux__
         }
 
         // Name of the env variable Fast-DDS reads to locate its XML profiles file.
@@ -427,6 +611,12 @@ namespace provizio::dds
                               << " ms); peers may be declared lost between announcements";
             }
 
+            // Output-message-size cap (see resolve_max_message_size). Applied outside the
+            // FASTDDS_BUILTIN_TRANSPORTS guard below: it caps the RTPS output path whichever
+            // transports carry it, so a user-selected transport set still honours it.
+            cached_qos.properties().properties().emplace_back("fastdds.max_message_size",
+                                                              std::to_string(resolve_max_message_size()));
+
             // Transport tuning (skipped entirely when FASTDDS_BUILTIN_TRANSPORTS hands
             // control to the user). Two things happen here:
             //
@@ -456,10 +646,34 @@ namespace provizio::dds
 #endif
                 const bool use_shared_memory = platform_allows_shm && (transport != transport_mode::udp_only);
                 eprosima::fastdds::rtps::BuiltinTransportsOptions transport_options;
-                transport_options.sockets_buffer_size = resolve_udp_socket_buffer_size();
+                const std::uint32_t socket_buffer_size = resolve_udp_socket_buffer_size();
+                transport_options.sockets_buffer_size = socket_buffer_size;
                 cached_qos.setup_transports(use_shared_memory ? eprosima::fastdds::rtps::BuiltinTransports::DEFAULT
                                                               : eprosima::fastdds::rtps::BuiltinTransports::UDPv4,
                                             transport_options);
+                warn_if_socket_buffers_are_capped(socket_buffer_size);
+
+                if (use_shared_memory)
+                {
+                    // setup_transports leaves the descriptors it built in user_transports, so
+                    // the shared-memory segment can be resized here without reimplementing
+                    // (and drifting from) the rest of what it configures.
+                    const std::uint32_t shm_segment_size = resolve_shm_segment_size();
+                    if (shm_segment_size != unset_shm_segment_size)
+                    {
+                        for (const auto &descriptor : cached_qos.transport().user_transports)
+                        {
+                            const auto shm =
+                                std::dynamic_pointer_cast<eprosima::fastdds::rtps::SharedMemTransportDescriptor>(
+                                    descriptor);
+                            if (shm)
+                            {
+                                shm->segment_size(shm_segment_size);
+                            }
+                        }
+                    }
+                    warn_if_shared_memory_is_nearly_full();
+                }
             }
         }
 
@@ -483,6 +697,15 @@ namespace provizio::dds
 
     eprosima::fastdds::dds::DomainParticipant *domain_participant::create_fastdds_participant()
     {
+        if (detail::consume_forced_participant_creation_failure())
+        {
+            // Test hook: behave exactly as Fast-DDS does when it cannot create a
+            // participant — return null without throwing.
+            log_error() << "participant creation failed on domain " << domain_id
+                        << " (forced by fail_next_participant_creation_for_test)";
+            return nullptr;
+        }
+
         auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
         // Pass the (possibly null) discovery listener to Fast-DDS at create
         // time so it's attached BEFORE the new participant starts internal
@@ -1062,11 +1285,15 @@ namespace provizio::dds
             if (participant == nullptr)
             {
                 log_error() << "failed to recreate participant on domain " << domain_id
-                            << "; endpoints left in torn-down state";
+                            << "; endpoints left in torn-down state, will be retried by the "
+                               "network-recovery safety-net check";
                 // Bump generation anyway so any in-flight teardown observing the
                 // mismatch skips its Fast-DDS-side deletes (the contained entities
                 // were freed by delete_contained_entities above).
                 generation.fetch_add(1, std::memory_order_acq_rel);
+                // Flag for the coordinator: this participant is inert until a later
+                // attempt succeeds, and no further network event is guaranteed to come.
+                recovery_retry_needed.store(true, std::memory_order_release);
                 return;
             }
 
@@ -1094,6 +1321,7 @@ namespace provizio::dds
             }
 
             // Phase 5: rebuild child endpoints against the new participant.
+            bool any_endpoint_failed = false;
             for (const auto &endpoint : live_endpoints)
             {
                 try
@@ -1102,11 +1330,17 @@ namespace provizio::dds
                 }
                 catch (const std::exception &exception)
                 {
+                    any_endpoint_failed = true;
                     log_error() << "endpoint rebuild failed on domain " << domain_id << ": " << exception.what()
-                                << "; this endpoint stays inactive (publish/take return failure) until the next "
-                                   "network-recovery reset rebuilds it";
+                                << "; this endpoint stays inactive (publish/take return failure) until the "
+                                   "network-recovery safety-net check retries the reset";
                 }
             }
+
+            // The participant itself is healthy either way; an endpoint that failed to
+            // come back still needs another attempt, which the coordinator's safety-net
+            // tick will make (a later network event alone cannot be relied on).
+            recovery_retry_needed.store(any_endpoint_failed, std::memory_order_release);
         }  // close the registration_mutex / reset_mutex scope BEFORE live_endpoints destructs
     }
 

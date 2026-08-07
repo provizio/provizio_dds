@@ -273,7 +273,8 @@ add_test(NAME accumulation_test COMMAND
 set(_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV)
 foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         reset_refreshes_fastdds_interface_cache teardown_deferred
-        coalescer_resets_on_transient_flap)
+        coalescer_resets_on_transient_flap snapshot_prefix_length
+        netmask_read_is_bounded netlink_binds_before_snapshot safety_net_env)
     add_test(NAME python_network_recovery_${_nrt_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler
         ./python_network_recovery_test.py ${_nrt_case}
@@ -292,6 +293,39 @@ foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
     else()
         set_tests_properties(python_network_recovery_${_nrt_case} PROPERTIES TIMEOUT 30)
     endif()
+endforeach()
+
+# The safety-net tick cases drive run_safety_net_tick_for_test() from the test thread,
+# which is only safe while the coordinator is idle — so they disable the monitor's own
+# periodic tick rather than race it. Mirrors the C++ entries in
+# test/network_recovery/CMakeLists.txt.
+foreach(_nrt_tick_case safety_net_detects_missed_change safety_net_reopens_dead_monitor
+        safety_net_retries_failed_rebuild safety_net_retry_gives_up_after_bound)
+    add_test(NAME python_network_recovery_${_nrt_tick_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        ./python_network_recovery_test.py ${_nrt_tick_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    # SAFETY_NET_SEC=0 silences the netlink backend's periodic tick (Linux). The polling
+    # backend (macOS / Windows, or Linux without netlink) deliberately ignores it — its
+    # poll interval IS the tick — so ALSO pin the poll interval past any test duration:
+    # otherwise a background poller tick races the test-driven run_safety_net_tick_for_test()
+    # calls (it would consume bounded retry passes and fire resets inside monkeypatched
+    # snapshot windows).
+    set(_tick_env "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
+    list(APPEND _tick_env "PROVIZIO_DDS_NETWORK_RECOVERY_POLL_INTERVAL_SEC=3600")
+    if(WIN32)
+        list(APPEND _tick_env "PATH=${PROVIZIO_DDS_TEST_PATH}")
+    endif()
+    # The give-up-bound case runs a participant rebuild per retry pass (7+ of them),
+    # so it gets more headroom than the sub-second tick cases.
+    if(_nrt_tick_case STREQUAL "safety_net_retry_gives_up_after_bound")
+        set(_tick_timeout 90)
+    else()
+        set(_tick_timeout 45)
+    endif()
+    set_tests_properties(python_network_recovery_${_nrt_tick_case}
+        PROPERTIES TIMEOUT ${_tick_timeout} ENVIRONMENT "${_tick_env}")
 endforeach()
 
 # Discovered-endpoints / type-registry suite — Python mirror of the C++
@@ -358,6 +392,39 @@ foreach(_dt_case defaults env_overrides env_invalid multi_participant)
     endif()
 endforeach()
 
+# Participant transport tuning — Python mirror of the C++ test/transport_tuning/
+# subcommands: the MTU-sized default of the send-side RTPS message-size cap
+# (fastdds.max_message_size), the PROVIZIO_DDS_MAX_MESSAGE_SIZE env override, and the
+# fallback to the default on malformed input. Each subcommand is its own ctest entry so
+# per-case failure stays isolated. Every case creates one (or a handful of) participants
+# and only reads its QoS back, so it returns near-instantly.
+set(_PYTHON_TRANSPORT_TUNING_TEST_NAMES)
+foreach(_tt_case defaults env_override env_invalid)
+    add_test(NAME python_transport_tuning_${_tt_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        ./python_transport_tuning_test.py ${_tt_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    list(APPEND _PYTHON_TRANSPORT_TUNING_TEST_NAMES python_transport_tuning_${_tt_case})
+    set_tests_properties(python_transport_tuning_${_tt_case} PROPERTIES TIMEOUT 30)
+endforeach()
+
+# Cross-language parity of the large-sample QoS default overrides: the Python
+# registration must cover the C++ qos_defaults<T> specialization list exactly (the
+# header, passed from the source tree, is the source of truth). Import-only — no
+# DDS participants — so it returns in milliseconds.
+add_test(NAME python_large_sample_qos_parity COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler
+    ./python_qos_parity_test.py "${CMAKE_SOURCE_DIR}/include/provizio/dds/qos_defaults.h"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+if(WIN32)
+    set_tests_properties(python_large_sample_qos_parity PROPERTIES TIMEOUT 30
+        ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
+else()
+    set_tests_properties(python_large_sample_qos_parity PROPERTIES TIMEOUT 30)
+endif()
+
 # Crash-safety of throwing user callbacks (Python mirror of the C++
 # test/callback_exceptions/ suite): a raising user callback must be reported
 # through the configurable logger and must NOT abort the process / silently stop a
@@ -402,6 +469,22 @@ _python_nr_env_test(python_network_recovery_env_off     env_off     "off")
 _python_nr_env_test(python_network_recovery_env_truthy  env_truthy  "yes")
 _python_nr_env_test(python_network_recovery_env_falsy   env_falsy   "NO")
 _python_nr_env_test(python_network_recovery_env_garbage env_garbage "banana")
+
+# Force-included interfaces — same one-shot-per-process caching, so it needs its own
+# process too. The value deliberately carries stray whitespace and an empty entry.
+# Written out rather than routed through _python_nr_env_test because it overrides a
+# different variable.
+add_test(NAME python_network_recovery_extra_interfaces_env COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler
+    ./python_network_recovery_test.py extra_interfaces_env
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set(_extra_if_env "PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES=docker0, br-test ,,veth9")
+if(WIN32)
+    list(APPEND _extra_if_env "PATH=${PROVIZIO_DDS_TEST_PATH}")
+endif()
+set_tests_properties(python_network_recovery_extra_interfaces_env
+    PROPERTIES TIMEOUT 30 ENVIRONMENT "${_extra_if_env}")
 
 # 1.10.x Python API source-compat: ensures `ReturnCode_t.RETCODE_OK`,
 # `pub_sub_type.getName()`, and other camelCase / enum-class spellings
@@ -484,6 +567,7 @@ if(WIN32)
         ${_PYTHON_DISCOVERED_ENDPOINTS_TEST_NAMES}
         ${_PYTHON_MATCH_PUBLISHER_TEST_NAMES}
         ${_PYTHON_DISCOVERY_TUNING_TEST_NAMES}
+        ${_PYTHON_TRANSPORT_TUNING_TEST_NAMES}
         ${_PYTHON_CALLBACK_EXCEPTIONS_TEST_NAMES}
         python_pub_python_sub python_pub_python_sub_type_reuse
         python_pub_cpp_sub cpp_pub_python_sub

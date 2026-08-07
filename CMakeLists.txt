@@ -18,6 +18,7 @@ include(ExternalProject)
 include(FetchContent)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/imported_targets.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
 
 # Configuration
 set(PROVIZIO_DDS_IDLS_VERSION "2.1.0" CACHE STRING "provizio_dds_idls version")
@@ -157,9 +158,21 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
         endif(PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
 
         if(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
-            execute_process(COMMAND uname -r OUTPUT_VARIABLE HOST_KERNEL_VERSION)
-            file(READ "${BIN_CACHE_PATH}/kernel_version" CACHE_KERNEL_VERSION)
-            if("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
+            # Whether the prebuilt binaries can be used here is decided by the glibc / libstdc++ ABI
+            # level they require of the host, which every cache records in its abi_requirements file
+            # (see cmake/bin_cache/host_abi_compatibility.cmake for why that, and not the kernel
+            # version of the machine that built them, is what matters)
+            set(ABI_CHECKED_BIN_CACHE_PATHS "${BIN_CACHE_PATH}")
+            if(PYTHON_VERSION_TAG)
+                # The Python-versioned zip is only rebuilt together with the general one when the
+                # general one is missing, so the two may come from different build machines
+                list(APPEND ABI_CHECKED_BIN_CACHE_PATHS "${PYTHON_BIN_CACHE_PATH}")
+            endif(PYTHON_VERSION_TAG)
+
+            provizio_dds_bin_cache_host_abi_compatible(BIN_CACHE_ABI_COMPATIBLE BIN_CACHE_ABI_INCOMPATIBILITY_REASON
+                ${ABI_CHECKED_BIN_CACHE_PATHS})
+
+            if(BIN_CACHE_ABI_COMPATIBLE)
                 set(HAS_BIN_CACHE TRUE)
 
                 if(NOT INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS)
@@ -167,9 +180,9 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                     execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/fully_qualified_fastdds_libs.sh" "${BIN_CACHE_PATH}/lib" "revert")
                 endif(NOT INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS)
 
-            else("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
-                message(STATUS "Prebuilt binaries located, but won't be used as they were built in a newer Linux kernel")
-            endif("${HOST_KERNEL_VERSION}" VERSION_GREATER_EQUAL "${CACHE_KERNEL_VERSION}")
+            else(BIN_CACHE_ABI_COMPATIBLE)
+                message(STATUS "Prebuilt binaries located, but won't be used as ${BIN_CACHE_ABI_INCOMPATIBILITY_REASON}")
+            endif(BIN_CACHE_ABI_COMPATIBLE)
         endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
     elseif(WIN32)
         # Find PowerShell
@@ -741,11 +754,13 @@ else(HAS_BIN_CACHE)
     set(PROVIZIO_DDS_SOURCES
         src/network_recovery_coordinator.cpp
         src/accumulation.cpp
+        src/address_snapshot_env.cpp
         src/detail/localization_filter.cpp
         src/domain_participant.cpp
         src/logging.cpp
         src/network_recovery.cpp
         src/point_cloud2.cpp
+        src/qos_defaults_checks.cpp
         src/request_response.cpp
         src/topic.cpp
     )

@@ -314,6 +314,12 @@ def _register_large_sample_qos_defaults():
         "MultiEchoLaserScanPubSubType",  # sensor_msgs/msg/MultiEchoLaserScan
         "PointCloud2PubSubType",      # sensor_msgs/msg/PointCloud2
         "OccupancyGridPubSubType",    # nav_msgs/msg/OccupancyGrid
+        # A freespace polygon is a sequence of vertices, so a dense one runs to several
+        # KB and fragments over UDP; without the async + KEEP_LAST(4) override a
+        # reliable writer's single history slot is overwritten before a momentarily
+        # slow reader has acknowledged the previous sample's fragments.
+        "PolygonStampedPubSubType",   # geometry_msgs/msg/PolygonStamped
+        "PolygonInstanceStampedPubSubType",  # geometry_msgs/msg/PolygonInstanceStamped
     )
     for type_name in large_sample_pub_sub_type_names:
         try:
@@ -607,6 +613,28 @@ def _cleanup_all_participants():
         _live_participants.clear()
 
 
+def _parse_positive_u32(raw):
+    """``raw`` as a strictly-positive uint32, else ``0``.
+
+    Mirrors the C++ ``parse_positive_u32`` (src/detail/env_utils.h): leading whitespace
+    and a single leading '+', then ASCII digits to end-of-string, so both languages
+    treat the same env values as valid — Python's permissive ``int()`` would
+    additionally accept underscores, trailing whitespace and other input the C++ side
+    rejects.
+    """
+    # re.ASCII keeps \s to ASCII whitespace — C++ isspace on raw bytes rejects e.g. a
+    # leading NBSP, and Python's int() would otherwise accept it.
+    if not re.fullmatch(r"\s*\+?[0-9]+", raw, re.ASCII):
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        # int() refuses digit strings beyond its conversion-length limit (4300 digits
+        # by default on Python 3.11+); such input is invalid here anyway, never an error.
+        return 0
+    return value if 0 < value <= 0xFFFFFFFF else 0
+
+
 _DEFAULT_UDP_SOCKET_BUFFER_SIZE = 16 * 1024 * 1024
 
 
@@ -619,18 +647,93 @@ def _resolve_udp_socket_buffer_size():
     """
     raw = os.environ.get("PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE")
     if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if 0 < value <= 0xFFFFFFFF:
+        value = _parse_positive_u32(raw)
+        if value:
             return value
         _network_recovery._emit_log(
             _network_recovery.LogLevel.ERROR,
             f"ignoring invalid PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE="
-            f"'{raw}'; using default {_DEFAULT_UDP_SOCKET_BUFFER_SIZE}",
+            f"'{_network_recovery._sanitise_env_value_for_log(raw)}'; "
+            f"using default {_DEFAULT_UDP_SOCKET_BUFFER_SIZE}",
         )
     return _DEFAULT_UDP_SOCKET_BUFFER_SIZE
+
+
+_DEFAULT_MAX_MESSAGE_SIZE = 1400
+
+# Floor for the cap: Fast-DDS requires a complete participant-discovery (PDP)
+# announcement to fit in one RTPS message, but validates that only for transport
+# descriptors (~568 bytes with default locator counts), NOT for the
+# fastdds.max_message_size property — a property below it breaks discovery with no
+# diagnostic at all. 576 (the classic IPv4 minimum-reassembly datagram size) sits
+# safely above that requirement. Note the PDP announcement grows with the
+# participant's own locator count (~56 bytes per additional addressed interface), so
+# any value of this cap has an interface-count ceiling — the 1400 default
+# accommodates roughly 15 addressed interfaces beyond the baseline; hosts with more
+# must raise the cap. Mirrors src/domain_participant.cpp.
+_MIN_MAX_MESSAGE_SIZE = 576
+
+# Fast-DDS's own hard ceiling for an RTPS message: the property is min()'d against
+# the transports' maximum anyway, so anything above it can only be a typo — clamp
+# with a warning rather than let Fast-DDS silently ignore the excess. Mirrors
+# src/domain_participant.cpp.
+_MAX_MAX_MESSAGE_SIZE = 65500
+
+# Accepted values below this leave thin headroom for the participant's own discovery
+# announcement (~612 bytes baseline with FASTDDS_STATISTICS compiled in, as it is in
+# this build, +~56 bytes per additional addressed interface) — legal, but close enough
+# to the silent-discovery-breakage line to deserve a warning. Mirrors
+# src/domain_participant.cpp.
+_THIN_DISCOVERY_HEADROOM_MAX_MESSAGE_SIZE = 1000
+
+
+def _resolve_max_message_size():
+    """Send-side cap in bytes for RTPS messages (default 1400), applied via the
+    ``fastdds.max_message_size`` participant property — OUTPUT messages only, so
+    reception of larger datagrams from differently-configured peers is unaffected
+    and mixed deployments stay compatible.
+
+    The default keeps every UDP datagram within a single ~1500-byte-MTU link frame:
+    a sample above the cap travels as individually-retransmittable RTPS fragments
+    instead of one large UDP datagram that the IP layer splits into many link
+    frames, which sustained frame loss makes all-or-nothing (and which can exhaust
+    the receiving kernel's IP reassembly cache, blacking out every fragmented topic
+    for seconds at a time). The cost is per-datagram overhead on very large
+    samples: a multi-MB sample pays roughly 10x the sender/receiver CPU at 1400 vs
+    65500. Hosts publishing such bulk streams (raw camera frames) over clean links
+    can raise the cap up to 65500 (Fast-DDS's maximum and historical
+    single-datagram behaviour) via the ``PROVIZIO_DDS_MAX_MESSAGE_SIZE`` env
+    variable. Mirrors ``src/domain_participant.cpp``.
+    """
+    raw = os.environ.get("PROVIZIO_DDS_MAX_MESSAGE_SIZE")
+    if raw:
+        value = _parse_positive_u32(raw)
+        if value >= _MIN_MAX_MESSAGE_SIZE:
+            if value > _MAX_MAX_MESSAGE_SIZE:
+                _network_recovery._emit_log(
+                    _network_recovery.LogLevel.WARNING,
+                    f"PROVIZIO_DDS_MAX_MESSAGE_SIZE="
+                    f"{_network_recovery._sanitise_env_value_for_log(raw)} exceeds Fast-DDS's "
+                    f"maximum RTPS message size; clamping to {_MAX_MAX_MESSAGE_SIZE}",
+                )
+                return _MAX_MAX_MESSAGE_SIZE
+            if value < _THIN_DISCOVERY_HEADROOM_MAX_MESSAGE_SIZE:
+                _network_recovery._emit_log(
+                    _network_recovery.LogLevel.WARNING,
+                    f"PROVIZIO_DDS_MAX_MESSAGE_SIZE={value} leaves thin headroom for the "
+                    f"participant discovery announcement (~612 bytes baseline, ~56 more per "
+                    f"additional addressed interface); discovery breaks with no diagnostic "
+                    f"if it no longer fits",
+                )
+            return value
+        _network_recovery._emit_log(
+            _network_recovery.LogLevel.ERROR,
+            f"ignoring invalid PROVIZIO_DDS_MAX_MESSAGE_SIZE="
+            f"'{_network_recovery._sanitise_env_value_for_log(raw)}' "
+            f"(must be an integer >= {_MIN_MAX_MESSAGE_SIZE}, so a discovery announcement "
+            f"fits in one message); using default {_DEFAULT_MAX_MESSAGE_SIZE}",
+        )
+    return _DEFAULT_MAX_MESSAGE_SIZE
 
 
 # ---- Auto-discovery (SPDP) tuning ------------------------------------------------------------
@@ -658,15 +761,13 @@ def _resolve_discovery_positive_int_env(name, fallback):
     raw = os.environ.get(name)
     if not raw:
         return fallback
-    # Mirror the C++ resolve_positive_u32_env (strtoull + full-consume): allow leading whitespace and a single
-    # leading '+', then ASCII digits to end-of-string. This rejects trailing characters, underscores and other
-    # input that Python's permissive int() would accept, so both languages treat the same env values as valid.
-    value = int(raw) if re.fullmatch(r"\s*\+?[0-9]+", raw) else 0
-    if 0 < value <= 0xFFFFFFFF:
+    value = _parse_positive_u32(raw)
+    if value:
         return value
     _network_recovery._emit_log(
         _network_recovery.LogLevel.WARNING,
-        f"ignoring invalid {name}='{raw}'; using default {fallback}",
+        f"ignoring invalid {name}='{_network_recovery._sanitise_env_value_for_log(raw)}'; "
+        f"using default {fallback}",
     )
     return fallback
 
@@ -982,6 +1083,16 @@ def make_domain_participant(domain_id: int = 0,
                         f"lost between announcements",
                     )
 
+                # Send-side cap for RTPS message size (fastdds.max_message_size, OUTPUT
+                # messages only). The default keeps every UDP datagram within a single
+                # ~MTU link frame so large samples travel as individually-retransmittable
+                # RTPS fragments rather than IP-fragmented datagrams that sustained frame
+                # loss makes all-or-nothing (see _resolve_max_message_size). Mirrors
+                # src/domain_participant.cpp.
+                self._participant_qos.properties().properties().push_back(
+                    Property("fastdds.max_message_size", str(_resolve_max_message_size()))
+                )
+
             # Type / topic registries. Initialised BEFORE create_participant
             # below: an initial_discovery_callback can fire as soon as the
             # participant is created (even during the tail of __init__), and such
@@ -1100,6 +1211,14 @@ def make_domain_participant(domain_id: int = 0,
             # C++ side resolves the env var the same way — once per
             # process, cached).
             self._recovery_enabled = _network_recovery.resolve_network_recovery_enabled(recovery_mode)
+
+            # Set by _reset_hook_locked when a reset left this participant unusable —
+            # its Fast-DDS participant could not be recreated, or an endpoint failed to
+            # rebuild. The coordinator polls it after every reset and retries the
+            # affected participants on its periodic safety-net tick, because nothing in
+            # the event-driven path would ever come back to them otherwise. Mirrors the
+            # C++ domain_participant::needs_network_recovery_retry().
+            self._recovery_retry_needed = False
 
             def _remove_ref(r):
                 with _live_participants_lock:
@@ -1620,10 +1739,14 @@ def make_domain_participant(domain_id: int = 0,
                     _network_recovery._emit_log(
                         _network_recovery.LogLevel.ERROR,
                         f"failed to recreate participant on domain {self._domain_id}; "
-                        f"endpoints left in torn-down state",
+                        f"endpoints left in torn-down state, will be retried by the "
+                        f"network-recovery safety-net check",
                     )
                     # Bump generation anyway so any racing teardown observes the mismatch.
                     self._generation += 1
+                    # Flag for the coordinator: this participant is inert until a later
+                    # attempt succeeds, and no further network event is guaranteed.
+                    self._recovery_retry_needed = True
                     return
 
                 self._generation += 1
@@ -1634,14 +1757,23 @@ def make_domain_participant(domain_id: int = 0,
                         self._participant.register_type(type_support)
 
                 # Phase 5: rebuild each endpoint.
+                any_endpoint_failed = False
                 for (_, endpoint) in live:
                     try:
                         endpoint._rebuild_state_after_reset(self._participant)
                     except Exception as ex:
+                        any_endpoint_failed = True
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"endpoint rebuild failed during reset: {ex}",
+                            f"endpoint rebuild failed during reset: {ex}; this endpoint stays "
+                            f"inactive until the network-recovery safety-net check retries the reset",
                         )
+
+                # The participant itself is healthy either way; an endpoint that failed
+                # to come back still needs another attempt, which the coordinator's
+                # safety-net tick will make (a later network event alone cannot be
+                # relied on). See _NetworkRecoveryCoordinator._on_safety_net_tick.
+                self._recovery_retry_needed = any_endpoint_failed
 
     participant = _DomainParticipant(domain_id, initial_discovery_callback,
                                      initial_discovery_kinds, transport)

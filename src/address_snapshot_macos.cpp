@@ -16,6 +16,8 @@
 
 #if defined(__APPLE__)
 
+#include "detail/netmask_prefix.h"
+
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -85,6 +87,9 @@ namespace provizio::dds::detail
     {
         address_snapshot snapshot;
 
+        // Hoisted: one lookup of the (immutable) force-include set for the whole walk.
+        const auto &force_included = force_included_interfaces();
+
         ifaddrs *ifa_head = nullptr;
         if (::getifaddrs(&ifa_head) != 0)
         {
@@ -97,7 +102,12 @@ namespace provizio::dds::detail
             {
                 continue;
             }
-            if ((ifa->ifa_flags & IFF_LOOPBACK) != 0 || (ifa->ifa_flags & IFF_UP) == 0)
+            // IFF_RUNNING (operationally up: administratively up AND carrier present),
+            // NOT the weaker IFF_UP — see the rationale on capture_address_snapshot in
+            // detail/address_snapshot.h: Fast-DDS' IPFinder::getIPs keys on IFF_RUNNING,
+            // so a snapshot that keys on IFF_UP would treat a carrier outage as "nothing
+            // changed" and never rebuild the participant.
+            if ((ifa->ifa_flags & IFF_LOOPBACK) != 0 || (ifa->ifa_flags & IFF_RUNNING) == 0)
             {
                 continue;
             }
@@ -109,7 +119,9 @@ namespace provizio::dds::detail
             }
 
             const std::string name{ifa->ifa_name};
-            if (name_excluded(name))
+            // A force-included interface skips the name heuristics (see
+            // force_included_interfaces) but not the loopback / carrier / link-local checks.
+            if (force_included.find(name) == force_included.end() && name_excluded(name))
             {
                 continue;
             }
@@ -136,7 +148,7 @@ namespace provizio::dds::detail
                 }
             }
 
-            snapshot.insert({name, std::string{addr_text.data()}});
+            snapshot.insert({name, std::string{addr_text.data()}, prefix_length_from_netmask(ifa->ifa_netmask)});
         }
 
         ::freeifaddrs(ifa_head);

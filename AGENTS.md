@@ -49,7 +49,7 @@ ctest --output-on-failure
 ctest --output-on-failure -R simplest_pub_sub
 ```
 
-Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `callback_exceptions`, `point_cloud2`, `accumulation`.
+Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `callback_exceptions`, `point_cloud2`, `accumulation`.
 
 ### CI Build Scripts
 
@@ -113,7 +113,7 @@ Dependencies are auto-downloaded and built by CMake when not found:
 - **foonathan_memory_vendor** (built in a subprocess during configure)
 - **provizio_dds_idls** (FetchContent)
 
-A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. It is bypassed when `ENABLE_TESTS=ON`, `STATIC_ANALYSIS=ON`, or `IGNORE_BIN_CACHE=ON`.
+A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. It is bypassed when `ENABLE_TESTS=ON`, `STATIC_ANALYSIS=ON`, or `IGNORE_BIN_CACHE=ON`. On Linux a cache is only used when the host provides the glibc / libstdc++ ABI level its binaries require, which each cache records in its `abi_requirements` file — see `cmake/bin_cache/host_abi_compatibility.cmake`.
 
 ### CMake Options Reference
 

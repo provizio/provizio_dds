@@ -101,5 +101,47 @@ _nr_add_test(network_recovery_reentrant_listener_during_reset
 _nr_add_test(network_recovery_concurrent_make_publisher_during_reset
     ARGS concurrent_make_publisher_during_reset TIMEOUT ${_NR_TIMEOUT_DDS})
 
+# The prefix length is part of the snapshot identity, so re-subnetting an interface
+# without changing its address counts as a network change (Fast-DDS derives its
+# netmask-based locator filtering from it).
+_nr_add_test(network_recovery_snapshot_prefix_length
+    ARGS snapshot_prefix_length TIMEOUT ${_NR_TIMEOUT_FAST})
+
+# Own process: PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES is parsed exactly once.
+# The value deliberately contains stray whitespace and an empty entry.
+_nr_add_test(network_recovery_extra_interfaces_env ARGS extra_interfaces_env TIMEOUT ${_NR_TIMEOUT_FAST}
+    ENV "PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES=docker0, br-test ,,veth9")
+
+# Safety-net tick: the backstop for everything the kernel event channel cannot
+# report. Each of these used to be a permanent, process-lifetime outage.
+#
+# The three tick tests below set SAFETY_NET_SEC=0 to stop the COALESCER running its own
+# tick concurrently: they drive run_safety_net_tick_for_test() from the test thread,
+# which is only safe while the coordinator is idle, and two threads mutating
+# last_known_snapshot would be a data race (and could move reset_count by two).
+# A pathological safety-net period must be clamped, not turned into a busy loop: the
+# duration→nanoseconds conversion wait_for performs overflows int64 beyond ~9.2e9 s and
+# then returns immediately, every time.
+_nr_add_test(network_recovery_safety_net_env_clamped ARGS safety_net_env_clamped
+    TIMEOUT ${_NR_TIMEOUT_DDS} ENV "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=99999999999")
+
+_nr_add_test(network_recovery_safety_net_detects_missed_change
+    ARGS safety_net_detects_missed_change TIMEOUT ${_NR_TIMEOUT_DDS} ENV "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
+_nr_add_test(network_recovery_safety_net_reopens_dead_monitor
+    ARGS safety_net_reopens_dead_monitor TIMEOUT ${_NR_TIMEOUT_DDS} ENV "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
+_nr_add_test(network_recovery_safety_net_retries_failed_rebuild
+    ARGS safety_net_retries_failed_rebuild TIMEOUT ${_NR_TIMEOUT_DDS} ENV "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
+
+# End-to-end against a REAL kernel interface transition inside a throw-away network
+# namespace: a link coming up with its address already assigned (emitting only
+# RTM_NEWLINK), and carrier appearing on an interface whose address and
+# administrative state never change. Both used to go undetected. Needs root or
+# passwordless sudo plus iproute2, and reports ctest SKIP otherwise.
+if(UNIX AND NOT APPLE)
+    add_test(NAME network_recovery_carrier
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/carrier_recovery_test.sh" "$<TARGET_FILE:network_recovery_test>")
+    set_tests_properties(network_recovery_carrier PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+endif()
+
 # Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
 provizio_dds_scale_test_timeouts()

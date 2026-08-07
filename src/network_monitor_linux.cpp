@@ -45,6 +45,14 @@ namespace provizio::dds::detail
         int stop_event_fd{-1};
         std::thread worker;
         std::atomic<bool> stopping{false};
+        // Raised by the CONSTRUCTOR, immediately before the worker is spawned, and cleared
+        // by the worker itself when it leaves its loop — whether that is a clean stop or an
+        // unrecoverable channel error, which is what lets the coordinator's safety-net tick
+        // notice a dead channel and rebuild the monitor. Deliberately not raised by the
+        // worker: that would leave is_alive() false for the scheduling window between
+        // spawning the thread and it reaching its first statement, and a tick landing in
+        // that window would tear down a perfectly healthy monitor. See run().
+        std::atomic<bool> alive{false};
         on_event_callback callback;
         // NOLINTEND(misc-non-private-member-variables-in-classes)
 
@@ -58,10 +66,15 @@ namespace provizio::dds::detail
 
             sockaddr_nl addr{};
             addr.nl_family = AF_NETLINK;
-            // Subscribe ONLY to address-add/del groups; link-state and route-change
-            // groups are deliberately ignored (link flap during boot is a known noise
-            // source, and DDS transport binding only cares about address presence).
-            addr.nl_groups = RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
+            // Address groups AND the link group. Link membership is what makes a carrier
+            // transition (switch powered on, cable replugged) observable at all: it emits
+            // RTM_NEWLINK only, yet it moves an interface in or out of the IFF_RUNNING set
+            // that capture_address_snapshot — like Fast-DDS' own IPFinder — is built on.
+            // Boot-time link flap is a well-known noise source, but noise is not a problem
+            // here: the coordinator diffs snapshots and silently drops any burst that nets
+            // out to no change. Route-change groups stay unsubscribed — Fast-DDS binds per
+            // interface address, not per route.
+            addr.nl_groups = RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR | RTMGRP_LINK;
             // sockaddr_nl → sockaddr is the canonical BSD-sockets idiom.
             // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
             if (::bind(netlink_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
@@ -82,6 +95,24 @@ namespace provizio::dds::detail
             return true;
         }
 
+        // Closes the channel even when the object is destroyed without
+        // ~network_monitor having run — which happens when the constructor throws
+        // after open_channel() succeeded (std::thread construction can fail with
+        // EAGAIN under thread pressure). Without this, each such attempt leaked two
+        // fds, and ensure_monitor_alive() retries every safety-net period: a process
+        // under sustained pressure would march to EMFILE, at which point Fast-DDS can
+        // no longer create sockets at all — the very outage this feature prevents.
+        ~impl()
+        {
+            close_channel();
+        }
+
+        impl() = default;
+        impl(const impl &) = delete;
+        impl(impl &&) = delete;
+        impl &operator=(const impl &) = delete;
+        impl &operator=(impl &&) = delete;
+
         void close_channel()
         {
             if (netlink_fd >= 0)
@@ -96,7 +127,19 @@ namespace provizio::dds::detail
             }
         }
 
-        void run() const
+        void run()
+        {
+            // Single place that clears the liveness flag, so every way out of the loop
+            // below (clean stop or unrecoverable channel error) is reported the same way
+            // to network_monitor::is_alive(). The flag is RAISED by the constructor
+            // rather than here: a caller that checks is_alive() in the window between
+            // the thread being spawned and it reaching this point must see "alive", or
+            // it would tear down a perfectly healthy monitor.
+            run_loop();
+            alive.store(false, std::memory_order_release);
+        }
+
+        void run_loop() const
         {
             constexpr std::size_t recv_buffer_bytes = std::size_t{8} * 1024;
             std::vector<char> buffer(recv_buffer_bytes);
@@ -188,11 +231,12 @@ namespace provizio::dds::detail
                 }
 
                 // We don't actually need to parse the rtnetlink message body — every
-                // RTM_NEWADDR / RTM_DELADDR is a candidate event, and the coalescer
-                // upstream applies all the policy (snapshot-diff, etc). We just need
-                // to fire the callback at most once per arrival. NLMSG_NEXT mutates
-                // its second argument so it must be a non-const lvalue.
-                bool any_addr_event = false;
+                // RTM_NEWADDR / RTM_DELADDR / RTM_NEWLINK / RTM_DELLINK is a candidate
+                // event, and the coalescer upstream applies all the policy
+                // (snapshot-diff, etc). We just need to fire the callback at most once
+                // per arrival. NLMSG_NEXT mutates its second argument so it must be a
+                // non-const lvalue.
+                bool any_event = false;
                 // Unsigned to avoid the signed/unsigned comparison inside
                 // NLMSG_OK on newer kernel headers; got > 0 was already
                 // verified above so the cast is safe.
@@ -211,14 +255,15 @@ namespace provizio::dds::detail
                     {
                         continue;
                     }
-                    if (nh->nlmsg_type == RTM_NEWADDR || nh->nlmsg_type == RTM_DELADDR)
+                    if (nh->nlmsg_type == RTM_NEWADDR || nh->nlmsg_type == RTM_DELADDR ||
+                        nh->nlmsg_type == RTM_NEWLINK || nh->nlmsg_type == RTM_DELLINK)
                     {
-                        any_addr_event = true;
+                        any_event = true;
                         break;
                     }
                 }
 
-                if (any_addr_event && callback)
+                if (any_event && callback)
                 {
                     callback();
                 }
@@ -234,7 +279,28 @@ namespace provizio::dds::detail
             throw std::runtime_error{"network_monitor: failed to open NETLINK_ROUTE socket: " + err};
         }
         the_impl->callback = std::move(callback);
+        the_impl->alive.store(true, std::memory_order_release);
         the_impl->worker = std::thread{[impl_ptr = the_impl.get()] { impl_ptr->run(); }};
+    }
+
+    bool network_monitor::is_alive() const noexcept
+    {
+        return the_impl && the_impl->alive.load(std::memory_order_acquire);
+    }
+
+    bool network_monitor::kill_for_test() noexcept
+    {
+        if (!the_impl || the_impl->stop_event_fd < 0)
+        {
+            return false;
+        }
+        // Deliberately does NOT set `stopping`: the point is to leave the monitor object
+        // in the state a dead worker leaves it in, which is what is_alive() reports on.
+        // The write result IS propagated: a caller told "signalled" must be able to rely
+        // on the worker actually waking, or a failed wake surfaces as a test timeout with
+        // no explanation.
+        const std::uint64_t one = 1;
+        return ::write(the_impl->stop_event_fd, &one, sizeof(one)) == static_cast<ssize_t>(sizeof(one));
     }
 
     network_monitor::~network_monitor()
