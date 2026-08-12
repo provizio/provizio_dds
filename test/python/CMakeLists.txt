@@ -409,6 +409,44 @@ foreach(_tt_case defaults env_override env_invalid)
     set_tests_properties(python_transport_tuning_${_tt_case} PROPERTIES TIMEOUT 30)
 endforeach()
 
+# Dead-owner shared-memory cleanup — Python mirror of the C++ test/shm_cleanup/
+# subcommands: what the sweep reclaims, what it must never touch, its age guard, its kill
+# switch, its rate limit, and that creating a participant triggers it. Each subcommand is
+# its own ctest entry so per-case failure stays isolated.
+#
+# Linux only, like the C++ suite: shared memory is provizio_dds's default transport there
+# and nowhere else (Windows and macOS force UDP over a Boost.Interprocess cleanup bug), so
+# no other platform creates the files this reclaims. The script skips itself on any other
+# platform too, so the guard here is a convenience rather than the only safeguard.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    foreach(_sc_case reclaims_synthetic age_guard kill_switch leaves_other_files_alone
+                     rejects_planted_lock_files rate_limited reclaims_dead_participant spares_the_living)
+        add_test(NAME python_shm_cleanup_${_sc_case} COMMAND
+            "${PYTHON_EXECUTABLE}" -q -X faulthandler
+            ./python_shm_cleanup_test.py ${_sc_case}
+            WORKING_DIRECTORY "${TEST_PATH}"
+        )
+    endforeach()
+    # The cases that only lay out files in /dev/shm and sweep them return near-instantly;
+    # the two that fork a real participant (and, for spares_the_living, wait for samples to
+    # flow over shared memory across a sweep) need discovery time.
+    #
+    # Cases that lay their fixtures out in a directory of their own are hermetic — no other
+    # process on the host sweeps a subdirectory of /dev/shm — so they need no lock.
+    set_tests_properties(python_shm_cleanup_reclaims_synthetic python_shm_cleanup_age_guard
+                         python_shm_cleanup_kill_switch python_shm_cleanup_leaves_other_files_alone
+                         python_shm_cleanup_rejects_planted_lock_files PROPERTIES TIMEOUT 60)
+    # The rest must work in the real /dev/shm and lower the age guard to reach their own
+    # fixtures, so they would happily reclaim each other's — and the C++ mirror's, hence the
+    # shared lock name it also uses. Other suites cannot interfere: their sweeps use the
+    # default guard, and these fixtures are deliberately kept younger than it.
+    set_tests_properties(python_shm_cleanup_rate_limited PROPERTIES TIMEOUT 60
+                         RESOURCE_LOCK provizio_dds_shm_cleanup)
+    set_tests_properties(python_shm_cleanup_reclaims_dead_participant
+                         python_shm_cleanup_spares_the_living PROPERTIES TIMEOUT 120
+                         RESOURCE_LOCK provizio_dds_shm_cleanup)
+endif()
+
 # Cross-language parity of the large-sample QoS default overrides: the Python
 # registration must cover the C++ qos_defaults<T> specialization list exactly (the
 # header, passed from the source tree, is the source of truth). Import-only — no

@@ -49,7 +49,7 @@ ctest --output-on-failure
 ctest --output-on-failure -R simplest_pub_sub
 ```
 
-Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `callback_exceptions`, `point_cloud2`, `accumulation`.
+Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `shm_cleanup`, `callback_exceptions`, `point_cloud2`, `accumulation`.
 
 ### CI Build Scripts
 
@@ -95,6 +95,8 @@ Two shared libraries are produced:
 - `point_cloud2.py` — Point cloud parsing utilities. (Has a C++ counterpart: include/provizio/dds/point_cloud2.h; keep behavior in sync.)
 - `accumulation.py` — Multi-radar point cloud accumulation/fusion with odometry. (Has a C++ counterpart: include/provizio/dds/accumulation.h; keep behavior in sync.)
 - `gps_utils.py` — GPS/GNSS coordinate utilities.
+- `network_recovery.py` — Network-interface monitoring and participant recreation. (C++ counterpart: `src/network_recovery*.cpp`.)
+- `shm_cleanup.py` — Reclaims the shared-memory files of participants that died without cleaning up. (C++ counterpart: `src/shm_cleanup.cpp`; keep behavior in sync.)
 
 Python bindings require SWIG 4.0+ and are generated from Fast-DDS-python + provizio_dds_idls `.i` files.
 

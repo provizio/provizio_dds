@@ -31,6 +31,7 @@
 #include "detail/env_utils.h"
 #include "provizio/dds/detail/network_recovery_coordinator.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
+#include "provizio/dds/detail/shm_cleanup.h"
 #include "provizio/dds/logging.h"
 #include "provizio/dds/network_recovery.h"
 #include "provizio/dds/topic.h"
@@ -332,32 +333,82 @@ namespace provizio::dds
             return default_max_message_size;
         }
 
-        // Report a /dev/shm that cannot fit a handful more segments of the size this
-        // participant is about to allocate. Exhaustion shows up only as an obscure
-        // "Failed to create segment" from Fast-DDS followed by silent UDP fallback.
-        void warn_if_shared_memory_is_nearly_full()
+        // Whether this library configures shared memory on this platform. Windows and macOS
+        // are excluded because Fast-DDS's bundled Boost.Interprocess leaks segments and named
+        // semaphores there (see the transport setup in the constructor). _WIN32 rather than
+        // _MSC_VER so a MinGW build lands on the same side as an MSVC one.
+        constexpr bool platform_allows_shared_memory =
+#if defined(_WIN32) || defined(__APPLE__)
+            false;
+#else
+            true;
+#endif
+
+        // The filesystem backing shared memory on Linux, the only platform where its free
+        // space is worth probing (see shared_memory_space).
+        constexpr const char *const linux_shm_directory = "/dev/shm";
+
+        constexpr std::uintmax_t bytes_per_mebibyte = std::uintmax_t{1024} * std::uintmax_t{1024};
+
+        // Free space below which /dev/shm cannot fit a handful more segments of the size a
+        // participant allocates at the default transport configuration (~33.5 MiB each).
+        constexpr std::uintmax_t shm_low_water_bytes = std::uintmax_t{256} * bytes_per_mebibyte;
+
+        // /dev/shm capacity and free space, or an empty capacity when it cannot be determined
+        // (or on platforms that do not use shared memory).
+        std::filesystem::space_info shared_memory_space()
         {
 #ifdef __linux__
-            static std::once_flag warned;
-            std::call_once(warned, [] {
-                std::error_code error;
-                const auto space = std::filesystem::space("/dev/shm", error);
-                if (error || space.capacity == 0)
+            std::error_code error;
+            const auto space = std::filesystem::space(linux_shm_directory, error);
+            if (!error)
+            {
+                return space;
+            }
+#endif  // __linux__
+            return {};
+        }
+
+        // Reclaim the shared-memory files of participants that died without cleaning up, and
+        // report a /dev/shm that still cannot fit a handful more segments afterwards.
+        // Exhaustion otherwise shows up only as an obscure "Failed to create segment" from
+        // Fast-DDS followed by a silent, host-wide fallback to UDP.
+        void manage_shared_memory_space()
+        {
+            // Before anything else, and exactly once per process: bury the corpses. A service
+            // that exits and is restarted in a loop then reclaims its own predecessor's
+            // segment on every incarnation, so the steady state is one dead generation rather
+            // than unbounded growth — whatever else on the host is or isn't fixed.
+            detail::cleanup_shared_memory_once();
+
+            auto space = shared_memory_space();
+            if (space.capacity == 0 || space.available >= shm_low_water_bytes)
+            {
+                return;
+            }
+
+            // Still short. Sweep again (rate-limited, and suppressed entirely right after the
+            // once-per-process sweep above) so a long-running process — a GUI backend, a
+            // recorder — heals the host over its lifetime instead of only complaining about
+            // it, and re-check before saying anything.
+            if (detail::cleanup_shared_memory_if_due())
+            {
+                space = shared_memory_space();
+                if (space.capacity == 0 || space.available >= shm_low_water_bytes)
                 {
                     return;
                 }
-                constexpr std::uintmax_t bytes_per_mebibyte = std::uintmax_t{1024} * std::uintmax_t{1024};
-                constexpr std::uintmax_t low_water_bytes = std::uintmax_t{256} * bytes_per_mebibyte;
-                if (space.available < low_water_bytes)
-                {
-                    log_warning() << "/dev/shm has only " << (space.available / bytes_per_mebibyte) << " MiB free of "
-                                  << (space.capacity / bytes_per_mebibyte)
-                                  << " MiB; shared-memory transport registration can fail and fall back to UDP. "
-                                  << "Stale fastdds_* segments from participants that did not exit cleanly are the "
-                                  << "usual cause";
-                }
+            }
+
+            static std::once_flag warned;
+            std::call_once(warned, [&space] {
+                log_warning() << linux_shm_directory << " has only " << (space.available / bytes_per_mebibyte)
+                              << " MiB free of " << (space.capacity / bytes_per_mebibyte)
+                              << " MiB; shared-memory transport registration can fail and fall back to UDP. "
+                              << "What is left is in use, or held by files this process may not remove — "
+                              << "segments of participants that did not exit cleanly are automatically reclaimed "
+                              << "(see PROVIZIO_DDS_SHM_CLEANUP)";
             });
-#endif  // __linux__
         }
 
         // Name of the env variable Fast-DDS reads to locate its XML profiles file.
@@ -638,13 +689,7 @@ namespace provizio::dds
             //      where cross-major SHM negotiation degrades large-data throughput).
             if (!std::getenv("FASTDDS_BUILTIN_TRANSPORTS"))  // NOLINT: getenv required
             {
-                const bool platform_allows_shm =
-#if defined(_MSC_VER) || defined(__APPLE__)
-                    false;  // Windows/macOS: Boost.Interprocess cleanup bug — UDP-only.
-#else
-                    true;
-#endif
-                const bool use_shared_memory = platform_allows_shm && (transport != transport_mode::udp_only);
+                const bool use_shared_memory = platform_allows_shared_memory && (transport != transport_mode::udp_only);
                 eprosima::fastdds::rtps::BuiltinTransportsOptions transport_options;
                 const std::uint32_t socket_buffer_size = resolve_udp_socket_buffer_size();
                 transport_options.sockets_buffer_size = socket_buffer_size;
@@ -672,9 +717,22 @@ namespace provizio::dds
                             }
                         }
                     }
-                    warn_if_shared_memory_is_nearly_full();
                 }
             }
+        }
+
+        // Shared-memory housekeeping, deliberately outside every branch above: whether the
+        // transports came from this library, from FASTDDS_BUILTIN_TRANSPORTS or from an XML
+        // profile, the same host-wide directory backs them and the same dead participants
+        // litter it. Deliberately NOT gated on platform_allows_shared_memory either: this
+        // library does not choose shared memory on macOS, but a participant configured through
+        // one of those two routes still can, and it would then leak with nothing to reclaim it.
+        // Where shared memory truly cannot be in play the sweep is a no-op that costs one
+        // failed directory open (or, on Windows, nothing at all). Only an explicit UDP-only
+        // request, which nothing can override, skips it.
+        if (transport != transport_mode::udp_only)
+        {
+            manage_shared_memory_space();
         }
 
         participant = create_fastdds_participant();

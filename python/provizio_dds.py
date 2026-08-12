@@ -80,10 +80,12 @@ if __package__ or "." in __name__:
     from . import point_cloud2
     from . import accumulation
     from . import network_recovery as _network_recovery
+    from . import shm_cleanup as _shm_cleanup
 else:
     import point_cloud2
     import accumulation
     import network_recovery as _network_recovery
+    import shm_cleanup as _shm_cleanup
 
 # Re-export the network-recovery public surface so user code can import it
 # directly from `provizio_dds`. Mirrors the C++ side where the symbols live
@@ -93,6 +95,11 @@ else:
 # is a module file, not a package, so a plain `import` would otherwise
 # fail to resolve the submodule path.
 network_recovery = _network_recovery
+# Same reasoning for the dead-owner shared-memory cleanup module: exposed as an
+# attribute so `from provizio_dds import shm_cleanup` resolves (this is a module
+# file, not a package). It has no public API of its own — participants drive it —
+# but the test suite needs its internals.
+shm_cleanup = _shm_cleanup
 NetworkRecoveryMode = _network_recovery.NetworkRecoveryMode
 LogLevel = _network_recovery.LogLevel
 set_log_callback = _network_recovery.set_log_callback
@@ -1012,8 +1019,27 @@ def make_domain_participant(domain_id: int = 0,
         # setdefault: an externally-set FASTDDS_BUILTIN_TRANSPORTS always wins, and the
         # first participant created in the process fixes it for the rest (env is global).
         @staticmethod
+        def _shared_memory_disabled(transport):
+            """Whether this participant certainly won't use shared memory: Windows/macOS
+            (Fast-DDS's bundled Boost.Interprocess leaks segments and named semaphores
+            there) or an explicit TransportMode.UDP_ONLY."""
+            return (transport == TransportMode.UDP_ONLY) or sys.platform in ("win32", "darwin")
+
+        @staticmethod
+        def _shared_memory_ruled_out(transport):
+            """Whether shared memory cannot be in play for this participant WHATEVER the
+            environment says — which is only true of an explicit TransportMode.UDP_ONLY.
+
+            Deliberately weaker than :meth:`_shared_memory_disabled`: this layer does not
+            select shared memory on macOS, but an externally-set FASTDDS_BUILTIN_TRANSPORTS
+            still can, and such a participant would leak with nothing to reclaim it. Where
+            shared memory truly cannot be in play the sweep is a no-op costing one failed
+            directory open. Mirrors the gate in src/domain_participant.cpp."""
+            return transport == TransportMode.UDP_ONLY
+
+        @staticmethod
         def _builtin_transports_value(transport):
-            disable_shm = (transport == TransportMode.UDP_ONLY) or sys.platform in ("win32", "darwin")
+            disable_shm = _DomainParticipant._shared_memory_disabled(transport)
             kind = "UDPv4" if disable_shm else "DEFAULT"
             return f"{kind}?sockets_size={_resolve_udp_socket_buffer_size()}"
 
@@ -1045,6 +1071,16 @@ def make_domain_participant(domain_id: int = 0,
                     f"'{desired_transports}'.",
                 )
             os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", desired_transports)
+
+            # Shared-memory housekeeping BEFORE the participant is created: reclaim the
+            # segments of participants that died without cleaning up (Fast-DDS never
+            # does, so a service restarted in a loop fills the shared-memory filesystem
+            # and silently degrades every participant on the host to UDP), and complain
+            # if it is nearly full anyway. Keyed off the resolved transport rather than
+            # the env variable above, which an external setting may have fixed for the
+            # whole process. Mirrors src/domain_participant.cpp.
+            if not _DomainParticipant._shared_memory_ruled_out(transport):
+                _shm_cleanup.manage_shared_memory_space()
 
             factory = DomainParticipantFactory.get_instance()
             # It's required so consequent get_default_participant_qos() respects XML profiles
