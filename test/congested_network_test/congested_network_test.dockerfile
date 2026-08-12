@@ -1,4 +1,17 @@
-FROM ubuntu:22.04
+# Base image pulled through Google's public mirror of Docker Hub rather than Docker Hub
+# itself. Docker Hub rate-limits UNAUTHENTICATED pulls per source IP over an hourly window and
+# answers a request over the limit with an immediate HTTP 429 ("toomanyrequests: You have
+# reached your unauthenticated pull rate limit"). That is not a transient fault: retrying
+# cannot outlast an hourly window, so a build retry loop only wastes time and muddies the log.
+# Self-hosted runners share one egress IP across every concurrent job in the organisation,
+# which is exactly the shape that hits the limit.
+#
+# mirror.gcr.io serves byte-identical Docker Hub content (it is a pull-through cache, so
+# library/ubuntu here IS ubuntu there) and is not subject to Docker Hub's limits, and it needs
+# no credentials — so this works out of the box. Override BASE_IMAGE to point at a registry
+# the host is authenticated against (or back at Docker Hub) if that is ever preferable.
+ARG BASE_IMAGE=mirror.gcr.io/library/ubuntu:22.04
+FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 

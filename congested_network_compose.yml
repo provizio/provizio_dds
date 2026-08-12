@@ -4,6 +4,9 @@ services:
       context: .
       dockerfile: test/congested_network_test/congested_network_test.dockerfile
       args:
+        # See the BASE_IMAGE note in the dockerfile: defaults to a mirror that does not
+        # rate-limit unauthenticated pulls the way Docker Hub does.
+        BASE_IMAGE: ${BASE_IMAGE:-mirror.gcr.io/library/ubuntu:22.04}
         SERVICE: subscriber
         NETWORK_DELAY: 0ms
         PACKETS_LOSS: 0%
@@ -24,6 +27,9 @@ services:
       context: .
       dockerfile: test/congested_network_test/congested_network_test.dockerfile
       args:
+        # See the BASE_IMAGE note in the dockerfile: defaults to a mirror that does not
+        # rate-limit unauthenticated pulls the way Docker Hub does.
+        BASE_IMAGE: ${BASE_IMAGE:-mirror.gcr.io/library/ubuntu:22.04}
         SERVICE: publisher
         NETWORK_DELAY: ${NETWORK_DELAY:-150ms}
         PACKETS_LOSS: ${PACKETS_LOSS:-50%}

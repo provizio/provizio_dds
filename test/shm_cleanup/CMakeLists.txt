@@ -28,7 +28,14 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 add_executable(shm_cleanup_test shm_cleanup_test.cpp)
-target_link_libraries(shm_cleanup_test PUBLIC provizio_dds provizio_dds_types)
+# Threads::Threads because the spares_the_living case creates a subscriber, whose deferred
+# match-publisher build is a header-only std::async instantiated into this translation unit —
+# so the test object itself references pthread_create. Needed explicitly on the glibc versions
+# that still ship libpthread separately (jetson-20.04); newer ones merged it into libc, which
+# is why this links without it on a modern host. Same as every other test target that spawns
+# a thread (discovery_tuning, accumulation, the request_response services).
+find_package(Threads REQUIRED)
+target_link_libraries(shm_cleanup_test PUBLIC provizio_dds provizio_dds_types Threads::Threads)
 # The directory-taking entry point the hermetic cases drive is deliberately NOT part of the
 # installed headers (it unlinks files under a caller-chosen directory), so reach it through
 # the library's own private header.

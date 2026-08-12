@@ -27,4 +27,9 @@ else()
 endif()
 
 # Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
+# Shares the "provizio_dds_test_request_response" service name with the entries in
+# test/request_response/, so it takes the same lock (see the note there).
+set_tests_properties(request_response_concurrent
+    PROPERTIES RESOURCE_LOCK provizio_dds_test_request_response)
+
 provizio_dds_scale_test_timeouts()

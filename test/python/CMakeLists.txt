@@ -630,5 +630,32 @@ if(WIN32)
         "PATH=${PROVIZIO_DDS_TEST_PATH}")
 endif(WIN32)
 
+
+# ---------------------------------------------------------------------------------------
+# Test isolation, mirroring test/request_response/CMakeLists.txt: these entries reuse the
+# same DDS service name on the same domain (14) as each other AND as the C++ entries, so
+# they take the same locks. Under `ctest -j` without them, one test's service answers (and
+# fills its request quota from) another test's client. See the long note in
+# test/request_response/CMakeLists.txt for the measurements.
+# ---------------------------------------------------------------------------------------
+set_tests_properties(
+    cpp_service_client_python_service
+    python_request_cpp_response_concurrent_requests_serial_service
+    python_request_cpp_service
+    python_request_cpp_service_concurrent
+    python_request_response
+    python_request_response_async
+    python_request_response_concurrent_service_client
+    python_request_response_service_client
+    python_serial_service_cpp_concurrent_requests
+    python_service_client_cpp_service
+    python_service_cpp_client
+    python_service_cpp_requests_concurrent
+    PROPERTIES RESOURCE_LOCK provizio_dds_test_request_response)
+set_tests_properties(
+    python_request_response_ignore
+    python_request_response_ignore_async
+    PROPERTIES RESOURCE_LOCK provizio_dds_test_request_response_ignore)
+
 # Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
 provizio_dds_scale_test_timeouts()
