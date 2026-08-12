@@ -129,5 +129,34 @@ else()
         PROPERTIES TIMEOUT 30)
 endif()
 
+# ---------------------------------------------------------------------------------------
+# Test isolation: ctest entries that share a DDS service/topic name must not run at once.
+#
+# Several entries below reuse the SAME service name on the SAME domain (14) -- by design,
+# since they reuse the same service and client binaries. That is fine when they run one at a
+# time, which is how CI runs them (`ctest` with no -j), but not under `ctest -j`: every
+# client's request then reaches every service, so a service fills its request quota from a
+# FOREIGN test's requests and exits before the paired client is done, and bounded request
+# queues start dropping ("The service requests queue is full!"). Measured before this lock:
+# 6-7 of the 9 request/response entries failed at -j 8; none failed run individually.
+#
+# RESOURCE_LOCK makes ctest serialise exactly the entries that share a name, leaving every
+# other test free to run alongside them. The alternative -- giving each entry its own topic
+# name or domain -- would preserve more parallelism but touches ~20 test programs; the
+# reliability tests already do it that way (a per-test postfix plus a per-iteration domain)
+# if a future test needs it.
+# ---------------------------------------------------------------------------------------
+set_tests_properties(
+    request_response
+    request_response_concurrent_requests_serial_service
+    request_response_service_client
+    request_response_concurrent_requests_service_client
+    request_response_concurrent_service_client
+    PROPERTIES RESOURCE_LOCK provizio_dds_test_request_response)
+set_tests_properties(
+    request_response_ignore
+    request_response_ignore_async
+    PROPERTIES RESOURCE_LOCK provizio_dds_test_request_response_ignore)
+
 # Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
 provizio_dds_scale_test_timeouts()

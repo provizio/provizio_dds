@@ -438,7 +438,16 @@ jobs:
     name: Test compatibility with ROS2
     runs-on: ubuntu-latest
     container:
-      image: ros:${{matrix.ros}}
+      # Pulled through Google's public mirror of Docker Hub rather than Docker Hub itself.
+      # Docker Hub rate-limits UNAUTHENTICATED pulls per source IP over an hourly window and
+      # answers a request past the limit with an immediate HTTP 429 ("toomanyrequests"), which
+      # no amount of retrying can wait out. This matrix alone pulls a ros:* image per distro per
+      # job, so it is the biggest Docker Hub surface in this workflow. mirror.gcr.io is a
+      # pull-through cache serving byte-identical content, is not subject to those limits, and
+      # needs no credentials. Set the CONTAINER_REGISTRY_PREFIX repository/organisation variable
+      # to redirect this at a registry the runners authenticate against (or back at Docker Hub,
+      # with prefix "library", if that is ever preferable).
+      image: ${{ vars.CONTAINER_REGISTRY_PREFIX || 'mirror.gcr.io/library' }}/ros:${{matrix.ros}}
       # The reliability request/response tests run a service + client (multiple Fast-DDS
       # participants) concurrently, and provizio's large-sample QoS sizes each participant's
       # shared-memory segment at ~34 MB. Docker's default 64 MB /dev/shm can't hold more than

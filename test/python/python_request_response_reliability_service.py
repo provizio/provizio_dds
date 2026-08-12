@@ -51,8 +51,16 @@ def main() -> int:
         else 14
     )
     initial_iterations = max(1, num_iterations)
-    # Match the C++ reliability service timeout (num_iterations * 3 + 30).
-    wait_timeout = num_iterations * 3.0 + 30
+    # Deadline on IDLENESS, not on total time -- matching the C++ reliability service. This
+    # service is a passive responder: its job is to notice a client that has STOPPED, not to cap
+    # how long a slow machine may take to work through the iterations. The former budget
+    # (num_iterations * 3 + 30) was sized at almost exactly the per-iteration cost the slowest CI
+    # runners actually achieve -- a jetson-20.04 run was observed at 412.8 s of its 414 s budget
+    # by iteration 120 of 128 -- so it failed on machine speed rather than on anything this test
+    # is about. Waiting instead for the gap BETWEEN requests keeps the regression signal (a client
+    # that dies or hangs is still caught, within a bounded time) while being indifferent to how
+    # slow the host is. The ctest TIMEOUT bounds the whole run regardless.
+    idle_timeout = 60.0
 
     log_prefix = f"python_request_response_reliability_service{test_name_postfix}: "
     service_name = f"provizio_dds_test_request_response_reliability{test_name_postfix}"
@@ -70,12 +78,14 @@ def main() -> int:
     condition_variable = threading.Condition()
     requests_processed = False
     received_expected_values = True
+    # Counts every request handled, so the wait below can tell a slow client from a dead one.
+    requests_received = 0
 
     domain_participant = provizio_dds.make_domain_participant(domain_id)
 
     def handle_request(request):
         nonlocal expected_value, num_iterations, requests_processed
-        nonlocal received_expected_values
+        nonlocal received_expected_values, requests_received
 
         value = request.data()
         response = provizio_dds.Int32()
@@ -93,8 +103,10 @@ def main() -> int:
                 received_expected_values = False
             expected_value += 1
             num_iterations -= 1
-            if requests_processed:
-                condition_variable.notify_all()
+            # Notify on EVERY request, not only the last: the wait below watches for progress
+            # to distinguish "slow" from "stopped".
+            requests_received += 1
+            condition_variable.notify_all()
 
         print(f"{log_prefix}{_timestamp()}Responding value: {response.data()}")
         return response
@@ -112,12 +124,18 @@ def main() -> int:
     simulated_request_processing_time_sec=0.25
     try:
         with condition_variable:
-            finished = condition_variable.wait_for(
-                lambda: requests_processed, timeout=wait_timeout
-            )
-        if not finished:
-            print(f"{log_prefix}{_timestamp()}Timeout waiting for request")
-            return 1
+            while not requests_processed:
+                received_before_wait = requests_received
+                if not condition_variable.wait_for(
+                    lambda: requests_processed or requests_received != received_before_wait,
+                    timeout=idle_timeout,
+                ):
+                    print(
+                        f"{log_prefix}{_timestamp()}Timeout waiting for request "
+                        f"(none received in the last {idle_timeout}s; "
+                        f"{requests_received} received in total)"
+                    )
+                    return 1
 
         if not received_expected_values:
             return 1

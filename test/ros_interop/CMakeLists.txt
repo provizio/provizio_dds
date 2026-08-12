@@ -82,8 +82,11 @@ if(ENABLE_ROS_TESTS)
                 "\"$<TARGET_FILE:ros_interop_request>\""
             )
             # Same as subscriber/publisher above: interop with the native ROS 2 node needs the default transport.
+            # Both entries use the same service name, and both run with the loopback profile
+            # cleared (above) so they are not even confined to localhost -- serialise them.
             set_tests_properties(ros_interop_service ros_interop_request
-                PROPERTIES ENVIRONMENT "FASTDDS_DEFAULT_PROFILES_FILE=")
+                PROPERTIES ENVIRONMENT "FASTDDS_DEFAULT_PROFILES_FILE="
+                           RESOURCE_LOCK provizio_dds_test_ros_interop)
         else(RMW_FASTRPS_VERSION_RETURN_CODE EQUAL 0 AND RMW_FASTRPS_VERSION VERSION_GREATER_EQUAL "8.4.0")
             message(WARNING "ROS2 Jazzy+ is required for ROS Interop Request/Response but ROS 2 $ENV{ROS_DISTRO} is sourced. Appropriate tests will be skipped.")
         endif(RMW_FASTRPS_VERSION_RETURN_CODE EQUAL 0 AND RMW_FASTRPS_VERSION VERSION_GREATER_EQUAL "8.4.0")
