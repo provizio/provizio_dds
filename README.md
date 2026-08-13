@@ -114,6 +114,8 @@ else()
 endif()
 ```
 
+`DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON` above is not only about skipping clang-tidy: provizio_dds's coding standards also enable **ASan, LSan and UBSan for any `Debug` build**. That is right for working on provizio_dds itself, but an instrumented `libprovizio_dds` linked into your own non-instrumented application warns `ASan runtime does not come first in initial library list` and makes ASan's own findings unreliable. Keep the flag on for a library you intend to consume; drop it only when you deliberately want the sanitizers.
+
 **Python (pip):**
 
 ```Bash
