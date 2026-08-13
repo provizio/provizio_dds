@@ -144,8 +144,6 @@ namespace provizio::dds::detail
         // callback that ends up here transitively would deadlock on the
         // recursive acquire. We capture the outcome inside the locked
         // section and emit the corresponding log line after we release.
-        bool initialised_monitor_now = false;
-        std::size_t initial_snapshot_size = 0;
         std::string init_error;
         std::string env_warning;
 
@@ -193,8 +191,6 @@ namespace provizio::dds::detail
                     monitor = std::make_unique<network_monitor>([this] { on_kernel_event(); });
                     last_known_snapshot = capture_address_snapshot();
                     coalescer_thread = std::thread{[this] { coalescer_loop(); }};
-                    initialised_monitor_now = true;
-                    initial_snapshot_size = last_known_snapshot.size();
                 }
                 catch (const std::exception &exception)
                 {
@@ -240,35 +236,11 @@ namespace provizio::dds::detail
         {
             log_warning() << env_warning;
         }
-        if (initialised_monitor_now)
-        {
-            auto log = log_info();
-            log << "network auto-recovery: enabled (initial snapshot: " << initial_snapshot_size
-                << " interface address(es)";
-            if (safety_net_period.count() > 0)
-            {
-                log << ", safety-net check every " << safety_net_period.count() << "s";
-            }
-            else
-            {
-                log << ", periodic safety-net check disabled";
-            }
-            // Reported from here, not from force_included_interfaces() itself: that runs
-            // inside capture_address_snapshot(), which the block above calls while
-            // holding registry_mutex and monitor_mutex, and logging under those invites a
-            // re-entrant user callback to deadlock (see address_snapshot_env.cpp).
-            const auto &force_included = force_included_interfaces();
-            if (!force_included.empty())
-            {
-                log << ", force-including " << force_included.size() << " interface(s):";
-                for (const auto &name : force_included)
-                {
-                    log << " " << name;
-                }
-            }
-            log << ")";
-        }
-        else if (!init_error.empty())
+        // Nothing is logged when the monitor starts successfully. That auto-recovery is
+        // enabled, how many addresses it saw and how often it re-checks are this library's
+        // internals; a working feature has nothing to tell the user. Only its FAILURE to
+        // start does, because that leaves auto-recovery unavailable.
+        if (!init_error.empty())
         {
             log_error() << "network auto-recovery: monitor failed to start (" << init_error
                         << "); auto-recovery unavailable until the next recovery-enabled "
@@ -519,8 +491,8 @@ namespace provizio::dds::detail
 
         if (!end_changed && !transient_changed)
         {
-            log_info() << "network event burst — snapshot unchanged (" << new_snapshot.size()
-                       << " interface address(es)), no reset";
+            // Silent: a burst that changed nothing is a non-event. The counter below is what
+            // the tests observe.
             skipped_reset_count.fetch_add(1, std::memory_order_acq_rel);
             // A burst that changed nothing does not clear a pending retry: the
             // participant it refers to is still torn down, and the next safety-net
@@ -622,13 +594,11 @@ namespace provizio::dds::detail
         // could only ever go stale — a reset driven straight through
         // domain_participant::trigger_network_recovery_reset, for instance, never
         // reaches this function at all, yet can leave a participant torn down.
-        auto log = log_info();
-        log << "reset complete (" << reset_participants << " participant(s)";
-        if (still_unrecovered > 0)
-        {
-            log << ", " << still_unrecovered << " still unrecovered — will retry";
-        }
-        log << ")";
+        // No "reset complete" line: the reset was already announced by the "network change
+        // detected" message above, and a rebuild that FAILED logs its own error. A success
+        // confirmation would only repeat what silence already says.
+        static_cast<void>(reset_participants);
+        static_cast<void>(still_unrecovered);
         reset_count.fetch_add(1, std::memory_order_acq_rel);
     }
 
@@ -649,10 +619,9 @@ namespace provizio::dds::detail
         }
         else if (consecutive_retry_passes < max_consecutive_retry_passes)
         {
+            // Silent: retrying is internal bookkeeping. The user hears about it only if every
+            // attempt is exhausted, which the error below reports.
             ++consecutive_retry_passes;
-            log_info() << "network auto-recovery: retrying participant(s) left unrecovered by a failed rebuild "
-                          "(attempt "
-                       << consecutive_retry_passes << " of " << max_consecutive_retry_passes << ")";
             apply_reset(reset_scope::retry_only);
         }
         else if (!retry_exhaustion_reported)
@@ -733,10 +702,10 @@ namespace provizio::dds::detail
         }
         if (reopened)
         {
-            log_warning() << "network auto-recovery: the kernel notification channel had died and was reopened; "
-                             "events missed while it was down are covered by this periodic check";
+            // Silent: the channel died and this repaired it, and the events missed meanwhile
+            // are covered by the very check that repaired it. Self-healed, so nothing to say.
+            return;
         }
-        else
         {
             log_error() << "network auto-recovery: the kernel notification channel died and could not be reopened ("
                         << reopen_error << "); recovery continues on the periodic check alone";

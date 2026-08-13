@@ -391,7 +391,7 @@ All auto-recovery environment variables, each read once per process:
 
 **Cost when not in use:** if no participant ever enables auto-recovery, the background monitor is never started — no threads, no kernel channels, no per-participant memory beyond a single boolean flag.
 
-**Cost during a reset:** typical end-to-end recovery time is a few seconds — about 3 s of event coalescing plus the time Fast-DDS needs for rediscovery and TypeLookup against the new participant. Each reset is logged (see [Logging](#logging) below).
+**Cost during a reset:** typical end-to-end recovery time is a few seconds — about 3 s of event coalescing plus the time Fast-DDS needs for rediscovery and TypeLookup against the new participant. Each reset is logged, once, when the change is detected (see [Logging](#logging) below); a network event that turns out to change nothing is silent.
 
 For details see [include/provizio/dds/network_recovery.h](include/provizio/dds/network_recovery.h).
 
@@ -439,7 +439,7 @@ Three transport-level environment options are read once at participant creation.
 
 Fast-DDS never garbage-collects the shared-memory files of a participant that died without destroying itself. Every unclean process death — `SIGKILL`, a bare `exit()`, an uncaught exception — leaks that participant's data segment (~33.5 MiB at the default transport configuration), its lock file, and often its port files, **forever**. A service that exits and is restarted in a loop therefore fills `/dev/shm`, and once it is full every new participant *on the host* fails to register the shared-memory transport and silently falls back to UDP — a host-wide degradation with no symptom other than an obscure `Failed to create segment` line on the dying process's own stderr. (Measured on a deployed unit: 41,642 orphaned files, 3.87 GB, at ~850 files/hour.) eProsima's answer is to run `fastdds shm clean` by hand; provizio_dds runs the same algorithm automatically instead.
 
-Every participant that may use shared memory sweeps the shared-memory directory **once per process, immediately before creating its first participant** — so a service restarted in a loop buries its own predecessor's corpse and the steady state is at most one dead generation, not unbounded growth — and again, rate-limited to once per 30 s, whenever it finds the filesystem nearly full, so a long-running process heals its host rather than only complaining about it. When something is reclaimed, one info line reports the counts and bytes freed; a healthy host stays silent.
+Every participant that may use shared memory sweeps the shared-memory directory **once per process, immediately before creating its first participant** — so a service restarted in a loop buries its own predecessor's corpse and the steady state is at most one dead generation, not unbounded growth — and again, rate-limited to once per 30 s, whenever it finds the filesystem nearly full, so a long-running process heals its host rather than only complaining about it. It is silent whatever it reclaims: this is housekeeping you neither asked for nor can act on, and what it removes is by definition unreachable by any live process.
 
 Fast-DDS keeps a companion lock file beside every segment and port and holds an `flock()` on it for the owner's whole lifetime; the kernel releases flocks on process death, `SIGKILL` included. So a lock file that *can* be locked provably has no live owner. For segments that settles it. For **ports** it is Fast-DDS's own contract rather than a proof — a port opened for writing takes no lock at all, so the sweep inherits exactly the verdict `SharedMemGlobal::Port::is_zombie` reaches from the same evidence. On top of that:
 
@@ -478,7 +478,15 @@ PROVIZIO_DDS_DISCOVERY_ANNOUNCEMENT_PERIOD_MS=6000 my_app
 
 ## Logging
 
-provizio_dds emits diagnostic messages from background threads (network-recovery monitor, coalescer, participant reset) as well as from a few error paths in the request/response code. By default, info and warning messages go to `std::cout` and errors go to `std::cerr`, all prefixed with `[provizio_dds]`. To route the output into your application's logging system, install a callback:
+provizio_dds logs sparingly and on purpose: **a healthy process is a silent one.** Nothing is emitted for start-up state, successful internal operations, or events the library handled by itself — those are its internals, and they are not your concern while it is working. What you do get is limited to things that either need your attention or change what the library can do for you:
+
+- **your configuration was rejected** — an unparseable or out-of-range `PROVIZIO_DDS_*` value, naming the variable and the default used instead;
+- **the host is limiting the library** — the kernel capping the requested socket buffers (with the `sysctl` to raise), or a shared-memory filesystem too full to register the transport;
+- **something you gave us threw** — an exception out of any of your callbacks, caught at the library boundary (see below);
+- **functionality was lost** — a participant that could not be created or rebuilt, a network monitor that could not start, auto-recovery unavailable for the process;
+- **the network changed and participants were rebuilt** — one line per actual reset, since communication is briefly interrupted by it.
+
+By default, info and warning messages go to `std::cout` and errors go to `std::cerr`, all prefixed with `[provizio_dds]`. To route the output into your application's logging system, install a callback:
 
 ```C++
 #include "provizio/dds/logging.h"

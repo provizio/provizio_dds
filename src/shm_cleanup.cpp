@@ -321,17 +321,6 @@ namespace provizio::dds::detail
             return history;
         }
 
-        // One line, only when something was actually reclaimed — total silence on a healthy
-        // host, where this runs at every process start.
-        void log_sweep(const shm_cleanup_stats &stats)
-        {
-            if (!anything_reclaimed(stats))
-            {
-                return;
-            }
-            log_info() << "reclaimed shared memory of participants that died without cleaning up: " << stats.segments
-                       << " segment(s), " << stats.ports << " port(s), " << stats.bytes << " bytes freed";
-        }
     }  // namespace
 
     shm_cleanup_stats sweep_dead_shared_memory()
@@ -486,7 +475,10 @@ namespace provizio::dds::detail
                 history.has_swept = true;
                 history.last_sweep = std::chrono::steady_clock::now();
             }
-            log_sweep(sweep_dead_shared_memory());
+            // Nothing is logged, however much is reclaimed: this is housekeeping the caller
+            // neither asked for nor can act on. What it reclaims is, by definition, memory no
+            // live process can reach.
+            sweep_dead_shared_memory();
         });
     }
 
@@ -507,7 +499,7 @@ namespace provizio::dds::detail
             history.last_sweep = now;
         }
 
-        log_sweep(sweep_dead_shared_memory());
+        sweep_dead_shared_memory();
         return true;
     }
 }  // namespace provizio::dds::detail

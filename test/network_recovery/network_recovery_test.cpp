@@ -447,19 +447,22 @@ namespace
 
     int test_wait_for_idle_blocks_during_reset()
     {
-        // wait_for_idle() must not return until the coalescer's terminal log
-        // line ("snapshot unchanged" or "reset complete") has been emitted —
-        // not just until the quiet period has elapsed. Earlier this test only
-        // checked elapsed >= quiet_period, which the coalescer's debounce
-        // alone satisfies and does not actually exercise reset_in_progress
-        // tracking. Here we capture logs and assert the terminal log line is
-        // already present when wait_for_idle returns.
+        // wait_for_idle() must not return until the coalescer has FINISHED handling the
+        // burst — not merely once the quiet period has elapsed, which the debounce alone
+        // satisfies without exercising reset_in_progress tracking at all.
+        //
+        // Observed through the coordinator's own counters rather than through a log line.
+        // This used to wait for a "snapshot unchanged" / "reset complete" message, which
+        // tied the test to logging that says nothing to a user of the library and has since
+        // been removed; the counters are the actual state the log was standing in for, so
+        // this is both a stronger assertion and one that cannot be broken by log wording.
         bool passed = true;
         const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
 
-        const log_capture capture;
-
         auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+
+        // Every burst ends in exactly one of the two: a reset, or a coalesced-away no-change.
+        const auto handled_before = coordinator.reset_count_for_test() + coordinator.skipped_reset_count_for_test();
 
         const auto start = std::chrono::steady_clock::now();
         coordinator.inject_kernel_event_for_test();
@@ -467,23 +470,12 @@ namespace
         const auto elapsed = std::chrono::steady_clock::now() - start;
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
-        // The terminal log line is emitted on the coalescer thread inside
-        // run_reset, before reset_in_progress is cleared and the CV is
-        // notified. wait_for_idle blocks on the same CV until
-        // reset_in_progress is false, so the line must already be captured
-        // by the time wait_for_idle returns.
-        const auto entries = capture.snapshot();
-        bool saw_terminal_log = false;
-        for (const auto &entry : entries)
-        {
-            if (entry.message.find("snapshot unchanged") != std::string::npos ||
-                entry.message.find("reset complete") != std::string::npos)
-            {
-                saw_terminal_log = true;
-                break;
-            }
-        }
-        passed &= EXPECT(saw_terminal_log);
+        // Both counters are incremented on the coalescer thread inside run_reset, before
+        // reset_in_progress is cleared and the CV is notified. wait_for_idle blocks on that
+        // same CV until reset_in_progress is false, so the increment must already be visible
+        // by the time it returns.
+        const auto handled_after = coordinator.reset_count_for_test() + coordinator.skipped_reset_count_for_test();
+        passed &= EXPECT(handled_after == handled_before + 1);
 
         // Sanity: also confirm we waited at least the quiet period.
         const auto quiet_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -492,7 +484,8 @@ namespace
         passed &= EXPECT(elapsed_ms >= quiet_ms - 500);
 
         std::cout << "wait_for_idle_blocks_during_reset: " << (passed ? "PASS" : "FAIL") << " (waited " << elapsed_ms
-                  << " ms, quiet_period=" << quiet_ms << " ms, saw_terminal_log=" << saw_terminal_log << ")" << '\n';
+                  << " ms, quiet_period=" << quiet_ms << " ms, bursts_handled=" << (handled_after - handled_before)
+                  << ")" << '\n';
         return passed ? 0 : 1;
     }
 

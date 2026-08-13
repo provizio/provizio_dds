@@ -444,22 +444,8 @@ def sweep_dead_shared_memory(directory: Optional[str] = None) -> ShmCleanupStats
     return stats
 
 
-def _log_sweep(stats: ShmCleanupStats) -> None:
-    """One line, only when something was actually reclaimed — total silence on a healthy
-    host, where this runs at every process start."""
-
-    if not stats.anything_reclaimed():
-        return
-    _network_recovery._emit_log(
-        _network_recovery.LogLevel.INFO,
-        f"reclaimed shared memory of participants that died without cleaning up: "
-        f"{stats.segments} segment(s), {stats.ports} port(s), {stats.size_bytes} bytes freed",
-    )
-
-
 def cleanup_shared_memory_once() -> None:
-    """Sweep once per process, on the first call, logging one line if anything was
-    reclaimed. Subsequent calls do nothing.
+    """Sweep once per process, on the first call. Subsequent calls do nothing.
 
     Called immediately before the process creates its first Fast-DDS participant, so that
     a service restarted in a loop buries its own predecessor's corpse: the steady state
@@ -473,12 +459,14 @@ def cleanup_shared_memory_once() -> None:
         _has_swept = True
         _last_sweep = time.monotonic()
 
-    _log_sweep(sweep_dead_shared_memory())
+    # Nothing is logged, however much is reclaimed: this is housekeeping the caller neither
+    # asked for nor can act on. What it reclaims is, by definition, memory no live process can
+    # reach.
+    sweep_dead_shared_memory()
 
 
 def cleanup_shared_memory_if_due() -> bool:
-    """Sweep unless a sweep already ran recently (30 s), logging one line if anything was
-    reclaimed.
+    """Sweep unless a sweep already ran recently (30 s). Silent, as above.
 
     Called when a participant finds the shared-memory filesystem nearly full, so a
     long-running process heals its host instead of only complaining about it. The rate
@@ -500,7 +488,7 @@ def cleanup_shared_memory_if_due() -> bool:
         _has_swept = True
         _last_sweep = now
 
-    _log_sweep(sweep_dead_shared_memory())
+    sweep_dead_shared_memory()
     return True
 
 

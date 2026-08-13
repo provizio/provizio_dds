@@ -218,10 +218,10 @@ namespace provizio::dds::detail
                         // socket buffer overflowed" condition that hits when
                         // address events arrive faster than userspace drains.
                         // The kernel drops the unread events; subsequent recv
-                        // calls succeed normally. Log and keep monitoring —
-                        // the coalescer's snapshot capture will pick up
-                        // whatever state the kernel ends up in.
-                        log_warning() << "network_monitor: netlink recv lost events (ENOBUFS); continuing";
+                        // calls succeed normally. Silent, and monitoring
+                        // continues — the periodic snapshot capture picks up
+                        // whatever state the kernel ends up in, so nothing is
+                        // actually lost for the caller to hear about.
                         continue;
                     }
                     log_error() << "network_monitor: recv() on netlink socket failed: "

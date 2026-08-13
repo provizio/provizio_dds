@@ -84,8 +84,10 @@ namespace provizio::dds::detail
     PROVIZIO_DDS_API shm_cleanup_stats sweep_dead_shared_memory();
 
     /**
-     * @brief Sweeps once per process, on the first call, and logs one line if anything was
-     * reclaimed. Subsequent calls do nothing.
+     * @brief Sweeps once per process, on the first call. Subsequent calls do nothing.
+     *
+     * Silent whatever it reclaims: this is housekeeping the caller neither asked for nor can
+     * act on, and what it removes is by definition unreachable by any live process.
      *
      * Called immediately before the process creates its first Fast-DDS participant, so that a
      * service restarted in a loop buries its own predecessor's corpse: the steady state
@@ -94,8 +96,7 @@ namespace provizio::dds::detail
     PROVIZIO_DDS_API void cleanup_shared_memory_once();
 
     /**
-     * @brief Sweeps unless a sweep already ran recently (30 s), and logs one line if anything
-     * was reclaimed.
+     * @brief Sweeps unless a sweep already ran recently (30 s). Silent, as above.
      *
      * Called when a participant finds the shared-memory filesystem nearly full, so a
      * long-running process heals its host instead of only complaining about it. The rate limit
