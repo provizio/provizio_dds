@@ -114,6 +114,8 @@ else()
 endif()
 ```
 
+`DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON` above is not only about skipping clang-tidy: provizio_dds's coding standards also enable **ASan, LSan and UBSan for any `Debug` build**. That is right for working on provizio_dds itself, but an instrumented `libprovizio_dds` linked into your own non-instrumented application warns `ASan runtime does not come first in initial library list` and makes ASan's own findings unreliable. Keep the flag on for a library you intend to consume; drop it only when you deliberately want the sanitizers.
+
 **Python (pip):**
 
 ```Bash
@@ -391,7 +393,7 @@ All auto-recovery environment variables, each read once per process:
 
 **Cost when not in use:** if no participant ever enables auto-recovery, the background monitor is never started — no threads, no kernel channels, no per-participant memory beyond a single boolean flag.
 
-**Cost during a reset:** typical end-to-end recovery time is a few seconds — about 3 s of event coalescing plus the time Fast-DDS needs for rediscovery and TypeLookup against the new participant. Each reset is logged (see [Logging](#logging) below).
+**Cost during a reset:** typical end-to-end recovery time is a few seconds — about 3 s of event coalescing plus the time Fast-DDS needs for rediscovery and TypeLookup against the new participant. Each reset is logged, once, when the change is detected (see [Logging](#logging) below); a network event that turns out to change nothing is silent.
 
 For details see [include/provizio/dds/network_recovery.h](include/provizio/dds/network_recovery.h).
 
@@ -435,6 +437,27 @@ Three transport-level environment options are read once at participant creation.
 
 **Trade-off of the `1400` default — CPU when publishing very large samples.** The cap sets the size of every outgoing datagram, so per-datagram costs are paid per ~1.4 KB instead of per ~64 KB. Most messages published by Provizio components are far smaller than 64 KB, where the difference is negligible — radar point clouds and freespace polygons gain dramatically better deliverability on lossy networks at near-zero cost, which is why `1400` is the default. But bulk multi-MB streams pay for it: a 6 MB raw camera frame becomes ~4500 datagrams instead of ~100, costing roughly 10x the sender/receiver CPU. The cap is participant-wide, so same-host **shared-memory** traffic fragments at the same ~1.4 KB granularity even though no MTU is involved — an SHM-only multi-MB pipeline pays the same overhead and may equally prefer raising the cap. Hosts publishing such streams over clean, loss-free links (e.g. a wired lab bench) can set `PROVIZIO_DDS_MAX_MESSAGE_SIZE=65500` (Fast-DDS's maximum) to restore the single-datagram-per-64-KB behaviour and reclaim that CPU at the cost of loss resilience. Conversely, the cap can be lowered on paths with a smaller MTU — the cap is the UDP payload size, so it plus 28 bytes of UDP/IPv4 headers must fit the path MTU (e.g. `1350` keeps strict single-frame delivery through a WireGuard tunnel with its default 1420 MTU; exceeding a path's MTU is benign but splits each datagram into two IP fragments). One more sizing constraint: the participant's own discovery announcement grows with its addressed-interface count (~56 bytes per extra interface) and must fit the cap in one message, so the `1400` default accommodates roughly 15 addressed interfaces beyond a typical baseline — hosts with unusually many (dense container/VM networking) should raise the cap accordingly.
 
+### Shared-Memory Cleanup
+
+Fast-DDS never garbage-collects the shared-memory files of a participant that died without destroying itself. Every unclean process death — `SIGKILL`, a bare `exit()`, an uncaught exception — leaks that participant's data segment (~33.5 MiB at the default transport configuration), its lock file, and often its port files, **forever**. A service that exits and is restarted in a loop therefore fills `/dev/shm`, and once it is full every new participant *on the host* fails to register the shared-memory transport and silently falls back to UDP — a host-wide degradation with no symptom other than an obscure `Failed to create segment` line on the dying process's own stderr. (Measured on a deployed unit: 41,642 orphaned files, 3.87 GB, at ~850 files/hour.) eProsima's answer is to run `fastdds shm clean` by hand; provizio_dds runs the same algorithm automatically instead.
+
+Every participant that may use shared memory sweeps the shared-memory directory **once per process, immediately before creating its first participant** — so a service restarted in a loop buries its own predecessor's corpse and the steady state is at most one dead generation, not unbounded growth — and again, rate-limited to once per 30 s, whenever it finds the filesystem nearly full, so a long-running process heals its host rather than only complaining about it. It is silent whatever it reclaims: this is housekeeping you neither asked for nor can act on, and what it removes is by definition unreachable by any live process.
+
+Fast-DDS keeps a companion lock file beside every segment and port and holds an `flock()` on it for the owner's whole lifetime; the kernel releases flocks on process death, `SIGKILL` included. So a lock file that *can* be locked provably has no live owner. For segments that settles it. For **ports** it is Fast-DDS's own contract rather than a proof — a port opened for writing takes no lock at all, so the sweep inherits exactly the verdict `SharedMemGlobal::Port::is_zombie` reaches from the same evidence. On top of that:
+
+- only the exact Fast-DDS lock-file name shapes are considered — `fastdds_<16 chars>_el` for a segment and `fastdds_port<N>_el|_sl` for a port, plus the Fast-DDS 2.x `fastrtps_` equivalents. Every other file in the directory, `fast_datasharing_*` segments in particular, is left strictly alone. (Narrower than `fastdds shm clean`, which also accepts `_sl` for segments: Fast-DDS never gives a segment a shared lock, so that name is free for the taking *while the segment is alive* — precisely what someone would need to aim a sweep at a live participant.);
+- a lock file younger than `PROVIZIO_DDS_SHM_CLEANUP_MIN_AGE_SEC` is skipped, which closes the microsecond window in which a participant has created its segment but not yet taken its lock — a participant caught there would lose its segment and silently spend the rest of its life unreachable over shared memory. The guard is short (5 s) so a corpse is reclaimed by the very next incarnation of an exit-looping service rather than lingering for several;
+- the lock file must be one Fast-DDS could have written — a regular file, empty, and not hardlinked onto something else — and each companion is removed only if it belongs to the same user as its lock file, so nobody can steer the sweep by choosing a *name*;
+- the directory is opened once and every lookup is made relative to that descriptor, so the sweep cannot be redirected mid-run; the lock is held across the unlink; and concurrent sweeps in any number of processes are harmless;
+- Linux and macOS only — Windows uses different paths and locking semantics. In practice it runs on Linux, the only platform where this library selects shared memory; the macOS path exists for a participant that opts back into it through `FASTDDS_BUILTIN_TRANSPORTS` or an XML profile.
+
+One deliberate limitation: a port file whose lock file is already gone is never reclaimed. A participant that opens a port for *writing* creates no lock file, so such a port may well be in use — and unlike segment names (random, so they accumulate without bound), port names are derived from the domain and are reused rather than multiplied.
+
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `PROVIZIO_DDS_SHM_CLEANUP` | `on` | Enable / disable the automatic sweep process-wide. `off` / `0` / `false` / `no` disable it; an unrecognised value leaves it enabled (with a logged warning), since a typo must not silently reintroduce the leak. |
+| `PROVIZIO_DDS_SHM_CLEANUP_MIN_AGE_SEC` | `5` | How long (seconds) a lock file must have been untouched before an unlocked one counts as a corpse — the safety margin over the microsecond window in which a starting participant has created its segment but not yet locked it. Rarely worth changing. `0` removes the guard entirely, which re-opens that window; values above one day are clamped to it (a guard that large would wrap `time_t` on 32-bit targets and invert the check). |
+
 ## Discovery Tuning
 
 Participants discover each other over best-effort multicast (SPDP), so some announcements are lost on a busy or lossy network. Fast-DDS counters this with an **initial burst** of announcements sent once at participant creation, plus a **periodic re-announcement** thereafter. Both are levers: set too high, the discovery traffic itself becomes a primary source of UDP congestion once many participants (sensors + clients) run at once — the initial burst is paid on every participant creation (including each [network-recovery](#network-auto-recovery) reset, which recreates the participant), and the periodic re-announcement is paid by every participant forever, so its multicast rate scales with the participant count.
@@ -457,7 +480,15 @@ PROVIZIO_DDS_DISCOVERY_ANNOUNCEMENT_PERIOD_MS=6000 my_app
 
 ## Logging
 
-provizio_dds emits diagnostic messages from background threads (network-recovery monitor, coalescer, participant reset) as well as from a few error paths in the request/response code. By default, info and warning messages go to `std::cout` and errors go to `std::cerr`, all prefixed with `[provizio_dds]`. To route the output into your application's logging system, install a callback:
+provizio_dds logs sparingly and on purpose: **a healthy process is a silent one.** Nothing is emitted for start-up state, successful internal operations, or events the library handled by itself — those are its internals, and they are not your concern while it is working. What you do get is limited to things that either need your attention or change what the library can do for you:
+
+- **your configuration was rejected** — an unparseable or out-of-range `PROVIZIO_DDS_*` value, naming the variable and the default used instead;
+- **the host is limiting the library** — the kernel capping the requested socket buffers (with the `sysctl` to raise), or a shared-memory filesystem too full to register the transport;
+- **something you gave us threw** — an exception out of any of your callbacks, caught at the library boundary (see below);
+- **functionality was lost** — a participant that could not be created or rebuilt, a network monitor that could not start, auto-recovery unavailable for the process;
+- **the network changed and participants were rebuilt** — one line per actual reset, since communication is briefly interrupted by it.
+
+By default, info and warning messages go to `std::cout` and errors go to `std::cerr`, all prefixed with `[provizio_dds]`. To route the output into your application's logging system, install a callback:
 
 ```C++
 #include "provizio/dds/logging.h"

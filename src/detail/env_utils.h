@@ -61,19 +61,20 @@ namespace provizio::dds::detail
     }
 
     /**
-     * @brief Parses a string as a strictly-positive uint32: leading whitespace and a single leading
+     * @brief Parses a string as a uint32 (zero accepted): leading whitespace and a single leading
      * '+', then ASCII digits to end-of-string.
      *
      * strtoull alone is NOT a safe validator here: it accepts a leading '-' and negates in unsigned
      * arithmetic, so e.g. "-18446744073709551615" would wrap around to 1 and pass a positive-range
      * check. The explicit digit check after the optional sign rejects any minus. Mirrors
-     * _parse_positive_u32 in python/provizio_dds.py so both languages treat the same environment
-     * values as valid.
+     * _parse_u32 in python/shm_cleanup.py so both languages treat the same environment values as
+     * valid.
      *
      * @param text The string to parse (must not be nullptr)
-     * @return The parsed value, or 0 when the input is not a strictly-positive uint32
+     * @param value Receives the parsed value; left untouched when the input is not a valid uint32
+     * @return Whether @p text is a valid uint32
      */
-    inline std::uint32_t parse_positive_u32(const char *text)
+    inline bool try_parse_u32(const char *text, std::uint32_t &value)
     {
         const char *cursor = text;
         while (std::isspace(static_cast<unsigned char>(*cursor)) != 0)
@@ -86,16 +87,38 @@ namespace provizio::dds::detail
         }
         if (std::isdigit(static_cast<unsigned char>(*cursor)) == 0)
         {
-            return 0;
+            return false;
         }
         char *end = nullptr;
         const std::uint64_t parsed = std::strtoull(cursor, &end, 10);  // NOLINT: C numeric parse
         if (end == nullptr || *end != '\0' ||
             parsed > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
         {
+            return false;
+        }
+        value = static_cast<std::uint32_t>(parsed);
+        return true;
+    }
+
+    /**
+     * @brief Parses a string as a strictly-positive uint32, using the same grammar as
+     * @c try_parse_u32.
+     *
+     * Zero shares the invalid return value: every caller treats it as "not configured" and falls
+     * back to its own default, so the two cases need no distinction. Mirrors _parse_positive_u32 in
+     * python/provizio_dds.py.
+     *
+     * @param text The string to parse (must not be nullptr)
+     * @return The parsed value, or 0 when the input is not a strictly-positive uint32
+     */
+    inline std::uint32_t parse_positive_u32(const char *text)
+    {
+        std::uint32_t value = 0;
+        if (!try_parse_u32(text, value))
+        {
             return 0;
         }
-        return static_cast<std::uint32_t>(parsed);
+        return value;
     }
 }  // namespace provizio::dds::detail
 

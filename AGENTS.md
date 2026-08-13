@@ -49,7 +49,7 @@ ctest --output-on-failure
 ctest --output-on-failure -R simplest_pub_sub
 ```
 
-Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `callback_exceptions`, `point_cloud2`, `accumulation`.
+Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `shm_cleanup`, `callback_exceptions`, `point_cloud2`, `accumulation`.
 
 ### CI Build Scripts
 
@@ -95,6 +95,8 @@ Two shared libraries are produced:
 - `point_cloud2.py` — Point cloud parsing utilities. (Has a C++ counterpart: include/provizio/dds/point_cloud2.h; keep behavior in sync.)
 - `accumulation.py` — Multi-radar point cloud accumulation/fusion with odometry. (Has a C++ counterpart: include/provizio/dds/accumulation.h; keep behavior in sync.)
 - `gps_utils.py` — GPS/GNSS coordinate utilities.
+- `network_recovery.py` — Network-interface monitoring and participant recreation. (C++ counterpart: `src/network_recovery*.cpp`.)
+- `shm_cleanup.py` — Reclaims the shared-memory files of participants that died without cleaning up. (C++ counterpart: `src/shm_cleanup.cpp`; keep behavior in sync.)
 
 Python bindings require SWIG 4.0+ and are generated from Fast-DDS-python + provizio_dds_idls `.i` files.
 
@@ -124,7 +126,7 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
 | `PYTHON_PACKAGES_INSTALL_DIR` | "" | Install directory for Python artifacts (empty uses default sysconfig path) |
 | `LOOK_FOR_FAST_DDS` | FALSE | Try system Fast-DDS before building from source |
 | `IGNORE_BIN_CACHE` | OFF | Force build from source (skip prebuilt cache) |
-| `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS` | OFF | Disable Provizio coding standards (clang-tidy, formatting) |
+| `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS` | OFF | Disable Provizio coding standards (clang-tidy, formatting) **and the sanitizers Debug builds otherwise enable** — see Conventions |
 | `STATIC_ANALYSIS` | OFF | Enable clang-tidy static analysis (requires coding standards checks enabled; not supported on macOS+clang) |
 | `INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS` | OFF | Linux: use versioned .so names to avoid runtime conflicts |
 | `FAST_DDS_VERSION` | "v3.6.2.0" | Fast-DDS Git tag to build from source |
@@ -141,5 +143,8 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
 - License: Apache 2.0 header required on all source files.
 - Coding standards enforced by `provizio/coding_standards` (downloaded at configure time). Disable with `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON` for faster local iteration.
 - **Formatting and static analysis**: All C/C++ code must conform to the repository `.clang-format` (Microsoft style) and `.clang-tidy` configurations. CI enforces these checks and will reject non-conforming code. **MANDATORY: After modifying any C/C++ file, always run `clang-format -i <file>` on it before committing.** Do not rely on manual formatting — the tool must be run to ensure compliance.
-- Runtime sanitizers (ASan/TSan/MSan) are explicitly disabled due to known Fast-DDS issues.
+- **Sanitizers are ON by default in Debug builds.** The coding standards enable ASan + LSan + UBSan for any `CMAKE_BUILD_TYPE=Debug` build (see `StandardConfig.cmake`); TSan is opt-in via `-DENABLE_TSAN=TRUE` and has its own CI job. `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON` turns them off along with clang-tidy and the formatting checks. Consequences worth knowing:
+  - A Debug `libprovizio_dds.so` is instrumented, so linking it into a **non-instrumented** application produces `ASan runtime does not come first in initial library list` and degrades ASan's own accuracy. Build with `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON` (as the README's integration snippet does) for a Debug library meant to be consumed by other code.
+  - Debug test timeouts are multiplied by `PROVIZIO_DDS_TEST_TIMEOUT_SCALE` (5) because instrumented runs are several times slower.
+  - MSan is not used: it needs an instrumented libc++/libstdc++, which this project does not build.
 - ROS 2 topic names use the `rt/` prefix convention.

@@ -156,8 +156,8 @@ namespace provizio::dds::detail
                     {
                         continue;
                     }
-                    log_warning() << "address_snapshot: netlink RTM_GETLINK recv failed or timed out: "
-                                  << std::system_category().message(errno);
+                    // Silent: the interface-kind lookup is an optimisation over name-prefix
+                    // filtering, and the fallback below produces a correct snapshot without it.
                     break;
                 }
                 if (got == 0)
@@ -168,8 +168,7 @@ namespace provizio::dds::detail
                 }
                 if (static_cast<std::size_t>(got) > buffer.size())
                 {
-                    log_warning() << "address_snapshot: netlink RTM_GETLINK reply truncated "
-                                     "(buffer too small); falling back to name-prefix filtering";
+                    // Silent: falls back to name-prefix filtering, which is correct.
                     break;
                 }
 
@@ -192,8 +191,7 @@ namespace provizio::dds::detail
                     }
                     if (nh->nlmsg_type == NLMSG_ERROR)
                     {
-                        log_warning() << "address_snapshot: netlink RTM_GETLINK dump returned an error; "
-                                         "falling back to name-prefix filtering";
+                        // Silent: falls back to name-prefix filtering, which is correct.
                         stop = true;
                         break;
                     }

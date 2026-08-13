@@ -762,6 +762,7 @@ else(HAS_BIN_CACHE)
         src/point_cloud2.cpp
         src/qos_defaults_checks.cpp
         src/request_response.cpp
+        src/shm_cleanup.cpp
         src/topic.cpp
     )
     # Per-platform network monitoring + address-snapshot backends. Each .cpp is
@@ -1168,6 +1169,7 @@ else(HAS_BIN_CACHE)
             "${CMAKE_CURRENT_SOURCE_DIR}/python/accumulation.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/gps_utils.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/network_recovery.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/shm_cleanup.py"
         )
         set(PROVIZIO_DDS_ALL_PYTHON_LIBS
             ${FASTDDS_PYTHON_LIBS}

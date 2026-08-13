@@ -95,23 +95,103 @@ else
     exit 1
   fi
 
+  # apt on CI hosts fails transiently far more often than it fails meaningfully: a mirror
+  # returning 5xx or closing a connection mid-download, a stale package list after a mirror
+  # rotation, and — on GitHub-hosted runners — unattended-upgrades holding the dpkg lock for the
+  # first minute or two of the job. Every one of those aborts an otherwise healthy build, and
+  # this script is re-run from scratch inside the congested-network Docker image on every CI
+  # run, so it is the single largest apt surface in the project.
+  #
+  # Two layers of defence, because they cover different failures:
+  #   - Acquire::Retries makes apt itself retry an individual failed download.
+  #   - DPkg::Lock::Timeout waits for the dpkg lock instead of failing instantly. Unknown to
+  #     apt < 1.9 (Ubuntu 18.04), which ignores unrecognised -o keys, so it is safe there.
+  #   - The outer loop covers what neither does: a refreshed package list between attempts,
+  #     with exponential backoff, for the "404 on a package version" case after a rotation.
+  APT_MAX_ATTEMPTS=${APT_MAX_ATTEMPTS:-5}
+  APT_OPTIONS=(-o "Acquire::Retries=3" -o "DPkg::Lock::Timeout=180")
+
+  # apt_get <args...>: run apt-get with those options, retrying transient failures.
+  apt_get() {
+    local attempt=1
+    local delay=5
+    while true; do
+      if apt-get "${APT_OPTIONS[@]}" "$@"; then
+        return 0
+      fi
+      if [[ "${attempt}" -ge "${APT_MAX_ATTEMPTS}" ]]; then
+        echo "apt-get $* failed after ${APT_MAX_ATTEMPTS} attempts" >&2
+        return 1
+      fi
+      echo "apt-get $* failed (attempt ${attempt}/${APT_MAX_ATTEMPTS}); retrying in ${delay}s..." >&2
+      sleep "${delay}"
+      delay=$((delay * 2))
+      # A stale package list is a common cause; refresh it before trying again. Its own
+      # failure is not fatal here — the retry of the real command is what matters.
+      apt-get "${APT_OPTIONS[@]}" update || true
+      attempt=$((attempt + 1))
+    done
+  }
+
+  # apt_get_optional <args...>: same options but NO retries, for calls whose failure is an
+  # expected outcome the caller handles (e.g. a held package) rather than a transient fault.
+  apt_get_optional() {
+    apt-get "${APT_OPTIONS[@]}" "$@"
+  }
+
+  # Downloads fail transiently for the same reasons apt does — a 503 from GitHub or a mirror,
+  # a connection reset mid-stream, a DNS blip — and every one of them aborted the job. Observed:
+  # "HTTP request sent, awaiting response... 503 Service Unavailable" fetching the SWIG tarball,
+  # which then fed a truncated stream straight into tar ("gzip: stdin: unexpected end of file").
+  #
+  # wget does NOT retry HTTP 5xx by default, hence --retry-on-http-error; the outer loop covers
+  # what its own retries do not (a stream that dies mid-transfer, a name-resolution failure).
+  # Everything lands in a FILE first and is only then unpacked, so a truncated download can
+  # never be piped into tar as if it were complete. All options predate Ubuntu 18.04's wget
+  # 1.19 / curl 7.58, which the jetson-18.04 runners still use.
+  DOWNLOAD_MAX_ATTEMPTS=${DOWNLOAD_MAX_ATTEMPTS:-5}
+
+  # download <url> <output-path>
+  download() {
+    local url="$1"
+    local output="$2"
+    local attempt=1
+    local delay=5
+    while true; do
+      if wget --tries=3 --timeout=30 --waitretry=10 \
+              --retry-on-http-error=408,429,500,502,503,504 \
+              -O "${output}" "${url}"; then
+        return 0
+      fi
+      rm -f "${output}"  # A partial file must never be mistaken for a complete one.
+      if [[ "${attempt}" -ge "${DOWNLOAD_MAX_ATTEMPTS}" ]]; then
+        echo "Failed to download ${url} after ${DOWNLOAD_MAX_ATTEMPTS} attempts" >&2
+        return 1
+      fi
+      echo "Download of ${url} failed (attempt ${attempt}/${DOWNLOAD_MAX_ATTEMPTS}); retrying in ${delay}s..." >&2
+      sleep "${delay}"
+      delay=$((delay * 2))
+      attempt=$((attempt + 1))
+    done
+  }
+
   # Update apt cache
-  apt update
+  apt_get update
 
   # Install lsb-release for checking Ubuntu version and accessing https
-  apt install -y --no-install-recommends lsb-release ca-certificates
+  apt_get install -y --no-install-recommends lsb-release ca-certificates
 
   # Install build-essential
-  apt install -y --no-install-recommends build-essential
+  apt_get install -y --no-install-recommends build-essential
 
   # Install patchelf
-  apt install -y --no-install-recommends patchelf
+  apt_get install -y --no-install-recommends patchelf
 
   # Install unzip
-  apt install -y --no-install-recommends unzip
+  apt_get install -y --no-install-recommends unzip
 
   # Install Eigen3 (optional provizio_dds dependency: accelerates point clouds accumulation linear algebra)
-  apt install -y --no-install-recommends libeigen3-dev
+  apt_get install -y --no-install-recommends libeigen3-dev
 
   # Check if running in Ubuntu 18
   UBUNTU_18=false
@@ -144,27 +224,27 @@ else
   # Install GCC/clang
   if [[ "${CC}" == "gcc" ]]; then
     if [ "${UBUNTU_18}" = true ]; then
-      apt install -y software-properties-common
+      apt_get install -y software-properties-common
       add-apt-repository -y ppa:ubuntu-toolchain-r/test
-      apt update
-      apt install -y --no-install-recommends gcc-9 g++-9
+      apt_get update
+      apt_get install -y --no-install-recommends gcc-9 g++-9
       update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 100
       update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 100
     else
-      apt install -y --no-install-recommends gcc g++
+      apt_get install -y --no-install-recommends gcc g++
     fi
   else
     if [ "${UBUNTU_18}" = true ]; then
-      apt install -y --no-install-recommends clang-10
+      apt_get install -y --no-install-recommends clang-10
       update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100
       update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-10 100
     else
-      apt install -y --no-install-recommends clang
+      apt_get install -y --no-install-recommends clang
     fi
   fi
 
   # Install make
-  apt install -y --no-install-recommends make ninja-build
+  apt_get install -y --no-install-recommends make ninja-build
 
   # Install CMake
   if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_20}" = true ]; then
@@ -173,37 +253,39 @@ else
       else
           CMAKE_VERSION=3.25.2-0kitware1ubuntu20.04.1
       fi
-      apt install -y software-properties-common lsb-release wget
-      wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null
+      apt_get install -y software-properties-common lsb-release wget
+      download https://apt.kitware.com/keys/kitware-archive-latest.asc /tmp/kitware-archive-latest.asc
+      gpg --dearmor - < /tmp/kitware-archive-latest.asc | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null
+      rm -f /tmp/kitware-archive-latest.asc
       apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main"
-      apt update
-      apt install -y --no-install-recommends kitware-archive-keyring
-      apt install -y --no-install-recommends --allow-downgrades cmake=${CMAKE_VERSION} cmake-data=${CMAKE_VERSION} || echo "Skipping installing cmake, it's likely already installed and held"
+      apt_get update
+      apt_get install -y --no-install-recommends kitware-archive-keyring
+      apt_get_optional install -y --no-install-recommends --allow-downgrades cmake=${CMAKE_VERSION} cmake-data=${CMAKE_VERSION} || echo "Skipping installing cmake, it's likely already installed and held"
   else
-      apt install -y --no-install-recommends cmake
+      apt_get install -y --no-install-recommends cmake
   fi
 
   # Install git 2.18+
   if [ "${UBUNTU_18}" = true ]; then
     apt-add-repository ppa:git-core/ppa
-    apt update
+    apt_get update
   fi
-  apt install -y --no-install-recommends git
+  apt_get install -y --no-install-recommends git
 
   # Install libssl-dev
-  apt install -y --no-install-recommends libssl-dev
+  apt_get install -y --no-install-recommends libssl-dev
 
   if [[ "${STATIC_ANALYSIS}" != "OFF" ]]; then
     # Install cppcheck, clang-format and clang-tidy (and clang for proper clang-tidy checks)
     if [ "${UBUNTU_18}" = true ]; then
-      apt install -y --no-install-recommends clang-10 clang-format-10 clang-tidy-10
+      apt_get install -y --no-install-recommends clang-10 clang-format-10 clang-tidy-10
 
       update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-10 100
       update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100
       update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-10 100
       update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-10 100
     else
-      apt install -y --no-install-recommends clang clang-format clang-tidy cppcheck
+      apt_get install -y --no-install-recommends clang clang-format clang-tidy cppcheck
     fi
   fi
 
@@ -214,7 +296,7 @@ else
         FAST_DDS_INSTALL="/usr/local/"
       fi
 
-      apt install -y --no-install-recommends wget python3-pip libasio-dev libtinyxml2-dev
+      apt_get install -y --no-install-recommends wget python3-pip libasio-dev libtinyxml2-dev
       rm -rf /tmp/fastdds # In case of previous installation
       mkdir /tmp/fastdds
 
@@ -265,34 +347,40 @@ else
 
     echo "Installing ROS2: ${ROS2_VERSION}..."
 
-    apt install  -y --no-install-recommends locales
+    apt_get install  -y --no-install-recommends locales
     locale-gen en_US en_US.UTF-8
     update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
     export LANG=en_US.UTF-8
-    apt install -y --no-install-recommends software-properties-common
+    apt_get install -y --no-install-recommends software-properties-common
     add-apt-repository universe
-    apt install -y --no-install-recommends curl
-    curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+    apt_get install -y --no-install-recommends curl
+    # curl's --retry already covers transient HTTP errors (408, 429, 5xx) as well as connection
+    # failures, so it needs no outer loop of its own.
+    curl -sSL --retry 5 --retry-delay 5 --retry-connrefused \
+         https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+         -o /usr/share/keyrings/ros-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
-    apt update
-    apt install -y --no-install-recommends ros-${ROS2_VERSION}-desktop
+    apt_get update
+    apt_get install -y --no-install-recommends ros-${ROS2_VERSION}-desktop
   fi
 
   if [[ "${PYTHON}" != "OFF" ]]; then
     # Install Python and related dependencies
-    apt install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev python3-setuptools
+    apt_get install -y --no-install-recommends python3 python3-pip python3-venv libpython3-dev python3-setuptools
 
     # Install SWIG >= 4.4 from source (apt versions are too old or broken across Ubuntu releases)
     CURRENT_SWIG_VERSION=$(swig -version 2>/dev/null | grep -oP 'SWIG Version \K[0-9.]+' || echo "0.0.0")
     if [ "$(printf '%s\n' "4.4.0" "${CURRENT_SWIG_VERSION}" | sort -V | head -n1)" != "4.4.0" ]; then
       echo "Installing SWIG v${SWIG_VERSION} from source (current: ${CURRENT_SWIG_VERSION})..."
-      apt remove -y swig 2>/dev/null || true
+      apt_get_optional remove -y swig 2>/dev/null || true
       (
         set -eu
 
-        apt install -y --no-install-recommends wget libpcre2-dev automake bison byacc
+        apt_get install -y --no-install-recommends wget libpcre2-dev automake bison byacc
         cd /tmp
-        wget -c https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz -O - | tar -xz
+        download "https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz" "/tmp/swig-${SWIG_VERSION}.tar.gz"
+        tar -xzf "/tmp/swig-${SWIG_VERSION}.tar.gz"
+        rm -f "/tmp/swig-${SWIG_VERSION}.tar.gz"
         cd swig-${SWIG_VERSION}
         ./autogen.sh
         ./configure
@@ -318,8 +406,8 @@ if [ "${UBUNTU_18}" = true ]; then
     # Install patchelf v0.18 (v0.9 shipped in 18.04 breaks binaries on --replace-needed)
     cd /tmp
     PATCHELF_VERSION="0.18.0"
-    wget https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}.tar.gz
-    tar -xvf patchelf-${PATCHELF_VERSION}.tar.gz
+    download "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}.tar.gz" "patchelf-${PATCHELF_VERSION}.tar.gz"
+    tar -xf patchelf-${PATCHELF_VERSION}.tar.gz
     cd patchelf-${PATCHELF_VERSION}/
     ./configure --prefix=/usr --docdir=/usr/share/doc/patchelf-${PATCHELF_VERSION} && make && make install
     cd /tmp

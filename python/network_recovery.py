@@ -561,11 +561,7 @@ def _fetch_link_kinds_linux() -> Dict[int, str]:
             if not buf:
                 break
             if msg_flags & socket.MSG_TRUNC:
-                _emit_log(
-                    LogLevel.WARNING,
-                    "network monitor: netlink RTM_GETLINK reply truncated (buffer too small); "
-                    "falling back to name-prefix interface filtering",
-                )
+                # Silent: falls back to name-prefix filtering, which is correct.
                 break
             offset = 0
             while offset + 16 <= len(buf):
@@ -577,11 +573,7 @@ def _fetch_link_kinds_linux() -> Dict[int, str]:
                     stop = True
                     break
                 if nlmsg_type == _NLMSG_ERROR:
-                    _emit_log(
-                        LogLevel.WARNING,
-                        "network monitor: netlink RTM_GETLINK dump returned an error; "
-                        "falling back to name-prefix interface filtering",
-                    )
+                    # Silent: falls back to name-prefix filtering, which is correct.
                     stop = True
                     break
                 if nlmsg_type == _RTM_NEWLINK:
@@ -1556,11 +1548,7 @@ class _NetlinkNetworkMonitor:
             _emit_log(LogLevel.ERROR, f"network monitor: could not rebind the netlink socket ({ex})")
             return
         self._sock = sock
-        _emit_log(
-            LogLevel.WARNING,
-            "network monitor: the netlink channel had died and was reopened; events missed "
-            "while it was down are covered by the periodic safety-net check",
-        )
+        # Silent: died and was repaired here, with the missed events covered by this same check.
 
     def _safety_net_check(self) -> None:
         """One periodic tick: revive the socket, let the coordinator retry failed
@@ -1619,21 +1607,21 @@ class _NetlinkNetworkMonitor:
             watched = [self._stop_r] if sock is None else [sock, self._stop_r]
             try:
                 readable, _, _ = select.select(watched, [], [], timeout)
-            except OverflowError as ex:
+            except OverflowError:
                 # A timeout the platform's time type cannot represent. The resolvers
                 # clamp their inputs, so this is belt-and-braces — but it must not kill
                 # the thread, which is what an uncaught exception here used to do.
-                _emit_log(LogLevel.WARNING, f"network monitor: select() timeout out of range ({ex}); using 30s")
+                # Silent: internal clamp, no effect the caller can observe.
                 self._safety_net = min(self._safety_net, _DEFAULT_SAFETY_NET_SEC)
                 continue
-            except ValueError as ex:
+            except ValueError:
                 # select() raises ValueError (not OSError) for a socket whose fd is
                 # already -1 — reachable when another thread closes it between the read
                 # of self._sock above and this call. Not terminal: drop that socket and
                 # let the periodic check reopen it. An uncaught ValueError here used to
                 # kill the worker thread outright, which is exactly the permanent-outage
                 # failure mode this feature exists to prevent.
-                _emit_log(LogLevel.WARNING, f"network monitor: select() on a closed socket ({ex}); reopening")
+                # Silent: reopened below; self-healed.
                 self._close_socket(sock)
                 continue
             except OSError as ex:
@@ -1680,7 +1668,7 @@ class _NetlinkNetworkMonitor:
                     if ex.errno in (errno.EINTR, errno.EAGAIN, errno.EWOULDBLOCK):
                         continue
                     if ex.errno == errno.ENOBUFS:
-                        _emit_log(LogLevel.WARNING, "network monitor: netlink recv lost events (ENOBUFS); continuing")
+                        # Silent: the periodic capture picks up whatever state the kernel ends up in.
                         continue
                     # Terminal for this socket only — see the select() branch above.
                     _emit_log(
@@ -1929,11 +1917,6 @@ class _NetworkRecoveryCoordinator:
             except Exception as ex:
                 init_error = str(ex)
 
-        # Capture the outcome inside the locked section, emit the log AFTER
-        # releasing (same re-entrancy hazard as above).
-        initialised_monitor_now = False
-        initial_snapshot_size = 0
-
         with self._registry_lock:
             # GC expired entries inline.
             self._registered = [m for m in self._registered if m() is not None]
@@ -1948,8 +1931,6 @@ class _NetworkRecoveryCoordinator:
             if self._monitor is None and prebuilt_monitor is not None:
                 self._monitor = prebuilt_monitor
                 prebuilt_monitor = None
-                initialised_monitor_now = True
-                initial_snapshot_size = len(self._monitor.initial_snapshot())
 
         if prebuilt_monitor is not None:
             # Lost the construction race: another registration installed its monitor
@@ -1957,25 +1938,13 @@ class _NetworkRecoveryCoordinator:
             prebuilt_monitor.stop()
             init_error = None
 
-        # Logs emitted with no provizio_dds lock held — a user callback
-        # that re-enters via make_domain_participant can run freely.
-        if initialised_monitor_now:
-            _emit_log(
-                LogLevel.INFO,
-                f"network auto-recovery: enabled "
-                f"(initial snapshot: {initial_snapshot_size} interface address(es), "
-                f"poll interval {init_poll_interval}s"
-                # Reported from here, not from _force_included_interfaces() itself, which
-                # also runs inside snapshot captures on the monitor's worker thread,
-                # where a re-entrant user log callback must not be invoked.
-                + (
-                    f", force-including: {' '.join(sorted(_force_included_interfaces()))}"
-                    if _force_included_interfaces()
-                    else ""
-                )
-                + ")",
-            )
-        elif init_error is not None:
+        # Logged with no provizio_dds lock held — a user callback that re-enters via
+        # make_domain_participant can run freely.
+        #
+        # Nothing is logged when the monitor starts successfully: that auto-recovery is
+        # enabled, and what it saw, is this library's internal state. Only its FAILURE to
+        # start is reported, because that leaves auto-recovery unavailable.
+        if init_error is not None:
             _emit_log(
                 LogLevel.ERROR,
                 f"network auto-recovery: monitor failed to start ({init_error}); "
@@ -2013,12 +1982,7 @@ class _NetworkRecoveryCoordinator:
             return
 
         self._consecutive_retry_passes += 1
-        _emit_log(
-            LogLevel.INFO,
-            f"network auto-recovery: retrying {len(retry)} participant(s) left unrecovered "
-            f"by a failed rebuild (attempt {self._consecutive_retry_passes} of "
-            f"{self._MAX_CONSECUTIVE_RETRY_PASSES})",
-        )
+        # Silent: retrying is internal; only exhausting every attempt is reported (below).
         with self._idle_lock:
             self._reset_in_progress = True
         try:
@@ -2060,10 +2024,7 @@ class _NetworkRecoveryCoordinator:
             # Genuine no-op (or container/veth/link-local churn, which is filtered
             # out of both snapshots). Bump under _idle_lock to match reset_count so
             # a test sampling the counter has a happens-before edge to this write.
-            _emit_log(
-                LogLevel.INFO,
-                f"network event burst — snapshot unchanged ({len(new)} interface address(es)), no reset",
-            )
+            # Silent: a burst that changed nothing is a non-event.
             with self._idle_lock:
                 self.skipped_reset_count += 1
             return
@@ -2105,7 +2066,7 @@ class _NetworkRecoveryCoordinator:
             except Exception as ex:
                 _emit_log(LogLevel.ERROR, f"participant reset failed: {ex}")
 
-        _emit_log(LogLevel.INFO, f"reset complete ({len(live)} participant(s))")
+        # No completion line: the change was already announced, and a failure logs its own error.
 
         # Bump the observability counter UNDER the idle lock so a thread
         # that wakes from wait_for_idle and then samples reset_count cannot

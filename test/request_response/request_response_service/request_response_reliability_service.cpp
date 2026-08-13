@@ -72,7 +72,16 @@ int main(int argc, char *argv[])
         (argc > 4)
             ? static_cast<provizio::dds::DomainId_t>(base_domain_id + (std::atoi(argv[4]) % domain_range))  // NOLINT
             : 14;  // NOLINT: OK in a unit test
-    const std::chrono::seconds wait_timeout{num_iterations * 3 + 30};
+    // Deadline on IDLENESS, not on total time. This service is a passive responder: its job is
+    // to notice a client that has STOPPED, not to cap how long a slow machine may take to work
+    // through the iterations. The former budget (num_iterations * 3 + 30) was sized at almost
+    // exactly the per-iteration cost the slowest CI runners actually achieve — a jetson-20.04
+    // run was observed at 412.8 s of its 414 s budget by iteration 120 of 128 — so it failed on
+    // machine speed rather than on anything this test is about. Waiting instead for the gap
+    // BETWEEN requests keeps the regression signal (a client that dies or hangs is still caught,
+    // within a bounded time) while being indifferent to how slow the host is. The ctest TIMEOUT
+    // bounds the whole run regardless.
+    constexpr std::chrono::seconds idle_timeout{60};
 
     const std::string log_prefix = "request_response_reliability_service" + test_name_postfix + ": ";
     const std::string service_name{"provizio_dds_test_request_response_reliability" + test_name_postfix};
@@ -88,6 +97,8 @@ int main(int argc, char *argv[])
 
     std::mutex mutex;
     std::condition_variable condition_variable;
+    // Counts every request handled, so the wait below can tell a slow client from a dead one.
+    std::uint64_t requests_received = 0;
     bool requests_processed = false;
     bool received_expected_values = true;
 
@@ -113,10 +124,10 @@ int main(int argc, char *argv[])
             ++expected_value;
             --num_iterations;
 
-            if (requests_processed)
-            {
-                condition_variable.notify_all();
-            }
+            // Notify on EVERY request, not only the last: the wait below watches for progress
+            // to distinguish "slow" from "stopped".
+            ++requests_received;
+            condition_variable.notify_all();
 
             std::cout << log_prefix << timestamp() << "Responding value: " << response.data() << '\n';
 
@@ -124,10 +135,16 @@ int main(int argc, char *argv[])
         });
 
     std::unique_lock<std::mutex> lock{mutex};
-    if (!condition_variable.wait_for(lock, wait_timeout, [&]() { return requests_processed; }))
+    while (!requests_processed)
     {
-        std::cerr << log_prefix << timestamp() << "Timeout waiting for request" << '\n';
-        return 1;
+        const auto received_before_wait = requests_received;
+        if (!condition_variable.wait_for(
+                lock, idle_timeout, [&]() { return requests_processed || requests_received != received_before_wait; }))
+        {
+            std::cerr << log_prefix << timestamp() << "Timeout waiting for request (none received in the last "
+                      << idle_timeout.count() << "s; " << requests_received << " received in total)" << '\n';
+            return 1;
+        }
     }
 
     if (!received_expected_values)

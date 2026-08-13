@@ -164,8 +164,8 @@ namespace provizio::dds::detail
                 {
                     if (got < 0 && errno != EAGAIN && errno != EINTR)
                     {
-                        log_warning() << "network_monitor: recv() on routing socket: "
-                                      << std::system_category().message(errno);
+                        // Silent: a failed read of one routing message costs at most a
+                        // delayed detection, which the periodic re-check covers.
                     }
                     continue;
                 }
@@ -176,8 +176,8 @@ namespace provizio::dds::detail
                 // see a length that includes it.
                 if (hdr->rtm_msglen > got || hdr->rtm_msglen < sizeof(rt_msghdr))
                 {
-                    log_warning() << "network_monitor: routing message length " << hdr->rtm_msglen
-                                  << " inconsistent with recv length " << got;
+                    // Silent: a malformed routing message is skipped; the periodic re-check
+                    // still observes whatever the kernel ended up with.
                     continue;
                 }
                 // Address changes plus RTM_IFINFO, which is how a carrier / interface-flag

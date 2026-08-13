@@ -41,10 +41,21 @@ namespace provizio::dds
      */
     enum class log_level
     {
-        info,     ///< Routine state-transition notice (monitor enabled, participant rebuilt, …).
-        warning,  ///< Recoverable anomaly (env var unrecognised, fallback path taken, …).
-        error,    ///< Permanent failure (monitor failed to start, participant recreate failed, …).
+        /// Something happened that affects the caller, but nothing is wrong — currently only a
+        /// network change that rebuilt the participants, which briefly interrupts communication.
+        info,
+        /// The caller should act: a rejected @c PROVIZIO_DDS_* value, or a host limit the
+        /// library cannot work around on its own (capped socket buffers, a full /dev/shm).
+        warning,
+        /// Functionality was lost: a participant that could not be created or rebuilt, a
+        /// monitor that could not start, or an exception thrown out of a caller's callback.
+        error,
     };
+
+    // Note on what is NOT logged: provizio_dds stays silent about its own internals — start-up
+    // state, successful operations, and anomalies it handled itself (a coalesced network event
+    // that changed nothing, a retried internal fallback). A healthy process produces no output
+    // at all, so anything that does appear is worth reading.
 
     /**
      * @brief Callback signature for custom log emitters.
