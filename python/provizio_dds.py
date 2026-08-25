@@ -195,7 +195,7 @@ if MATCH_PUBLISHER_RELIABILITY_QOS in (
 ):
     raise RuntimeError(
         "MATCH_PUBLISHER_RELIABILITY_QOS sentinel collides with a real "
-        "ReliabilityQosPolicyKind — pick an unused value for the sentinel"
+        "ReliabilityQosPolicyKind -- pick an unused value for the sentinel"
     )
 
 
@@ -1432,7 +1432,7 @@ def make_domain_participant(domain_id: int = 0,
                 # AttributeError on self._participant.create_topic.
                 if self._participant is None:
                     raise RuntimeError(
-                        f"domain_participant: cannot register topic '{topic_name}' — "
+                        f"domain_participant: cannot register topic '{topic_name}' -- "
                         f"the Fast-DDS participant is not available "
                         f"(most likely a network-recovery recreate failed); see logs"
                     )
@@ -1517,7 +1517,7 @@ def make_domain_participant(domain_id: int = 0,
                     # an opaque AttributeError mid-build.
                     if self._participant is None:
                         raise RuntimeError(
-                            "domain_participant: cannot register endpoint — "
+                            "domain_participant: cannot register endpoint -- "
                             "the Fast-DDS participant is not available "
                             "(most likely a network-recovery recreate failed); see logs"
                         )

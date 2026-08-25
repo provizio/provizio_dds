@@ -550,6 +550,6 @@ def manage_shared_memory_space() -> None:
         f"{shared_memory_dir()} has only {available // _BYTES_PER_MEBIBYTE} MiB free of "
         f"{capacity // _BYTES_PER_MEBIBYTE} MiB; shared-memory transport registration can "
         f"fail and fall back to UDP. What is left is in use, or held by files this process "
-        f"may not remove — segments of participants that did not exit cleanly are "
+        f"may not remove -- segments of participants that did not exit cleanly are "
         f"automatically reclaimed (see {_ENABLED_ENV})",
     )

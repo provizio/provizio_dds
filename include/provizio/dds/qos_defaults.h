@@ -47,7 +47,7 @@ namespace provizio::dds
     // letting every default (match-publisher) subscriber silently misbehave.
     static_assert(match_publisher_reliability_qos != BEST_EFFORT_RELIABILITY_QOS &&
                       match_publisher_reliability_qos != RELIABLE_RELIABILITY_QOS,
-                  "match_publisher_reliability_qos sentinel (0) now collides with BEST_EFFORT/RELIABLE — "
+                  "match_publisher_reliability_qos sentinel (0) now collides with BEST_EFFORT/RELIABLE -- "
                   "pick an unused value for the sentinel");
 
     /**

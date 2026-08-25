@@ -111,7 +111,7 @@ def skip_or_fail(reason: str) -> None:
     # catch. Fail with a clear remediation hint instead.
     if _in_ci():
         print(
-            f"FAIL cross_version_compat — {reason}\n"
+            f"FAIL cross_version_compat -- {reason}\n"
             f"  CI=true detected; refusing to skip the cross-version interop check.\n"
             f"  Set {LEGACY_ENV_VAR} to a python3 inside a venv with provizio_dds 1.10.1\n"
             f"  installed (use test/python/setup_legacy_provizio_dds_venv.sh on POSIX,\n"
@@ -119,7 +119,7 @@ def skip_or_fail(reason: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    print(f"SKIPPED: cross_version_compat — {reason}")
+    print(f"SKIPPED: cross_version_compat -- {reason}")
     sys.exit(0)
 
 

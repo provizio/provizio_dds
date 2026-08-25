@@ -96,7 +96,7 @@ with cv:
         sys.exit(1)
     if not _matches_expected(received_message):
         print(
-            "cross_compat_radar_info_subscriber: field mismatch — expected "
+            "cross_compat_radar_info_subscriber: field mismatch -- expected "
             f"serial_number={EXPECTED_SERIAL_NUMBER!r}, "
             f"supported_ranges={EXPECTED_SUPPORTED_RANGES}, "
             f"current_range={EXPECTED_CURRENT_RANGE}; got {received_message}")

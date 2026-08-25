@@ -405,7 +405,7 @@ namespace provizio::dds
                 log_warning() << linux_shm_directory << " has only " << (space.available / bytes_per_mebibyte)
                               << " MiB free of " << (space.capacity / bytes_per_mebibyte)
                               << " MiB; shared-memory transport registration can fail and fall back to UDP. "
-                              << "What is left is in use, or held by files this process may not remove — "
+                              << "What is left is in use, or held by files this process may not remove -- "
                               << "segments of participants that did not exit cleanly are automatically reclaimed "
                               << "(see PROVIZIO_DDS_SHM_CLEANUP)";
             });
@@ -970,7 +970,7 @@ namespace provizio::dds
         // consistent with register_type_locked / register_topic_locked.
         if (participant == nullptr)
         {
-            throw std::runtime_error{"domain_participant: cannot register endpoint — the Fast-DDS participant "
+            throw std::runtime_error{"domain_participant: cannot register endpoint -- the Fast-DDS participant "
                                      "is not available (most likely a network-recovery recreate failed); see logs"};
         }
 

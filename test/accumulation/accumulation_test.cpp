@@ -1727,7 +1727,7 @@ namespace
         // The cloud point is at the origin of the radar frame; with ego == radar, position == ego pose.
         // predict(T_pc) with the covering fix at T_pc and ego x = 20 → position[0] ≈ 20.
         check_near(local[0].position[0], 20.0, 1e-2,
-                   "dds_timesync_buffered: point placed at the exact covering localization, x ≈ 20");
+                   "dds_timesync_buffered: point placed at the exact covering localization, x ~= 20");
 
         // on_point_cloud must have fired exactly once (at buffer release, not at buffer insertion).
         check(callback_count.load() == 1, "dds_timesync_buffered: on_point_cloud fired exactly once at release");
@@ -1835,7 +1835,7 @@ namespace
 
         // Interpolated x = 19.5; old snap-to-covering would give 20.0; stale-last-fix would give 19.0.
         check_near(local[0].position[0], 19.5, 1e-2,
-                   "dds_timesync_interp: point placed at interpolated pose, x ≈ 19.5");
+                   "dds_timesync_interp: point placed at interpolated pose, x ~= 19.5");
 
         check(callback_count.load() == 1, "dds_timesync_interp: on_point_cloud fired exactly once at release");
     }
@@ -1934,9 +1934,9 @@ namespace
                   << ", " << local[0].position[2] << "), expected (" << expected << ", " << expected << ", 0)"
                   << std::endl;
         check_near(local[0].position[0], expected, 1e-2,
-                   "dds_timesync_orient: interpolated yaw 45° places x ≈ 0.7071 (short-way slerp)");
+                   "dds_timesync_orient: interpolated yaw 45 deg places x ~= 0.7071 (short-way slerp)");
         check_near(local[0].position[1], expected, 1e-2,
-                   "dds_timesync_orient: interpolated yaw 45° places y ≈ 0.7071 (short-way slerp)");
+                   "dds_timesync_orient: interpolated yaw 45 deg places y ~= 0.7071 (short-way slerp)");
 
         check(callback_count.load() == 1, "dds_timesync_orient: on_point_cloud fired exactly once at release");
     }
@@ -2183,7 +2183,7 @@ namespace
         // If the stale fix had corrupted previous_fix the bracket would be wrong and interpolation would
         // not yield 19.5. The correct result proves the stale fix was fully ignored.
         check_near(local[0].position[0], 19.5, 1e-2,
-                   "dds_timesync_drop_oor: point placed at interpolated pose x ≈ 19.5 (stale fix ignored)");
+                   "dds_timesync_drop_oor: point placed at interpolated pose x ~= 19.5 (stale fix ignored)");
 
         check(callback_count.load() == 1, "dds_timesync_drop_oor: on_point_cloud fired exactly once at release");
     }
@@ -2277,7 +2277,7 @@ namespace
         // previous_fix.pose has x=19; latest_fix.pose has x=20; true-time pose would have x=15.
         // The correct result is x ≈ 19 (closest retained fix, not the covering fix).
         check_near(local[0].position[0], 19.0, 1e-2,
-                   "dds_timesync_stale_cloud: stale cloud placed at previous_fix pose, x ≈ 19");
+                   "dds_timesync_stale_cloud: stale cloud placed at previous_fix pose, x ~= 19");
 
         check(callback_count.load() == 1, "dds_timesync_stale_cloud: on_point_cloud fired exactly once");
     }

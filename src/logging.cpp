@@ -81,9 +81,18 @@ namespace provizio::dds
                     return;
                 }
 
-                // Default emitter: info / warning → stdout, error → stderr.
+                // Default emitter: info / warning -> stdout, error -> stderr.
+                //
+                // Flushed per line, not left to the stream's own buffering. std::cout is
+                // fully buffered whenever it is not a terminal -- which is every CI run,
+                // where it is a pipe -- so a process that is killed (a test timing out) or
+                // that dies loses whatever it had buffered. The messages that matter most
+                // are exactly the ones emitted while something is going wrong, so a
+                // diagnostic that only survives a clean exit is not a diagnostic. Logging
+                // is rare and already string-formatting per call, so the flush costs
+                // nothing that matters.
                 auto &stream = (level == log_level::error) ? std::cerr : std::cout;
-                stream << "[provizio_dds] " << message << '\n';
+                stream << "[provizio_dds] " << message << '\n' << std::flush;
             }
             catch (...)  // NOLINT(bugprone-empty-catch): see comment above.
             {
