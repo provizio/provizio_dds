@@ -26,35 +26,27 @@ target_link_libraries(network_recovery_test PUBLIC provizio_dds provizio_dds_typ
 if(WIN32)
     set(_NR_TIMEOUT_FAST 30)
     set(_NR_TIMEOUT_DDS 60)
-    set(_NR_ENV_BASE "PATH=${PROVIZIO_DDS_TEST_PATH}")
 else()
     set(_NR_TIMEOUT_FAST 10)
     set(_NR_TIMEOUT_DDS 45)
-    set(_NR_ENV_BASE "")
 endif()
 
-# Helper: register a subcommand as a ctest entry with an optional extra
-# environment variable. Concatenating to PATH is needed on Windows.
+# Helper: register a subcommand as a ctest entry with an optional extra environment
+# variable. A thin adapter over provizio_dds_add_subcommand_test (test/CMakeLists.txt),
+# which owns the registration boilerplate — the Windows DLL PATH above all — that this
+# suite and test/vpn_interfaces would otherwise each carry a copy of. Kept as a local name
+# because 29 call sites read better for it.
 function(_nr_add_test name)
     set(options)
     set(one_value_args TIMEOUT ENV)
     set(multi_value_args ARGS)
     cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
 
-    add_test(NAME ${name} COMMAND network_recovery_test ${ARG_ARGS})
-    set(_env "${_NR_ENV_BASE}")
-    if(ARG_ENV)
-        if(_env)
-            list(APPEND _env "${ARG_ENV}")
-        else()
-            set(_env "${ARG_ENV}")
-        endif()
-    endif()
-    if(_env)
-        set_tests_properties(${name} PROPERTIES TIMEOUT ${ARG_TIMEOUT} ENVIRONMENT "${_env}")
-    else()
-        set_tests_properties(${name} PROPERTIES TIMEOUT ${ARG_TIMEOUT})
-    endif()
+    provizio_dds_add_subcommand_test(${name}
+        TARGET network_recovery_test
+        ARGS ${ARG_ARGS}
+        TIMEOUT ${ARG_TIMEOUT}
+        ENV ${ARG_ENV})
 endfunction()
 
 _nr_add_test(network_recovery_logging        ARGS logging          TIMEOUT ${_NR_TIMEOUT_FAST})
@@ -94,6 +86,23 @@ _nr_add_test(network_recovery_coalescer_skips_no_change
 # rebuild — the coalescer compares the burst-start snapshot too.
 _nr_add_test(network_recovery_coalescer_resets_on_transient_flap
     ARGS coalescer_resets_on_transient_flap TIMEOUT ${_NR_TIMEOUT_DDS})
+_nr_add_test(network_recovery_no_rebuild_on_address_loss
+    ARGS no_rebuild_on_address_loss TIMEOUT ${_NR_TIMEOUT_DDS})
+_nr_add_test(network_recovery_unreadable_interfaces_are_not_a_change
+    ARGS unreadable_interfaces_are_not_a_change TIMEOUT ${_NR_TIMEOUT_DDS})
+_nr_add_test(network_recovery_unreadable_interfaces_warn_once_per_streak
+    ARGS unreadable_interfaces_warn_once_per_streak TIMEOUT ${_NR_TIMEOUT_DDS})
+_nr_add_test(network_recovery_no_baseline_rebuilds_for_first_readable_list
+    ARGS no_baseline_rebuilds_for_first_readable_list TIMEOUT ${_NR_TIMEOUT_DDS})
+_nr_add_test(network_recovery_no_baseline_empty_list_is_not_a_rebuild
+    ARGS no_baseline_empty_list_is_not_a_rebuild TIMEOUT ${_NR_TIMEOUT_DDS})
+_nr_add_test(network_recovery_rebuild_on_address_change
+    ARGS rebuild_on_address_change TIMEOUT ${_NR_TIMEOUT_DDS})
+# A log callback is documented as free to create a participant. This pins the one
+# diagnostic that used to be emitted while registry_mutex was held, where doing so
+# deadlocked; a regression hangs, so the TIMEOUT is what reports it.
+_nr_add_test(network_recovery_log_callback_may_create_participant
+    ARGS log_callback_may_create_participant TIMEOUT ${_NR_TIMEOUT_DDS})
 _nr_add_test(network_recovery_wait_for_idle_blocks_during_reset
     ARGS wait_for_idle_blocks_during_reset TIMEOUT ${_NR_TIMEOUT_DDS})
 _nr_add_test(network_recovery_reentrant_listener_during_reset
@@ -115,7 +124,7 @@ _nr_add_test(network_recovery_extra_interfaces_env ARGS extra_interfaces_env TIM
 # Safety-net tick: the backstop for everything the kernel event channel cannot
 # report. Each of these used to be a permanent, process-lifetime outage.
 #
-# The three tick tests below set SAFETY_NET_SEC=0 to stop the COALESCER running its own
+# The four tick tests below set SAFETY_NET_SEC=0 to stop the COALESCER running its own
 # tick concurrently: they drive run_safety_net_tick_for_test() from the test thread,
 # which is only safe while the coordinator is idle, and two threads mutating
 # last_known_snapshot would be a data race (and could move reset_count by two).
@@ -131,6 +140,11 @@ _nr_add_test(network_recovery_safety_net_reopens_dead_monitor
     ARGS safety_net_reopens_dead_monitor TIMEOUT ${_NR_TIMEOUT_DDS} ENV "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
 _nr_add_test(network_recovery_safety_net_retries_failed_rebuild
     ARGS safety_net_retries_failed_rebuild TIMEOUT ${_NR_TIMEOUT_DDS} ENV "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
+# The tick decides what a change means exactly as the event path does — including not
+# rebuilding for an address loss alone, which it used to ignore.
+_nr_add_test(network_recovery_safety_net_no_rebuild_on_address_loss
+    ARGS safety_net_no_rebuild_on_address_loss TIMEOUT ${_NR_TIMEOUT_DDS}
+    ENV "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
 
 # End-to-end against a REAL kernel interface transition inside a throw-away network
 # namespace: a link coming up with its address already assigned (emitting only

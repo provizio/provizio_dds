@@ -27,6 +27,7 @@ import random
 import sys
 import threading
 import traceback
+from typing import Iterator, Tuple
 
 import provizio_dds
 from provizio_dds import network_recovery as _network_recovery
@@ -356,6 +357,477 @@ def test_blocklist_read_failure_keeps_exclusion() -> int:
         _network_recovery.blocklist_read_failed = original_failed
 
     print(f"blocklist_read_failure_keeps_exclusion: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_blocklist_read_failure_reports_to_change_detection() -> int:
+    """An unreadable interface list must tell change detection that this participant's
+    transports may be binding a tunnel after all.
+
+    Its own case rather than an assertion inside
+    :func:`test_blocklist_read_failure_keeps_exclusion`, because
+    ``report_vpn_exclusion_not_applied`` is process-wide and one-way: no case may run
+    under a flag another one set.
+
+    The first creation is what this guards. There is no profile to reuse yet, so the
+    participant takes the default transports and DDS binds and announces every tunnel the
+    host has -- while a snapshot filter that went on dropping tunnels would stop watching
+    one the transports do bind, leaving a re-auth or a reconnect with a dead locator that
+    no rebuild replaces. That disagreement is the one outcome the two filters may never
+    produce."""
+    passed = True
+    original_entries = _network_recovery.vpn_interface_blocklist_entries
+    original_failed = _network_recovery.blocklist_read_failed
+    try:
+        # Read before anything is created, so what is asserted afterwards is about THIS
+        # participant rather than about whatever the process had already recorded.
+        if not _network_recovery.vpn_exclusion_applies_to_transports():
+            return _fail("the exclusion was already reported as not applying") or 1
+
+        _network_recovery.vpn_interface_blocklist_entries = lambda: frozenset()
+        _network_recovery.blocklist_read_failed = lambda: True
+
+        # Captured rather than read off the participant: the queue is stashed under the
+        # lifecycle lock and flushed the moment that lock is released, so by the time
+        # make_domain_participant returns there is nothing left on it to inspect.
+        captured = []
+        previous_callback = provizio_dds.set_log_callback(
+            lambda level, message: captured.append(message)
+        )
+        try:
+            participant = provizio_dds.make_domain_participant(DOMAIN)
+        finally:
+            provizio_dds.set_log_callback(previous_callback)
+
+        if participant._last_vpn_profile_name is not None:
+            passed = _fail("a failed read applied a transport profile")
+        if _network_recovery.vpn_exclusion_applies_to_transports():
+            passed = _fail("a failed read left change detection dropping tunnels")
+
+        # And it is not silent: an operator paying for duplicated traffic over a metered
+        # tunnel has this line to explain why the exclusion did not apply.
+        if not any("could not read this host's network interfaces" in m for m in captured):
+            passed = _fail(f"a failed read was not reported: {captured!r}")
+    finally:
+        _network_recovery.vpn_interface_blocklist_entries = original_entries
+        _network_recovery.blocklist_read_failed = original_failed
+
+    print(f"blocklist_read_failure_reports_to_change_detection: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_allowed_read_failure_keeps_exclusion() -> int:
+    """An unreadable "what is left" list must not cost a participant the exclusion it
+    already has, and must not produce a blocklist without an allowlist.
+
+    The failed read and "nothing left" are the same empty list, and writing a blocklist
+    without an allowlist is the one outcome the C++ refresh_vpn_interface_blocklist says
+    the whole section may not produce: whitelist mode with none of the per-interface
+    netmask filters sends a copy of every unicast datagram out of each remaining
+    interface, moving the duplication this feature removes from the tunnel onto the
+    LAN. So a failed read reuses the profile last applied, exactly as a failed blocklist
+    read does."""
+    passed = True
+    original_entries = _network_recovery.vpn_interface_blocklist_entries
+    original_allowed = _network_recovery.allowed_interfaces
+    original_failed = _network_recovery.allowed_interfaces_read_failed
+    try:
+        _network_recovery.vpn_interface_blocklist_entries = lambda: frozenset(
+            {SYNTHETIC_BLOCKED_ADDRESS}
+        )
+        participant = provizio_dds.make_domain_participant(DOMAIN)
+        applied = participant._last_vpn_profile_name
+        if applied is None:
+            return _fail("no transport profile was applied to begin with") or 1
+
+        factory = provizio_dds.DomainParticipantFactory.get_instance()
+
+        # The "what is left" read fails: the same profile must come back.
+        _network_recovery.allowed_interfaces = lambda blocked: []
+        _network_recovery.allowed_interfaces_read_failed = lambda: True
+        after_failure = participant._resolve_transports(
+            factory, provizio_dds.TransportMode.AUTOMATIC
+        )
+        if after_failure != applied:
+            passed = _fail(
+                f"a failed read of the remaining interfaces changed the exclusion "
+                f"({after_failure!r} != {applied!r})"
+            )
+
+        # And the contrast: a SUCCESSFUL read that finds interfaces builds a profile.
+        _network_recovery.allowed_interfaces = lambda blocked: [
+            ("127.0.0.1", True),
+            ("192.0.2.10", False),
+        ]
+        _network_recovery.allowed_interfaces_read_failed = lambda: False
+        after_success = participant._resolve_transports(
+            factory, provizio_dds.TransportMode.AUTOMATIC
+        )
+        if after_success is None:
+            passed = _fail("a successful read applied no profile")
+    finally:
+        _network_recovery.vpn_interface_blocklist_entries = original_entries
+        _network_recovery.allowed_interfaces = original_allowed
+        _network_recovery.allowed_interfaces_read_failed = original_failed
+
+    print(f"allowed_read_failure_keeps_exclusion: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_allowed_read_failure_reports_to_change_detection() -> int:
+    """An unreadable "what is left" list must tell change detection that this
+    participant's transports may be binding a tunnel, and say so once.
+
+    Its own case, like the blocklist counterpart, because
+    ``report_vpn_exclusion_not_applied`` is process-wide and one-way."""
+    passed = True
+    original_entries = _network_recovery.vpn_interface_blocklist_entries
+    original_allowed = _network_recovery.allowed_interfaces
+    original_failed = _network_recovery.allowed_interfaces_read_failed
+    try:
+        if not _network_recovery.vpn_exclusion_applies_to_transports():
+            return _fail("the exclusion was already reported as not applying") or 1
+
+        _network_recovery.vpn_interface_blocklist_entries = lambda: frozenset(
+            {SYNTHETIC_BLOCKED_ADDRESS}
+        )
+        _network_recovery.allowed_interfaces = lambda blocked: []
+        _network_recovery.allowed_interfaces_read_failed = lambda: True
+
+        captured = []
+        previous_callback = provizio_dds.set_log_callback(
+            lambda level, message: captured.append(message)
+        )
+        try:
+            participant = provizio_dds.make_domain_participant(DOMAIN)
+        finally:
+            provizio_dds.set_log_callback(previous_callback)
+
+        if participant._last_vpn_profile_name is not None:
+            passed = _fail("a failed read of the remaining interfaces applied a profile")
+        if _network_recovery.vpn_exclusion_applies_to_transports():
+            passed = _fail("a failed read left change detection dropping tunnels")
+        if not any("could not read which interfaces would be left" in m for m in captured):
+            passed = _fail(f"a failed read was not reported: {captured!r}")
+    finally:
+        _network_recovery.vpn_interface_blocklist_entries = original_entries
+        _network_recovery.allowed_interfaces = original_allowed
+        _network_recovery.allowed_interfaces_read_failed = original_failed
+
+    print(
+        f"allowed_read_failure_reports_to_change_detection: {'PASS' if passed else 'FAIL'}"
+    )
+    return 0 if passed else 1
+
+
+def test_profile_forgotten_when_tunnel_gone() -> int:
+    """A successful reading of "no tunnel" must forget the profile last applied, so a
+    later failed read cannot reinstate an allowlist of addresses from an older host
+    state.
+
+    Reusing the last profile while a read is failing is the intent; what the field must
+    not do is outlive the tunnel it was built for."""
+    passed = True
+    original_entries = _network_recovery.vpn_interface_blocklist_entries
+    original_failed = _network_recovery.blocklist_read_failed
+    try:
+        _network_recovery.vpn_interface_blocklist_entries = lambda: frozenset(
+            {SYNTHETIC_BLOCKED_ADDRESS}
+        )
+        participant = provizio_dds.make_domain_participant(DOMAIN)
+        if participant._last_vpn_profile_name is None:
+            return _fail("no transport profile was applied to begin with") or 1
+
+        factory = provizio_dds.DomainParticipantFactory.get_instance()
+
+        # The tunnel is gone, and the host was read successfully.
+        _network_recovery.vpn_interface_blocklist_entries = lambda: frozenset()
+        resolved = participant._resolve_transports(factory, provizio_dds.TransportMode.AUTOMATIC)
+        if resolved is not None:
+            passed = _fail(f"a successful empty read kept the exclusion ({resolved!r})")
+        if participant._last_vpn_profile_name is not None:
+            passed = _fail(
+                f"the profile built for the gone tunnel survived a successful reading of "
+                f"no tunnel ({participant._last_vpn_profile_name!r})"
+            )
+
+        # Now a read fails: with the stale name forgotten, nothing is reinstated.
+        _network_recovery.blocklist_read_failed = lambda: True
+        after_failure = participant._resolve_transports(
+            factory, provizio_dds.TransportMode.AUTOMATIC
+        )
+        if after_failure is not None:
+            passed = _fail(f"a failed read reinstated a stale profile ({after_failure!r})")
+    finally:
+        _network_recovery.vpn_interface_blocklist_entries = original_entries
+        _network_recovery.blocklist_read_failed = original_failed
+
+    print(f"profile_forgotten_when_tunnel_gone: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_read_failure_flags_are_per_thread() -> int:
+    """A failed read on one thread must not be visible to, or clearable by, another.
+
+    Two participants created concurrently each read the host for themselves. With one
+    process-wide flag, thread B's successful read landing between thread A's failed read
+    and A's check would make A conclude the host has no tunnel -- and skip telling change
+    detection that its transports may bind one. The flags therefore live per thread, as
+    the C++ side's out-parameters do by construction."""
+    passed = True
+    original_posix = _network_recovery._vpn_blocklist_entries_posix
+    original_windows = _network_recovery._vpn_blocklist_entries_windows
+
+    def failing_read() -> "frozenset":
+        raise OSError("synthetic: the host could not be read")
+
+    seen_in_worker = {}
+
+    def worker() -> None:
+        _network_recovery.vpn_interface_blocklist_entries()
+        seen_in_worker["failed"] = _network_recovery.blocklist_read_failed()
+
+    try:
+        _network_recovery._vpn_blocklist_entries_posix = failing_read
+        _network_recovery._vpn_blocklist_entries_windows = failing_read
+        thread = threading.Thread(target=worker, name="failing-reader")
+        thread.start()
+        thread.join()
+        if seen_in_worker.get("failed") is not True:
+            passed = _fail("the thread whose read failed did not see its own failure")
+        if _network_recovery.blocklist_read_failed():
+            passed = _fail("another thread's failed read is visible on this thread")
+        if _network_recovery.allowed_interfaces_read_failed():
+            passed = _fail(
+                "the allowed-interfaces flag reads as failed on a thread that never read"
+            )
+    finally:
+        _network_recovery._vpn_blocklist_entries_posix = original_posix
+        _network_recovery._vpn_blocklist_entries_windows = original_windows
+
+    print(f"read_failure_flags_are_per_thread: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_allowed_interfaces_include_loopback_on_windows() -> int:
+    """On Windows the allowlist must contain the loopback adapter, as it does on POSIX.
+
+    Windows is the one platform where this library never selects shared memory, so the
+    loopback sender socket is the same-host path there: an allowlist without it would
+    leave whitelist mode with no loopback socket at all, and it would also make an empty
+    allowlist reachable in normal operation (a host whose only non-loopback interface
+    is the tunnel). Host-independent: the Windows adapter walk is substituted, and the
+    platform check is pointed at win32 for the duration."""
+    passed = True
+    original_walk = _network_recovery._iter_windows_adapter_addresses
+    # sys.platform is process-wide; each case is its own process, and it is restored below.
+    original_platform = sys.platform
+    requested = {}
+
+    def fake_walk(
+        include_loopback: bool = False,
+        as_ipfinder: bool = False,
+    ) -> "Iterator[Tuple[str, str, str, int, str, int]]":
+        requested["include_loopback"] = include_loopback
+        requested["as_ipfinder"] = as_ipfinder
+        if include_loopback:
+            yield ("{loopback}", "Loopback Pseudo-Interface 1", "", 24, "127.0.0.1", 8)
+        yield ("{ethernet}", "Ethernet", "Intel(R) Ethernet", 6, "192.0.2.10", 24)
+        yield ("{tunnel}", "Tailscale", "Tailscale Tunnel", 131, SYNTHETIC_BLOCKED_ADDRESS, 32)
+
+    try:
+        _network_recovery._iter_windows_adapter_addresses = fake_walk
+        sys.platform = "win32"
+        allowed = _network_recovery.allowed_interfaces({SYNTHETIC_BLOCKED_ADDRESS})
+    finally:
+        sys.platform = original_platform
+        _network_recovery._iter_windows_adapter_addresses = original_walk
+
+    if requested.get("include_loopback") is not True:
+        passed = _fail(f"the Windows walk was not asked for loopback: {requested!r}")
+    # The allowlist has to reproduce what Fast-DDS' own IPFinder::getIPs enumerates, or the
+    # allowlist it writes and the interface list Fast-DDS intersects it with disagree: IPFinder
+    # applies no DAD filter and skips IP_ADAPTER_NO_MULTICAST adapters, neither of which the
+    # snapshot walk does.
+    if requested.get("as_ipfinder") is not True:
+        passed = _fail(f"the Windows allowlist walk must use IPFinder's filters: {requested!r}")
+    if ("127.0.0.1", True) not in allowed:
+        passed = _fail(f"loopback is missing from the Windows allowlist: {allowed!r}")
+    if ("192.0.2.10", False) not in allowed or any(
+        address == SYNTHETIC_BLOCKED_ADDRESS for address, _ in allowed
+    ):
+        passed = _fail(f"unexpected Windows allowlist: {allowed!r}")
+    if _network_recovery.allowed_interfaces_read_failed():
+        passed = _fail("a successful substituted walk reads as a failure")
+
+    print(f"allowed_interfaces_include_loopback_on_windows: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_exclusion_report_names_netmask_filtering() -> int:
+    """The exclusion report says when netmask filtering came with it, in the C++ words.
+
+    With more than one real interface left, the allowlist carries an ON filter on each of
+    them and a peer outside every local subnet stops receiving unicast -- a peer that quietly
+    becomes unreachable is otherwise indistinguishable from one that went away, so the line
+    that announces the exclusion is the place to say so. With a single real interface
+    nothing is filtered and the clause must be absent."""
+    passed = True
+    clause = "More than one interface is left, so netmask filtering is on"
+    original_entries = _network_recovery.vpn_interface_blocklist_entries
+    original_allowed = _network_recovery.allowed_interfaces
+    try:
+        _network_recovery.vpn_interface_blocklist_entries = lambda: frozenset(
+            {SYNTHETIC_BLOCKED_ADDRESS}
+        )
+
+        def create_and_capture() -> "list":
+            captured = []
+            previous_callback = provizio_dds.set_log_callback(
+                lambda level, message: captured.append(message)
+            )
+            try:
+                held = provizio_dds.make_domain_participant(DOMAIN)
+            finally:
+                provizio_dds.set_log_callback(previous_callback)
+            del held
+            return captured
+
+        _network_recovery.allowed_interfaces = lambda blocked: [
+            ("127.0.0.1", True),
+            ("192.0.2.10", False),
+            ("198.51.100.10", False),
+        ]
+        two_real = [m for m in create_and_capture() if "excluding VPN / tunnel" in m]
+        if not two_real or clause not in two_real[0]:
+            passed = _fail(
+                f"two real interfaces left, but the report omits the filter: {two_real!r}"
+            )
+
+        _network_recovery.allowed_interfaces = lambda blocked: [
+            ("127.0.0.1", True),
+            ("192.0.2.10", False),
+        ]
+        one_real = [m for m in create_and_capture() if "excluding VPN / tunnel" in m]
+        if not one_real or clause in one_real[0]:
+            passed = _fail(f"one real interface left, but the report claims a filter: {one_real!r}")
+    finally:
+        _network_recovery.vpn_interface_blocklist_entries = original_entries
+        _network_recovery.allowed_interfaces = original_allowed
+
+    print(f"exclusion_report_names_netmask_filtering: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_caller_takeover_forgets_profile() -> int:
+    """Once the caller owns the transports, a later failed read must not reinstate a profile
+    of ours over them.
+
+    The failed-read return happens before ownership is determined and hands back the last
+    applied profile name, so that name has to be forgotten on the pass that first finds
+    the transports to be the caller's -- otherwise a rebuild whose read fails would copy
+    our descriptors over theirs. Ownership is taken here the way the library reads it
+    straight out of the QoS (_caller_configured_transports): transports of the caller's
+    own on the factory's default participant QoS."""
+    passed = True
+    original_entries = _network_recovery.vpn_interface_blocklist_entries
+    original_failed = _network_recovery.blocklist_read_failed
+    factory = provizio_dds.DomainParticipantFactory.get_instance()
+    original_qos = provizio_dds.DomainParticipantQos()
+    if factory.get_default_participant_qos(original_qos) != provizio_dds.RETCODE_OK:
+        return _fail("the factory's default participant QoS could not be read") or 1
+    try:
+        _network_recovery.vpn_interface_blocklist_entries = lambda: frozenset(
+            {SYNTHETIC_BLOCKED_ADDRESS}
+        )
+        participant = provizio_dds.make_domain_participant(DOMAIN)
+        if participant._last_vpn_profile_name is None:
+            return _fail("no transport profile was applied to begin with") or 1
+
+        # The caller takes over. Turning the builtin transports off is the smallest change
+        # that makes the default QoS carry a transport selection of theirs; a descriptor
+        # of their own reads the same to the library.
+        caller_qos = provizio_dds.DomainParticipantQos()
+        factory.get_default_participant_qos(caller_qos)
+        caller_qos.transport().use_builtin_transports = False
+        if factory.set_default_participant_qos(caller_qos) != provizio_dds.RETCODE_OK:
+            return _fail("the factory's default participant QoS could not be set") or 1
+        resolved = participant._resolve_transports(factory, provizio_dds.TransportMode.AUTOMATIC)
+        if resolved is not None:
+            passed = _fail(f"a caller-owned pass still returned a profile ({resolved!r})")
+        if participant._last_vpn_profile_name is not None:
+            passed = _fail(
+                f"the caller-owned pass left our profile name standing "
+                f"({participant._last_vpn_profile_name!r})"
+            )
+
+        # And the failure this guards against: a read that fails must not bring it back.
+        _network_recovery.blocklist_read_failed = lambda: True
+        after_failure = participant._resolve_transports(
+            factory, provizio_dds.TransportMode.AUTOMATIC
+        )
+        if after_failure is not None:
+            passed = _fail(
+                f"a failed read reinstated our profile over the caller's ({after_failure!r})"
+            )
+    finally:
+        _network_recovery.vpn_interface_blocklist_entries = original_entries
+        _network_recovery.blocklist_read_failed = original_failed
+        factory.set_default_participant_qos(original_qos)
+
+    print(f"caller_takeover_forgets_profile: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_interface_kind_lookup_failure_reported() -> int:
+    """A classification that ran without the platform's interface-kind information
+    reports itself, once, rather than silently degrading to name-prefix matching.
+
+    What it guards: on Linux the rtnetlink IFLA_INFO_KIND is what identifies a tunnel
+    renamed away from the conventional prefixes (a WireGuard device called office0). When
+    the dump cannot be issued or does not complete, the classifier falls back to names,
+    that device is taken for ordinary hardware, and DDS binds and announces it -- the
+    duplication this feature exists to remove, reinstated with nothing anywhere saying
+    so."""
+    passed = True
+    # Nothing has failed yet, so nothing is reported. Asserted first because the take is
+    # destructive: without it a report from this process' own start-up enumeration would
+    # make the assertions below pass for the wrong reason.
+    if _network_recovery.take_interface_kind_lookup_failure_report():
+        passed = _fail("a report was made before any lookup failed")
+
+    _network_recovery.report_interface_kind_lookup_failed()
+    if not _network_recovery.take_interface_kind_lookup_failure_report():
+        passed = _fail("a failed lookup was not reported")
+    # Taken once: the caller does not latch for itself, and a process that keeps
+    # re-enumerating a host whose lookup keeps failing must still say it once.
+    if _network_recovery.take_interface_kind_lookup_failure_report():
+        passed = _fail("the report was made twice")
+
+    # And the participant turns it into a line an operator can act on. Re-armed here
+    # rather than reusing the take above, which consumed it. Captured through the log
+    # callback rather than read off the participant: the queue is stashed under the
+    # lifecycle lock and flushed the moment that lock is released, so by the time
+    # make_domain_participant returns there is nothing left on it to inspect.
+    _network_recovery.report_interface_kind_lookup_failed()
+    captured = []
+    previous_callback = provizio_dds.set_log_callback(
+        lambda level, message: captured.append(message)
+    )
+    try:
+        provizio_dds.make_domain_participant(DOMAIN)
+    finally:
+        provizio_dds.set_log_callback(previous_callback)
+
+    reported = [m for m in captured if "could not read this host's interface kinds" in m]
+    if not reported:
+        passed = _fail(f"the kind-lookup failure was not reported: {captured!r}")
+    # Actionable: the line has to name the way out, or an operator who wants DDS over that
+    # tunnel is told there is a problem and not what to do about it.
+    elif ALLOW_ENV_NAME not in reported[0]:
+        passed = _fail("the report does not say how to re-admit the interface")
+
+    print(f"interface_kind_lookup_failure_reported: {'PASS' if passed else 'FAIL'}")
     return 0 if passed else 1
 
 
@@ -793,6 +1265,93 @@ def test_override_all_matched_is_quiet() -> int:
     return 0 if passed else 1
 
 
+def test_interface_cache_collapses_both_reads() -> int:
+    """One cache scope reads the host once per enumeration, and releases both readings on
+    the way out.
+
+    The scope exists so that every participant a network event rebuilds is configured from
+    ONE view of the host. Covering the allowed-interfaces half as well as the blocklist half
+    is the whole point: the two are applied to the same transports together -- what is left
+    over decides the per-interface netmask filter that keeps a blocklist from becoming a
+    sender socket per interface -- so a pass reading them from two views of a host that
+    moved mid-pass would configure one event's participants inconsistently."""
+    walks = {"count": 0}
+    on_windows = sys.platform == "win32"
+    real_walk = (
+        _network_recovery._iter_windows_adapter_addresses
+        if on_windows
+        else _network_recovery._iter_posix_interface_addresses
+    )
+
+    def counting(*args, **kwargs):
+        walks["count"] += 1
+        return real_walk(*args, **kwargs)
+
+    if on_windows:
+        _network_recovery._iter_windows_adapter_addresses = counting
+    else:
+        _network_recovery._iter_posix_interface_addresses = counting
+
+    passed = True
+    try:
+        with _network_recovery.scoped_vpn_interface_cache():
+            _network_recovery.prime_vpn_interface_cache()
+            for _ in range(3):
+                _network_recovery.vpn_interface_blocklist_entries()
+                _network_recovery.allowed_interfaces(())
+            # Two host reads in total -- the tunnels, and what the transports are left
+            # binding -- however many participants ask for them.
+            if walks["count"] != 2:
+                passed = _fail(f"expected 2 host reads inside one scope, got {walks['count']}")
+
+        # Released with the scope: a tunnel can come and go between two network events, so
+        # the next pass has to read the host again rather than reuse this one's answer.
+        walks["count"] = 0
+        _network_recovery.vpn_interface_blocklist_entries()
+        _network_recovery.allowed_interfaces(())
+        if walks["count"] != 2:
+            passed = _fail(
+                f"expected both readings released with their scope, "
+                f"got {walks['count']} read(s)"
+            )
+    finally:
+        if on_windows:
+            _network_recovery._iter_windows_adapter_addresses = real_walk
+        else:
+            _network_recovery._iter_posix_interface_addresses = real_walk
+
+    print(f"interface_cache_collapses_both_reads: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_override_matches_every_windows_identity() -> int:
+    """An override naming one adapter by two of the identities Windows reports for it has
+    BOTH recorded as matched, not only the first the classifier happens to consult.
+
+    Windows gives an adapter three identities -- the GUID-ish device name, the friendly
+    name and the driver's description -- and the override may carry any of them. Combining
+    the three exclusion answers with `and` short-circuits on the first identity re-admitted,
+    so the second name for the same adapter is never recorded and
+    take_unmatched_vpn_allow_override_names reports a working setting as a typo."""
+    guid = "{d1e2f3a4-0000-0000-0000-000000000000}"
+    os.environ[ALLOW_ENV_NAME] = f"tailscale,{guid}"
+
+    passed = True
+    if _network_recovery._excluded_as_vpn_adapter_win(
+        guid, "Tailscale", "Tailscale Tunnel", _network_recovery._IF_TYPE_TUNNEL
+    ):
+        passed = _fail("the override did not re-admit the adapter it names")
+
+    unmatched = _network_recovery.take_unmatched_vpn_allow_override_names()
+    if unmatched:
+        passed = _fail(
+            f"names of an adapter the override re-admitted reported as unmatched: {unmatched}"
+        )
+
+    print(f"override_matches_every_windows_identity: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
 def test_unmatched_name_survives_a_failed_profile_readback() -> int:
     """A failed transport-profile read-back must drop only the claim it invalidates.
 
@@ -1131,11 +1690,26 @@ _TESTS = {
     "leaves_caller_profile_alone": test_leaves_caller_profile_alone,
     "participant_communicates": test_participant_communicates_with_blocked_interface,
     "blocklist_read_failure_keeps_exclusion": test_blocklist_read_failure_keeps_exclusion,
+    "blocklist_read_failure_reports_to_change_detection": test_blocklist_read_failure_reports_to_change_detection,
+    "interface_kind_lookup_failure_reported": test_interface_kind_lookup_failure_reported,
+    "allowed_read_failure_keeps_exclusion": test_allowed_read_failure_keeps_exclusion,
+    "allowed_read_failure_reports_to_change_detection": (
+        test_allowed_read_failure_reports_to_change_detection
+    ),
+    "profile_forgotten_when_tunnel_gone": test_profile_forgotten_when_tunnel_gone,
+    "read_failure_flags_are_per_thread": test_read_failure_flags_are_per_thread,
+    "allowed_interfaces_include_loopback_on_windows": (
+        test_allowed_interfaces_include_loopback_on_windows
+    ),
+    "exclusion_report_names_netmask_filtering": test_exclusion_report_names_netmask_filtering,
+    "caller_takeover_forgets_profile": test_caller_takeover_forgets_profile,
     "profile_cache_follows_the_interfaces": test_profile_cache_follows_the_interfaces,
     "override_all": test_override_all,
     "override_named": test_override_named,
     "override_unmatched_names_reported": test_override_unmatched_names_reported,
     "override_all_matched_is_quiet": test_override_all_matched_is_quiet,
+    "override_matches_every_windows_identity": test_override_matches_every_windows_identity,
+    "interface_cache_collapses_both_reads": test_interface_cache_collapses_both_reads,
     "unmatched_name_survives_a_failed_profile_readback": test_unmatched_name_survives_a_failed_profile_readback,
     "no_op_with_builtin_transports_env": test_no_op_with_builtin_transports_env,
     "caller_builtin_transports_matching_ours": test_caller_builtin_transports_matching_ours,

@@ -279,7 +279,8 @@ foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         netmask_read_is_bounded linked_list_walk_advances
         netlink_binds_before_snapshot safety_net_env
         snapshot_policy_excludes_tunnel snapshot_policy_follows_transports
-        netlink_kinds_match_the_kernel)
+        netlink_kinds_match_the_kernel listener_drain_reports_a_stall_until_it_ends
+        safety_net_retries_while_interfaces_are_unreadable)
     add_test(NAME python_network_recovery_${_nrt_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler
         ./python_network_recovery_test.py ${_nrt_case}
@@ -426,9 +427,18 @@ set(_PYTHON_VPN_INTERFACES_TEST_NAMES)
 foreach(_vpn_case classifier transports_profile profile_loaded_once profile_limit
         profile_route_honours_process_transports leaves_caller_profile_alone
         participant_communicates blocklist_read_failure_keeps_exclusion
+        blocklist_read_failure_reports_to_change_detection
+        interface_kind_lookup_failure_reported
+        allowed_read_failure_keeps_exclusion
+        allowed_read_failure_reports_to_change_detection
+        profile_forgotten_when_tunnel_gone read_failure_flags_are_per_thread
+        allowed_interfaces_include_loopback_on_windows
+        exclusion_report_names_netmask_filtering caller_takeover_forgets_profile
         profile_cache_follows_the_interfaces
         override_all override_named override_unmatched_names_reported
-        override_all_matched_is_quiet unmatched_name_survives_a_failed_profile_readback
+        override_all_matched_is_quiet override_matches_every_windows_identity
+        interface_cache_collapses_both_reads
+        unmatched_name_survives_a_failed_profile_readback
         no_op_with_builtin_transports_env
         caller_builtin_transports_matching_ours env_xml_profile_honoured_per_participant
         snapshot_excludes_vpn
