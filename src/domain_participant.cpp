@@ -15,6 +15,7 @@
 #include "provizio/dds/domain_participant.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -49,14 +50,17 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 #include <fastdds/dds/topic/qos/TopicQos.hpp>
 #include <fastdds/rtps/attributes/BuiltinTransports.hpp>
+#include <fastdds/rtps/attributes/RTPSParticipantAttributes.hpp>
 #include <fastdds/rtps/builtin/data/PublicationBuiltinTopicData.hpp>
 #include <fastdds/rtps/builtin/data/SubscriptionBuiltinTopicData.hpp>
+#include <fastdds/rtps/common/Locator.hpp>
 #include <fastdds/rtps/reader/ReaderDiscoveryStatus.hpp>
 #include <fastdds/rtps/transport/SocketTransportDescriptor.hpp>
 #include <fastdds/rtps/transport/network/AllowedNetworkInterface.hpp>
 #include <fastdds/rtps/transport/network/NetmaskFilterKind.hpp>
 #include <fastdds/rtps/transport/shared_mem/SharedMemTransportDescriptor.hpp>
 #include <fastdds/rtps/writer/WriterDiscoveryStatus.hpp>
+#include <fastdds/utils/IPLocator.hpp>
 
 namespace provizio::dds
 {
@@ -137,7 +141,7 @@ namespace provizio::dds
 
         double duration_to_seconds(const eprosima::fastdds::dds::Duration_t &duration)
         {
-            return static_cast<double>(duration.seconds) + static_cast<double>(duration.nanosec) / ns_per_second;
+            return static_cast<double>(duration.seconds) + (static_cast<double>(duration.nanosec) / ns_per_second);
         }
 
         std::uint32_t resolve_initial_announcement_count()
@@ -351,6 +355,119 @@ namespace provizio::dds
 #else
             true;
 #endif
+
+        // The one interface transport_mode::localhost_only permits its socket transports to
+        // use. An address rather than a device name ("lo") because that name is
+        // Linux-specific, while Fast-DDS matches an allowlist entry against either and every
+        // platform's loopback answers to this address.
+        constexpr const char *const loopback_ipv4_address = "127.0.0.1";
+
+        // How many participant indices the unicast loopback initial peer probes. A peer
+        // given without a port is expanded over [0, maxInitialPeersRange), and Fast-DDS's
+        // default of 4 stops finding peers as soon as a host runs a fifth participant on the
+        // domain. 50 is what test/fast_dds_localhost_profile.xml settled on for the same
+        // reason, and costs nothing but a handful of unicast probes at startup.
+        constexpr std::uint32_t localhost_initial_peers_range = 50;
+
+        // Whether a FASTDDS_BUILTIN_TRANSPORTS value -- or its absence -- selects a built-in
+        // transport set that includes shared memory. The leading token, before any option
+        // list, decides the set; an unset variable leaves Fast-DDS' own default, which is
+        // shared memory plus UDPv4. Answers the one question transport_mode::udp_only asks
+        // of a stack this library did not build.
+        bool builtin_transports_include_shared_memory(const char *const env_value)
+        {
+            if (env_value == nullptr)
+            {
+                return true;
+            }
+            const std::string value{env_value};
+            const std::string selection = value.substr(0, value.find('?'));
+            // Compared EXACTLY, case included, because that is how Fast-DDS compares it:
+            // set_builtin_transports_from_env_var puts the token through
+            // get_element_enum_value, which is a strcmp against "NONE" / "DEFAULT" /
+            // "DEFAULTv6" / "SHM" / "UDPv4" / "UDPv6" / "LARGE_DATA" / "LARGE_DATAv6" /
+            // "P2P". A value in the wrong case matches none of them -- and is NOT rejected:
+            // it logs "Wrong value '...' ... Leaving as DEFAULT" and builds SHM + UDPv4. So
+            // "udpv4" names a participant that HAS shared memory, and reading it as UDPv4
+            // here would silence the one warning that says transport=udp_only was not
+            // honoured, on the very input that fails to honour it.
+            //
+            // Every selection other than the three below carries shared memory: DEFAULT and
+            // DEFAULTv6 build it outright, SHM is nothing else, LARGE_DATA / LARGE_DATAv6 /
+            // P2P go through setup_large_data_shm_transport, and an unrecognised value lands
+            // on DEFAULT. NONE carries nothing at all, which is not shared memory either and
+            // so is not a contradiction of udp_only.
+            return selection != "UDPv4" && selection != "UDPv6" && selection != "NONE";
+        }
+
+        // The names a loopback device answers to, one per platform. A closed and short
+        // vocabulary, which is what lets a device name be judged at all below.
+        constexpr std::array<std::string_view, 3> loopback_device_names{"lo", "lo0", "loopback pseudo-interface 1"};
+
+        // Whether an interface-list entry is CERTAINLY not the loopback interface. Fast-DDS
+        // matches an entry against either an IP address or a device name, so both forms are
+        // judged here: an address by its range, a device name against the list above.
+        //
+        // Naming a device that is none of those is as certainly off-loopback as naming
+        // 192.168.1.5 is, and saying so is what keeps transport_mode::localhost_only from
+        // failing its containment promise in silence -- an allowlist of {"eth0"} announces on
+        // the LAN, and a caller who believes they are contained is worse off than one who is
+        // told they are not. What is left over is a loopback device under a name this cannot
+        // recognise (a Windows adapter GUID, say), which now earns a warning it does not
+        // deserve. That trade is deliberate: the wrong warning costs a log line, the wrong
+        // silence costs the promise.
+        bool certainly_outside_loopback(const std::string &entry)
+        {
+            if (entry.find(':') != std::string::npos)
+            {
+                return entry != "::1";  // An IPv6 literal, and only ::1 is loopback.
+            }
+            const bool is_ipv4_literal = !entry.empty() && entry.find_first_not_of("0123456789.") == std::string::npos;
+            if (is_ipv4_literal)
+            {
+                return entry.rfind("127.", 0) != 0;
+            }
+            const std::string lowered = detail::to_lower_ascii(entry);
+            return std::none_of(loopback_device_names.begin(), loopback_device_names.end(),
+                                [&lowered](const std::string_view name) { return lowered == name; });
+        }
+
+        // Whether a socket transport is CERTAINLY reachable beyond the loopback interface.
+        // No interface list at all is the certain case that matters in practice: Fast-DDS
+        // then binds every interface it finds.
+        //
+        // BOTH lists are read, because Fast-DDS honours both: UDPv4Transport's constructor
+        // fills interface_whitelist_ from the deprecated interfaceWhiteList as well as from
+        // interface_allowlist, warning only that the older spelling is going away. Reading
+        // the new one alone would tell a caller whose transports ARE confined to 127.0.0.1
+        // that they bind every interface -- and not hypothetically, since
+        // test/fast_dds_localhost_profile.xml in this repository is written the older way.
+        bool certainly_not_confined_to_loopback(const eprosima::fastdds::rtps::SocketTransportDescriptor &socket)
+        {
+            if (socket.interface_allowlist.empty() && socket.interfaceWhiteList.empty())
+            {
+                return true;
+            }
+            return std::any_of(socket.interface_allowlist.begin(), socket.interface_allowlist.end(),
+                               [](const eprosima::fastdds::rtps::AllowedNetworkInterface &allowed) {
+                                   return certainly_outside_loopback(allowed.name);
+                               }) ||
+                   std::any_of(socket.interfaceWhiteList.begin(), socket.interfaceWhiteList.end(),
+                               [](const std::string &allowed) { return certainly_outside_loopback(allowed); });
+        }
+
+        // Whether a participant with this recovery mode and this transport selection takes
+        // part in network auto-recovery. A loopback-confined participant never does,
+        // whatever the mode asks for: every locator it holds lives on an interface no
+        // network change can take away or re-address, so there is nothing for the interface
+        // monitor to detect on its behalf — and a reset it did not need would still cost its
+        // peers a full rediscovery. Answered in one place because two callers must agree:
+        // the constructor's recovery_enabled, and make_domain_participant's registration
+        // with the coordinator that does the watching.
+        bool network_recovery_applies(const network_recovery_mode mode, const transport_mode transport)
+        {
+            return transport != transport_mode::localhost_only && resolve_network_recovery_enabled(mode);
+        }
 
         // The filesystem backing shared memory on Linux, the only platform where its free
         // space is worth probing (see shared_memory_space).
@@ -703,8 +820,8 @@ namespace provizio::dds
     domain_participant::domain_participant(const DomainId_t the_domain_id, const network_recovery_mode mode,
                                            on_discovered_endpoint_callback initial_discovery_callback,
                                            const endpoint_kind initial_discovery_kinds, const transport_mode transport)
-        : domain_id(the_domain_id), recovery_enabled(resolve_network_recovery_enabled(mode)),
-          registered_topics_mutex(std::make_shared<std::mutex>())
+        : domain_id(the_domain_id), recovery_enabled(network_recovery_applies(mode, transport)),
+          configured_transport_mode(transport), registered_topics_mutex(std::make_shared<std::mutex>())
     {
         // Install the discovery listener EAGERLY, BEFORE create_fastdds_participant,
         // so Fast-DDS attaches it at participant-creation time and it sees every
@@ -769,15 +886,15 @@ namespace provizio::dds
                                                               std::to_string(resolve_max_message_size()));
 
             // Transport tuning (skipped entirely when FASTDDS_BUILTIN_TRANSPORTS hands
-            // control to the user). Two things happen here:
+            // control to the user). Three things happen here:
             //
             //   1. Enlarge the UDP socket send/recv buffers so a large sample (camera
             //      frame, point cloud) that fragments into many datagrams isn't dropped
             //      when the receive buffer overflows — the dominant lever for reliable
             //      large-data delivery. It's a ceiling, clamped by the OS to
-            //      net.core.rmem_max / wmem_max. Applied on every platform and in BOTH
-            //      transport modes, because the UDP path carries any cross-host peer
-            //      regardless of shared memory.
+            //      net.core.rmem_max / wmem_max. Applied on every platform and in EVERY
+            //      transport mode: a multi-MB sample fragments whichever interface carries
+            //      it, loopback as much as a NIC.
             //   2. Choose shared-memory vs UDP-only. SHM (zero-copy for same-host
             //      same-version peers) is on by default on Linux. It is force-disabled on
             //      Windows/macOS because Fast-DDS's bundled Boost.Interprocess leaks SHM
@@ -787,6 +904,10 @@ namespace provizio::dds
             //      is also disabled on any platform when transport_mode::udp_only is
             //      requested (e.g. a recorder bridging mismatched Fast-DDS major versions,
             //      where cross-major SHM negotiation degrades large-data throughput).
+            //      transport_mode::localhost_only keeps it, so shared memory carries the
+            //      samples wherever the platform allows it.
+            //   3. For transport_mode::localhost_only, confine the socket transports to the
+            //      loopback interface, which is what makes the domain same-host-only.
             if (!std::getenv("FASTDDS_BUILTIN_TRANSPORTS"))  // NOLINT: getenv required
             {
                 const bool use_shared_memory = platform_allows_shared_memory && (transport != transport_mode::udp_only);
@@ -820,6 +941,14 @@ namespace provizio::dds
                     {
                         for (const auto &descriptor : cached_qos.transport().user_transports)
                         {
+                            // Ours only, the same invariant the confine and blocklist loops
+                            // keep: a descriptor the caller configured is shared
+                            // process-wide through get_default_participant_qos, so resizing
+                            // its segment would silently overwrite a size they chose.
+                            if (own_transport_descriptors.count(descriptor) == 0)
+                            {
+                                continue;
+                            }
                             const auto shm =
                                 std::dynamic_pointer_cast<eprosima::fastdds::rtps::SharedMemTransportDescriptor>(
                                     descriptor);
@@ -829,6 +958,50 @@ namespace provizio::dds
                             }
                         }
                     }
+                }
+
+                if (transport == transport_mode::localhost_only)
+                {
+                    confine_own_socket_transports_to_loopback();
+
+                    // Discovery must not depend on loopback multicast. It works on Linux
+                    // (measured), but Fast-DDS compiles a different multicast path on
+                    // Windows -- where this library also disables shared memory, leaving
+                    // loopback UDP as the ONLY transport, so a participant that cannot
+                    // discover over it cannot communicate at all. A unicast initial peer on
+                    // 127.0.0.1 removes the dependency: SPDP is then sent directly, exactly
+                    // as test/fast_dds_localhost_profile.xml does for the same reason.
+                    //
+                    // A peer without a port is probed across participant indices
+                    // [0, maxInitialPeersRange), and Fast-DDS's default of 4 is too few for
+                    // a host running more than four participants on the domain -- the same
+                    // ceiling that profile raises, and to the same value.
+                    eprosima::fastdds::rtps::Locator_t loopback_peer;
+                    loopback_peer.kind = LOCATOR_KIND_UDPv4;
+                    eprosima::fastdds::rtps::IPLocator::setIPv4(loopback_peer, loopback_ipv4_address);
+                    cached_qos.wire_protocol().builtin.initialPeersList.push_back(loopback_peer);
+                    for (const auto &descriptor : cached_qos.transport().user_transports)
+                    {
+                        if (own_transport_descriptors.count(descriptor) != 0)
+                        {
+                            descriptor->maxInitialPeersRange = localhost_initial_peers_range;
+                        }
+                    }
+
+                    // And drop any participant that is not on this host, whatever reaches
+                    // us. Confining the transports stops this participant ANNOUNCING off-box
+                    // and stops its samples leaving, but it does not stop a remote SPDP
+                    // datagram arriving: on Linux a whitelisted UDPv4 transport also opens a
+                    // socket bound to the multicast group address itself, and the kernel does
+                    // not filter such a socket by the interface the group was joined on, so a
+                    // LAN announcement can still be parsed and held as a participant proxy
+                    // when any co-resident participant has joined that group on a real
+                    // interface. FILTER_DIFFERENT_HOST makes PDPSimple refuse those proxies
+                    // outright, which is what makes "no remote peer can join" true rather
+                    // than merely unreachable -- and it is the same mechanism ROS 2's
+                    // ROS_LOCALHOST_ONLY relies on.
+                    cached_qos.wire_protocol().builtin.discovery_config.ignoreParticipantFlags =
+                        eprosima::fastdds::rtps::ParticipantFilteringFlags::FILTER_DIFFERENT_HOST;
                 }
             }
         }
@@ -869,13 +1042,240 @@ namespace provizio::dds
             throw std::runtime_error{"domain_participant: Fast-DDS create_participant returned nullptr "
                                      "(check FASTDDS_DEFAULT_PROFILES_FILE / system limits / logs)"};
         }
+        warn_if_transport_mode_not_applied();
+
         // generation starts at 1 — anything compared against 0 means "never built
         // against any participant", which teardown_state treats as a no-op.
         generation.store(1, std::memory_order_release);
     }
 
+    void domain_participant::warn_if_transport_mode_not_applied() noexcept
+    {
+        // The last fallible statement of the constructor after the Fast-DDS participant exists.
+        // Were a bad_alloc from the strings it builds to escape, the constructor would throw
+        // with `participant` assigned but the object never completed: ~domain_participant would
+        // not run, the listener would never be detached, and Fast-DDS would keep a live
+        // participant pointing at a discovery listener destroyed by the unwinding. A
+        // diagnostic must never do that, so it is swallowed here exactly as
+        // flush_pending_vpn_blocklist_log swallows for the same reason.
+        try
+        {
+            warn_if_transport_mode_not_applied_unchecked();
+        }
+        catch (...)  // NOLINT(bugprone-empty-catch): a diagnostic, and there is nothing left to report with
+        {
+        }
+    }
+
+    void domain_participant::warn_if_transport_mode_not_applied_unchecked()
+    {
+        if (configured_transport_mode == transport_mode::automatic || participant == nullptr)
+        {
+            return;
+        }
+
+        // Read back from the participant, not assembled from what this library did or did
+        // not get to configure. Ownership answers the wrong question: the caller's own XML
+        // profile may well confine its transports to loopback, or leave shared memory out,
+        // and a participant that ends up exactly as the selection asked for is nothing to
+        // warn anybody about, whoever configured it. What the caller needs to hear about is
+        // the promise that was NOT kept, so that is what is tested -- once, here, against
+        // the configuration the participant actually holds.
+        const auto &effective = participant->get_qos().transport();
+        // Fast-DDS' own transports, built from FASTDDS_BUILTIN_TRANSPORTS or from its
+        // defaults. No descriptor exists for anybody to restrict when this is set.
+        const bool fastdds_built_its_own = effective.use_builtin_transports;
+
+        // Both set together, by whichever branch below finds a promise unkept: the finding
+        // is what was observed, the advice what to do about it. Empty finding, nothing to say.
+        std::string finding;
+        std::string advice;
+
+        if (configured_transport_mode == transport_mode::udp_only)
+        {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): startup-only probe, as everywhere else here
+            const auto *const builtin_transports_env = std::getenv("FASTDDS_BUILTIN_TRANSPORTS");
+            if (fastdds_built_its_own && builtin_transports_include_shared_memory(builtin_transports_env))
+            {
+                finding = "Fast-DDS built the transports itself and the set it chose includes shared memory";
+                advice = " Select a UDP-only set through FASTDDS_BUILTIN_TRANSPORTS, or leave the transports to "
+                         "this library, or drop transport=udp_only.";
+            }
+            else
+            {
+                for (const auto &descriptor : effective.user_transports)
+                {
+                    // Shared memory is the whole of what this mode excludes.
+                    // SharedMemTransportDescriptor derives from PortBasedTransportDescriptor
+                    // rather than SocketTransportDescriptor, so this cast is exactly the test.
+                    if (std::dynamic_pointer_cast<eprosima::fastdds::rtps::SharedMemTransportDescriptor>(descriptor))
+                    {
+                        finding = "a shared-memory transport from your own configuration is in the set";
+                        advice = " Remove it there, or drop transport=udp_only.";
+                        break;
+                    }
+                }
+            }
+
+            if (!finding.empty())
+            {
+                log_warning() << "transport=udp_only requested on domain " << domain_id
+                              << ", but this participant still uses shared memory: " << finding << "." << advice;
+            }
+            return;
+        }
+
+        if (fastdds_built_its_own)
+        {
+            finding = "Fast-DDS built the transports itself, from FASTDDS_BUILTIN_TRANSPORTS or from an XML profile "
+                      "of yours that keeps its built-in transports, and they bind every interface";
+            advice = " Confine them in your own configuration -- an interface_allowlist of 127.0.0.1 on each socket "
+                     "transport -- or drop transport=localhost_only.";
+        }
+        else
+        {
+            for (const auto &descriptor : effective.user_transports)
+            {
+                // Shared memory needs no allowlist: it cannot leave this host in the first
+                // place, which is why localhost_only keeps it.
+                const auto socket_descriptor =
+                    std::dynamic_pointer_cast<eprosima::fastdds::rtps::SocketTransportDescriptor>(descriptor);
+                if (!socket_descriptor || !certainly_not_confined_to_loopback(*socket_descriptor))
+                {
+                    continue;
+                }
+
+                if (own_transport_descriptors.count(descriptor) != 0)
+                {
+                    // One this library built and confine_own_socket_transports_to_loopback
+                    // was supposed to have restricted. Reachable only through a bug of ours
+                    // -- or through a future socket transport whose interfaces that function
+                    // does not know how to name -- and either way the caller is holding a
+                    // containment promise that is not being kept, so it is said plainly. No
+                    // advice to give with it: there is nothing for the caller to fix.
+                    finding = "a socket transport this library configured binds every interface, which is a "
+                              "provizio_dds bug -- please report it";
+                }
+                else
+                {
+                    finding = "a socket transport from your own configuration (an XML profile, or descriptors set "
+                              "through DomainParticipantFactory::set_default_participant_qos) binds every interface";
+                    advice = " Restrict it to 127.0.0.1 through its interface_allowlist, or drop "
+                             "transport=localhost_only.";
+                }
+                break;
+            }
+
+            if (finding.empty())
+            {
+                // The transports are confined; the DISCOVERY half of the promise is a
+                // separate question, and it is the half that goes missing quietly. The
+                // loopback initial peer and ParticipantFilteringFlags::FILTER_DIFFERENT_HOST
+                // are applied where this library builds the QoS -- but a participant created
+                // from an XML profile of yours is created with PARTICIPANT_QOS_DEFAULT, so
+                // Fast-DDS resolves the whole QoS from that profile and neither reaches it.
+                //
+                // That matters even with every transport confined: a whitelisted UDPv4
+                // transport still opens a socket bound to the multicast group address, and
+                // the kernel does not filter those by joining interface, so a LAN SPDP
+                // datagram can still be parsed and held as a participant proxy. Without the
+                // filtering flag the caller is told nothing while a remote peer joins the
+                // domain they believe is closed. Checked on what the participant HOLDS, not
+                // on who configured it, so an XML profile that sets the flag itself is
+                // silence rather than a lecture.
+                const auto &discovery = participant->get_qos().wire_protocol().builtin.discovery_config;
+                if ((static_cast<std::uint32_t>(discovery.ignoreParticipantFlags) &
+                     static_cast<std::uint32_t>(
+                         eprosima::fastdds::rtps::ParticipantFilteringFlags::FILTER_DIFFERENT_HOST)) == 0U)
+                {
+                    finding = "its transports are confined to loopback but participants on other hosts are not "
+                              "filtered at the discovery layer, so a remote announcement that reaches this host "
+                              "can still become a peer";
+                    advice = " Add ignoreParticipantFlags with FILTER_DIFFERENT_HOST to your own participant "
+                             "configuration, or drop transport=localhost_only.";
+                }
+            }
+        }
+
+        if (!finding.empty())
+        {
+            // Worth a line even though nothing here is broken for a caller who never asked
+            // for containment: transport_mode::localhost_only is a promise -- "nothing
+            // reaches the LAN, and no remote peer can join" -- and somebody who believes
+            // they hold it while the domain is on every interface is worse off than
+            // somebody who was told they do not.
+            log_warning() << "transport=localhost_only requested on domain " << domain_id
+                          << ", but this participant is NOT confined to this host: " << finding << "." << advice;
+        }
+    }
+
+    void domain_participant::confine_own_socket_transports_to_loopback()
+    {
+        for (const auto &descriptor : cached_qos.transport().user_transports)
+        {
+            // Ours only, for the same reason refresh_vpn_interface_blocklist checks: a
+            // descriptor the caller configured is shared process-wide through
+            // get_default_participant_qos and must be left exactly as they set it.
+            if (own_transport_descriptors.count(descriptor) == 0)
+            {
+                continue;
+            }
+
+            // Only the socket transports have interfaces to restrict. Shared memory has
+            // none — and SharedMemTransportDescriptor derives from
+            // PortBasedTransportDescriptor rather than SocketTransportDescriptor, so this
+            // cast is exactly the filter for that.
+            const auto socket_descriptor =
+                std::dynamic_pointer_cast<eprosima::fastdds::rtps::SocketTransportDescriptor>(descriptor);
+            if (!socket_descriptor)
+            {
+                continue;
+            }
+
+            // TODO(APT-12250): revisit if setup_transports ever builds a socket transport
+            // other than UDPv4 for us. The allowlist entry below is an IPv4 address, so only
+            // a UDPv4 transport can match it: a UDPv6 or TCP descriptor handed "127.0.0.1"
+            // would match no interface, and Fast-DDS would then substitute a sentinel
+            // address that allows nothing, leaving a dead transport. Unreachable today (SHM
+            // + UDPv4 is the whole of what this library builds, and the SHM descriptor is
+            // filtered out above), which is why there is no runtime check for it here --
+            // warn_if_transport_mode_not_applied would report it after the fact, from what
+            // the participant ended up with.
+
+            // Assigned rather than appended: setup_transports leaves the allowlist empty,
+            // and loopback is the whole of what this mode permits — an append would let a
+            // second call widen it.
+            //
+            // The netmask filter is left at AUTO, which never filters. Not because turning
+            // it on would break discovery -- it would not; Fast-DDS consults the filter only
+            // for non-multicast destinations (UDPTransportInterface::send tests
+            // !is_multicast_remote_address first), so the 239.255.0.1 announcements are never
+            // subject to it -- but because with a single allowed interface there is nothing
+            // to disambiguate, and every unicast peer of a loopback-confined participant is
+            // inside 127.0.0.0/8 anyway. Worth knowing that AUTO is not a fixed value: it
+            // adopts the PARTICIPANT-level netmask filter, so a caller who sets that to ON
+            // gets ON here, which is harmless for the same reason.
+            //
+            // interface_allowlist, not the interfaceWhiteList that predates it: Fast-DDS
+            // warns that the latter is going away, and honours either.
+            socket_descriptor->interface_allowlist = {
+                eprosima::fastdds::rtps::AllowedNetworkInterface{loopback_ipv4_address}};
+        }
+    }
+
     void domain_participant::refresh_vpn_interface_blocklist()
     {
+        // A loopback-confined participant has nothing to say about tunnels: no tunnel of the
+        // host's can carry traffic that never leaves loopback, so the pass below would find
+        // nothing to exclude and reporting that it did not run would tell the caller only
+        // what they already know. Where such a participant is not actually confined -- the
+        // transports turned out to be the caller's -- the constructor's transport-mode
+        // warning is the one that says so, and it says something they can act on.
+        if (configured_transport_mode == transport_mode::localhost_only)
+        {
+            return;
+        }
+
         // Whether this participant is the one applying the exclusion, which decides what the
         // guard below does with an interface-kind-lookup report. Set once the branches that
         // step aside have all been passed.
@@ -2078,7 +2478,7 @@ namespace provizio::dds
         // runs only after they are all gone.
         auto participant = std::make_shared<domain_participant>(
             domain_id, recovery_mode, std::move(initial_discovery_callback), initial_discovery_kinds, transport);
-        if (resolve_network_recovery_enabled(recovery_mode))
+        if (network_recovery_applies(recovery_mode, transport))
         {
             detail::network_recovery_coordinator::instance().register_participant(participant);
         }

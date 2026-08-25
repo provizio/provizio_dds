@@ -1047,6 +1047,12 @@ def test_profile_route_honours_process_transports() -> int:
         # own discovery.
         warnings_before = len(captured)
         udp_only_profile = participant._resolve_transports(factory, TransportMode.UDP_ONLY)
+        # In the creation and rebuild paths the resolution runs under the participant's
+        # lifecycle locks, where the callback may not be invoked (it may publish onto a
+        # DDS topic), so the warning is stashed and emitted by the flush those paths run
+        # once the locks are released. Exercising the decision alone means running that
+        # flush here, as they would.
+        participant._flush_pending_vpn_blocklist_log()
         warnings = [
             message
             for level, message in captured[warnings_before:]

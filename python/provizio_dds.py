@@ -1028,15 +1028,26 @@ def _caller_configured_transports(factory: "DomainParticipantFactory") -> bool:
     return len(transport_config.user_transports) > 0 or not transport_config.use_builtin_transports
 
 
+def _transports_selection(value: str) -> str:
+    """The transport SET a FASTDDS_BUILTIN_TRANSPORTS value selects, without its options.
+
+    ``TransportMode`` decides which set is in force — shared memory alongside UDP, or UDP
+    alone — and nothing else about the value, so this is the part of it that has to match
+    for a request to have been honoured. Options of ours that a caller's value does not
+    carry (the socket buffer sizes) are not a contradiction of the request: they set the
+    variable themselves, and their choice is documented as the one that wins."""
+    return value.split("?", 1)[0]
+
+
 def _shared_memory_in_transports_value(value: str) -> bool:
     """Whether a FASTDDS_BUILTIN_TRANSPORTS value selects a transport set that includes
     shared memory.
 
     Only values :meth:`_DomainParticipant._builtin_transports_value` produces are ever
-    passed here — ``DEFAULT?...`` or ``UDPv4?...`` — so the leading token decides it. A
-    value the caller set is never classified: that case is answered earlier, by refusing
-    to touch their transport selection at all."""
-    return value.split("?", 1)[0] == "DEFAULT"
+    passed here — ``DEFAULT?...`` or ``UDPv4?...`` — so the selection decides it. A value
+    the caller set is never classified: that case is answered earlier, by refusing to
+    touch their transport selection at all."""
+    return _transports_selection(value) == "DEFAULT"
 
 
 def _vpn_excluded_transports_xml(
@@ -1307,6 +1318,10 @@ class TransportMode(Enum):
     ``FASTDDS_BUILTIN_TRANSPORTS`` env variable (the SWIG bindings expose no
     per-participant transport API), so the first participant created in a process fixes
     the transport for the whole process, and an externally-set value is always honoured.
+
+    That env variable selects a transport stack but cannot express an interface
+    allowlist, so the C++ enum's ``localhost_only`` has no counterpart here: confining a
+    participant to loopback needs per-descriptor configuration this layer cannot reach.
     """
 
     #: Platform default: SHM + UDPv4 on Linux; UDPv4-only on Windows/macOS (where shared
@@ -1617,10 +1632,16 @@ def make_domain_participant(domain_id: int = 0,
                     existing_transports is not None
                     and existing_transports != _builtin_transports_set_by_library
                 )
+                # Compared as SELECTIONS, not as strings: an externally-set "UDPv4"
+                # delivers exactly what TransportMode.UDP_ONLY asks for even though it
+                # carries none of the options this library would have added, and telling
+                # somebody their request was not applied when it was is noise they cannot
+                # act on. Only a set that really is not the requested one is worth a line.
                 if (
                     transport != TransportMode.AUTOMATIC
                     and existing_transports is not None
-                    and existing_transports != desired_transports
+                    and _transports_selection(existing_transports)
+                    != _transports_selection(desired_transports)
                 ):
                     transport_override_warning = (
                         f"transport={transport} requested but FASTDDS_BUILTIN_TRANSPORTS is already "
@@ -1645,9 +1666,15 @@ def make_domain_participant(domain_id: int = 0,
                     _builtin_transports_set_by_library = desired_transports
                 effective_transports = os.environ["FASTDDS_BUILTIN_TRANSPORTS"]
 
-            if transport_override_warning is not None:
-                _network_recovery._emit_log(
-                    _network_recovery.LogLevel.WARNING, transport_override_warning
+            # Stashed, not emitted: this runs under both lifecycle locks, where the caller's
+            # log callback may not be invoked (it may publish onto a DDS topic). And said
+            # once per participant, as the C++ constructor says it once: the configuration
+            # it describes is process-wide and no rebuild changes it, so repeating it on
+            # every network-recovery rebuild would only be noise.
+            if transport_override_warning is not None and not self._transport_override_reported:
+                self._transport_override_reported = True
+                self._pending_vpn_blocklist_logs.append(
+                    (_network_recovery.LogLevel.WARNING, transport_override_warning, False)
                 )
 
             # The snapshot has to learn when the exclusion cannot be applied: DDS is about
@@ -2049,6 +2076,9 @@ def make_domain_participant(domain_id: int = 0,
             # later read of the host fails: an unreadable interface list must not cost a
             # rebuild the exclusion it already had (see _resolve_transports).
             self._last_vpn_profile_name: "Optional[str]" = None
+            # Whether the process-wide transport override has been reported by this
+            # participant: once, as the C++ constructor reports it once.
+            self._transport_override_reported = False
             # Reports produced by _resolve_transports under this participant's locks and
             # emitted by _flush_pending_vpn_blocklist_log once they are released. A list
             # rather than a single message: one pass can have two independent things to
