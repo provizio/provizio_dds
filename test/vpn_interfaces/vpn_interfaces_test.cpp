@@ -19,6 +19,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -44,6 +45,7 @@
 #include "detail/posix_interface_walk.h"
 #endif
 #include "provizio/dds/domain_participant.h"
+#include "provizio/dds/logging.h"
 #include "provizio/dds/network_recovery.h"
 
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
@@ -591,6 +593,72 @@ namespace
         return passed ? 0 : 1;
     }
 
+#if defined(__linux__)
+    // Case: a real interface-kind lookup failure reaches the participant's log, naming the way
+    // out. The Python suite pinned this from the start; the C++ one pinned only the flag, so
+    // deleting the whole warning block from refresh_vpn_interface_blocklist left every C++ case
+    // green -- and the C++ library is the surface more consumers use.
+    //
+    // Drives the real route rather than raising the flag by hand: the forcing hook makes
+    // fetch_link_kinds take a failure exit, so the funnel every such exit goes through, the
+    // process-wide report, the participant's take and the log line are all under test. Raising
+    // the flag directly, which the case above does, pins none of that -- deleting the report
+    // from the funnel would not fail it.
+    //
+    // Linux-only, because that is where an interface-kind lookup exists at all; the other
+    // platforms classify by name and have nothing to fail.
+    int test_interface_kind_lookup_failure_warns()
+    {
+        unset_env(k_allow_env_name);
+
+        // Drained first: this process may have enumerated during start-up, and a stale report
+        // would make the assertion below pass without the forced failure doing anything.
+        (void)provizio::dds::detail::take_interface_kind_lookup_failure_report();
+
+        provizio::dds::detail::force_link_kind_lookup_failure_for_test(true);
+
+        std::vector<std::string> warnings;
+        std::mutex warnings_mutex;
+        auto previous = provizio::dds::set_log_callback(
+            [&warnings, &warnings_mutex](provizio::dds::log_level level, std::string_view message) {
+                if (level == provizio::dds::log_level::warning)
+                {
+                    const std::lock_guard<std::mutex> lock{warnings_mutex};
+                    warnings.emplace_back(message);
+                }
+            });
+
+        {
+            const auto participant =
+                provizio::dds::make_domain_participant(k_domain, provizio::dds::network_recovery_mode::off);
+        }
+
+        provizio::dds::set_log_callback(std::move(previous));
+        provizio::dds::detail::force_link_kind_lookup_failure_for_test(false);
+
+        std::string reported;
+        {
+            const std::lock_guard<std::mutex> lock{warnings_mutex};
+            for (const auto &message : warnings)
+            {
+                if (message.find("could not read this host's interface kinds") != std::string::npos)
+                {
+                    reported = message;
+                    break;
+                }
+            }
+        }
+
+        bool passed = EXPECT(!reported.empty());
+        // Actionable, not merely present: an operator who wants DDS over that tunnel has to be
+        // told what to set.
+        passed &= EXPECT(reported.find(k_allow_env_name) != std::string::npos);
+
+        std::cout << "interface_kind_lookup_failure_warns: " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
+    }
+#endif
+
     // Case: an unreadable interface list on the SECOND enumeration leaves every list alone.
     //
     // Two independent IPFinder walks decide this: one produces the blocklist, the other the
@@ -603,6 +671,9 @@ namespace
     //
     // Reachable only through the forcing hook: substituting a list can express success and
     // nothing else, so before that hook existed this branch had no test at all.
+    //
+    // Its own subcommand, like every other case that asserts on the transports-owning latch:
+    // that latch is process-wide and one-way, and this case sets it.
     int test_blocklist_allowed_enumeration_failure_changes_nothing()
     {
         unset_env(k_allow_env_name);
@@ -612,21 +683,101 @@ namespace
         provizio::dds::detail::force_vpn_blocklist_entries_for_test(forced);
         provizio::dds::detail::force_allowed_interfaces_enumeration_failure_for_test(true);
 
+        // Asserted before the participant exists, so the assertion after it is about THIS
+        // participant rather than about whatever the process had already recorded.
+        bool passed = EXPECT(provizio::dds::detail::vpn_exclusion_applies_to_transports());
+
         const auto configured = socket_transports_of_fresh_participant();
 
         // Nothing applied: not the blocklist the first enumeration justified, and not the
         // allowlist the second could not supply.
-        bool passed = EXPECT(configured.blocked.empty());
+        passed &= EXPECT(configured.blocked.empty());
         passed &= EXPECT(configured.allowlist.empty());
         passed &= EXPECT(configured.netmask_filter_on == 0);
         // Vacuity guard: the participant did get socket transports, so "nothing applied" is
         // a decision rather than an absence of anything to decide about.
         passed &= EXPECT(configured.descriptors > 0);
 
+        // And change detection was told. Nothing was applied, so the transports bind the
+        // tunnel this reading found; a snapshot that dropped it anyway would leave a
+        // reconnect with a dead locator no rebuild replaces -- the two filters must never
+        // disagree about one interface.
+        passed &= EXPECT(!provizio::dds::detail::vpn_exclusion_applies_to_transports());
+
         provizio::dds::detail::force_allowed_interfaces_enumeration_failure_for_test(false);
         provizio::dds::detail::force_vpn_blocklist_entries_for_test(std::nullopt);
 
         std::cout << "blocklist_allowed_enumeration_failure_changes_nothing: " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
+    }
+
+    // Case: an unreadable interface list on the FIRST enumeration -- the one that produces
+    // the blocklist -- leaves every list alone AND tells change detection that this
+    // participant's transports may be binding a tunnel after all.
+    //
+    // The second half is what this case exists for. On a first creation there is nothing in
+    // the descriptors for "leave every list exactly as it stands" to preserve, so they keep
+    // Fast-DDS' default -- no interface_blocklist at all -- and DDS binds and announces
+    // every tunnel the host has. A snapshot filter that went on dropping tunnels would then
+    // stop watching an interface the transports do bind, which is the disagreement
+    // address_snapshot.h calls the one outcome neither filter may produce.
+    //
+    // Reachable only through the forcing hook, for the same reason its allowed-interfaces
+    // sibling is: a substituted set of entries is an answer, not a reading of the host.
+    int test_blocklist_enumeration_failure_changes_nothing()
+    {
+        unset_env(k_allow_env_name);
+
+        provizio::dds::detail::force_vpn_blocklist_enumeration_failure_for_test(true);
+
+        bool passed = EXPECT(provizio::dds::detail::vpn_exclusion_applies_to_transports());
+
+        const auto configured = socket_transports_of_fresh_participant();
+
+        passed &= EXPECT(configured.blocked.empty());
+        passed &= EXPECT(configured.allowlist.empty());
+        passed &= EXPECT(configured.netmask_filter_on == 0);
+        // Vacuity guard, as above.
+        passed &= EXPECT(configured.descriptors > 0);
+
+        passed &= EXPECT(!provizio::dds::detail::vpn_exclusion_applies_to_transports());
+
+        provizio::dds::detail::force_vpn_blocklist_enumeration_failure_for_test(false);
+
+        std::cout << "blocklist_enumeration_failure_changes_nothing: " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
+    }
+
+    // Case: a classification that ran without the platform's interface-kind information
+    // reports itself, once, rather than silently degrading to name-prefix matching.
+    //
+    // What it guards: on Linux the rtnetlink IFLA_INFO_KIND is what identifies a tunnel
+    // renamed away from the conventional prefixes (a WireGuard device called office0). When
+    // the dump cannot be issued or does not complete, the classifier falls back to names,
+    // that device is taken for ordinary hardware, and DDS binds and announces it -- the
+    // duplication this whole feature exists to remove, reinstated with nothing anywhere
+    // saying so. The report is what an operator has to go on.
+    int test_interface_kind_lookup_failure_reported()
+    {
+        // Nothing has failed yet, so nothing is reported. Asserted first because the take
+        // is destructive: without it a stale report from this process' own start-up
+        // enumeration would make the assertions below pass for the wrong reason.
+        bool passed = EXPECT(!provizio::dds::detail::take_interface_kind_lookup_failure_report());
+
+        provizio::dds::detail::report_interface_kind_lookup_failed();
+        passed &= EXPECT(provizio::dds::detail::take_interface_kind_lookup_failure_report());
+
+        // Taken once: the caller does not latch for itself, and a process that keeps
+        // re-enumerating a host whose lookup keeps failing must still say it once.
+        passed &= EXPECT(!provizio::dds::detail::take_interface_kind_lookup_failure_report());
+
+        // Re-arms, unlike the transports-owning latch: this describes one enumeration rather
+        // than a property of the process, so a lookup that starts failing again after the
+        // first report is worth a second line.
+        provizio::dds::detail::report_interface_kind_lookup_failed();
+        passed &= EXPECT(provizio::dds::detail::take_interface_kind_lookup_failure_report());
+
+        std::cout << "interface_kind_lookup_failure_reported: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;
     }
 
@@ -851,6 +1002,52 @@ namespace
     // -O1, gcc 12 and gcc 13 all ran it correctly (reproduced and fixed against that exact
     // toolchain in a container). One list walked once is both immune and simpler; please
     // don't "simplify" it back.
+    // The loopback predicate the allowlist's netmask decision rests on, pinned on both sides
+    // of the line Fast-DDS draws differently (IP4_LOCAL is an exact 127.0.0.1 compare).
+    int test_loopback_address()
+    {
+        bool passed = true;
+        for (const auto *const loopback : {"127.0.0.1", "127.0.0.2", "127.0.1.1", "127.255.255.254", "::1"})
+        {
+            if (!provizio::dds::detail::is_loopback_address(loopback))
+            {
+                std::cerr << "FAIL: " << loopback << " was not classified as loopback\n";
+                passed = false;
+            }
+        }
+        for (const auto *const ordinary : {"192.0.2.1", "10.0.0.1", "12.7.0.1", "1270.0.0.1", "::1:1", "fe80::1", ""})
+        {
+            if (provizio::dds::detail::is_loopback_address(ordinary))
+            {
+                std::cerr << "FAIL: '" << ordinary << "' was classified as loopback\n";
+                passed = false;
+            }
+        }
+        std::cout << "loopback_address: " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
+    }
+
+    // Machine-readable "<address>|<0/1>" per address given (or a built-in sample), for
+    // test/python/vpn_classifier_parity_test.py to compare with _is_loopback_address.
+    int test_loopback_table(const std::vector<std::string_view> &args)
+    {
+        static constexpr std::array<std::string_view, 4> sample{"127.0.0.1", "127.0.0.2", "192.0.2.1", "::1"};
+        std::vector<std::string_view> addresses;
+        for (std::size_t index = 2; index < args.size(); ++index)
+        {
+            addresses.push_back(args[index]);
+        }
+        if (addresses.empty())
+        {
+            addresses.assign(sample.begin(), sample.end());
+        }
+        for (const auto &address : addresses)
+        {
+            std::cout << address << "|" << (provizio::dds::detail::is_loopback_address(address) ? 1 : 0) << "\n";
+        }
+        return 0;
+    }
+
     int test_classifier_table(const std::vector<std::string_view> &args)
     {
         static constexpr std::array<std::string_view, 6> sample{
@@ -885,8 +1082,7 @@ namespace
             // costs nothing at this scale and means the table always shows how far it got.
             std::cout << text << "|" << (provizio::dds::detail::is_vpn_interface_name(text) ? 1 : 0) << "|"
                       << (provizio::dds::detail::is_vpn_product_name(text) ? 1 : 0) << "|"
-                      << (provizio::dds::detail::is_vpn_description(text) ? 1 : 0) << "|" << (is_kind ? 1 : 0)
-                      << std::endl;
+                      << (provizio::dds::detail::is_vpn_description(text) ? 1 : 0) << "|" << (is_kind ? 1 : 0) << "\n";
         }
         return 0;
     }
@@ -1013,6 +1209,20 @@ int main(int argc, char **argv)
     {
         return test_blocklist_allowed_enumeration_failure_changes_nothing();
     }
+    if (subcommand == "blocklist_enumeration_failure_changes_nothing")
+    {
+        return test_blocklist_enumeration_failure_changes_nothing();
+    }
+    if (subcommand == "interface_kind_lookup_failure_reported")
+    {
+        return test_interface_kind_lookup_failure_reported();
+    }
+#if defined(__linux__)
+    if (subcommand == "interface_kind_lookup_failure_warns")
+    {
+        return test_interface_kind_lookup_failure_warns();
+    }
+#endif
     if (subcommand == "blocklist_participant_netmask_off")
     {
         return test_blocklist_participant_netmask_off();
@@ -1057,6 +1267,14 @@ int main(int argc, char **argv)
     if (subcommand == "classifier_table")
     {
         return test_classifier_table(args);
+    }
+    if (subcommand == "loopback_address")
+    {
+        return test_loopback_address();
+    }
+    if (subcommand == "loopback_table")
+    {
+        return test_loopback_table(args);
     }
     std::cerr << "unknown subcommand: " << subcommand << "\n";
     return 1;

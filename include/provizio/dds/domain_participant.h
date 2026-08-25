@@ -565,12 +565,18 @@ namespace provizio::dds
         /// calling out to the log callback or to Fast-DDS.
         std::mutex pending_vpn_blocklist_log_mutex;
         /// Whether this participant has already reported that it is NOT excluding VPN /
-        /// tunnel interfaces even though the host has some — because the caller owns the
-        /// transport configuration, or because a netmask filter of OFF rules the exclusion
-        /// out (see refresh_vpn_interface_blocklist). Neither condition can change while the
-        /// participant lives, so the report is worth making exactly once; without it, an
-        /// operator watching a metered uplink pay for duplicated traffic has nothing
-        /// anywhere to explain why the exclusion did not apply.
+        /// tunnel interfaces — because the caller owns the transport configuration, because
+        /// a netmask filter of OFF rules the exclusion out, or because the host's interfaces
+        /// could not be read at all (see refresh_vpn_interface_blocklist). Without the
+        /// report, an operator watching a metered uplink pay for duplicated traffic has
+        /// nothing anywhere to explain why the exclusion did not apply.
+        ///
+        /// One latch for all four lines because they say the same thing to the same reader,
+        /// and a participant can only ever produce one of them: the first two conditions are
+        /// fixed for the participant's life and return before any enumeration, so a
+        /// participant that reaches an enumeration failure is one neither of them applies
+        /// to. Once per participant rather than once per refresh, so a rebuilt participant
+        /// on a host whose reading keeps failing does not repeat it on every network event.
         bool vpn_exclusion_skip_reported{false};
         /// Whether this participant switched netmask filtering ON to suppress the duplicate
         /// unicast sends whitelist mode would otherwise produce (see

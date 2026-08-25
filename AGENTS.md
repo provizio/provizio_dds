@@ -49,7 +49,7 @@ ctest --output-on-failure
 ctest --output-on-failure -R simplest_pub_sub
 ```
 
-Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `shm_cleanup`, `callback_exceptions`, `point_cloud2`, `accumulation`, `vpn_interfaces`.
+Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `shm_cleanup`, `callback_exceptions`, `point_cloud2`, `accumulation`, `vpn_interfaces`, `listener_drain`.
 
 ### CI Build Scripts
 

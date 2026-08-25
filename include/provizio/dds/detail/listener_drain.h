@@ -16,10 +16,12 @@
 #define DDS_DETAIL_LISTENER_DRAIN
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
 #include "provizio/dds/common.h"
+#include "provizio/dds/logging.h"
 
 namespace provizio::dds::detail
 {
@@ -51,6 +53,20 @@ namespace provizio::dds::detail
     {
       public:
         listener_drain() noexcept = default;
+
+        /**
+         * @brief Construct with a non-default stall-reporting slice.
+         *
+         * @param slice How long the drain waits before reporting that it is still waiting,
+         * and between repeats of that report. Purely diagnostic: it never bounds the total
+         * wait (see @c detach_and_drain). Every shipped endpoint takes the default; the
+         * parameter exists so a test can observe the reporting without spending the default
+         * slice per line.
+         */
+        explicit listener_drain(const std::chrono::milliseconds slice) noexcept : stall_warning_period{slice}
+        {
+        }
+
         listener_drain(const listener_drain &) = delete;
         listener_drain &operator=(const listener_drain &) = delete;
         listener_drain(listener_drain &&) = delete;
@@ -132,6 +148,19 @@ namespace provizio::dds::detail
          * in-flight callback might want — in particular the participant's
          * @c reset_mutex (shared or exclusive).
          *
+         * @note The participant's @c registration_mutex, by contrast, IS held across
+         * this call by @c trigger_network_recovery_reset, deliberately: it is what stops
+         * an endpoint being registered against a participant that is being torn down. A
+         * data callback may not take it either way — creating a publisher, subscriber or
+         * service from one is already forbidden, and is what the stall warning below
+         * reports. The consequence worth stating is for the LOG callback, which the
+         * warning invokes on this thread with that mutex held: creating an endpoint from
+         * it would self-deadlock. That is why @c log_callback's contract rules endpoint
+         * creation out (see logging.h). Deferring this one message until the locks are
+         * released — the discipline every other diagnostic in the library follows — is not
+         * available here: the stall it reports is unbounded, so a deferred message could
+         * be emitted only once the drain finished, which is exactly what has not happened.
+         *
          * Memory ordering: see @c entered — both atomic operations on this
          * side use @c seq_cst to pair with the callback side and guarantee
          * the Dekker invariant.
@@ -139,8 +168,82 @@ namespace provizio::dds::detail
         void detach_and_drain() noexcept
         {
             detached.store(true, std::memory_order_seq_cst);
-            std::unique_lock<std::mutex> lock{drain_mutex};
-            drain_cv.wait(lock, [this] { return in_flight.load(std::memory_order_seq_cst) == 0; });
+
+            // Waits in bounded slices with an unbounded total: the contract is still
+            // "block until every in-flight callback has returned", but a callback that
+            // never returns (one that blocks on a lock the caller holds, or that creates
+            // an endpoint during a reset — both forbidden, see the class docs) would
+            // otherwise hang here forever with nothing in the log to say why. The slice
+            // only decides how soon that is reported; it never ends the wait early,
+            // because proceeding while a callback is still running would tear down the
+            // Fast-DDS entity underneath it.
+            //
+            // Reported once when the stall starts and again on every slice after it,
+            // because one line cannot say whether the stall is over: the wait is unbounded
+            // and the caller holds registration_mutex throughout, so an operator who sees a
+            // single warning has no way to tell a stall that cleared ten seconds later from
+            // one still going hours on. Repeating turns it into a heartbeat, and the slice
+            // is long enough (see stall_warning_period) that a wedged process produces a
+            // line a few times a minute rather than a flood.
+            std::size_t stalled_slices = 0;
+            // The real elapsed time, because the completion line below must report what the
+            // reset actually cost. Deriving it from the slice count would undercount by
+            // however far into the final slice the drain finished -- a stall cleared 2.5 s
+            // into its second slice would be reported as 5 s rather than 7.5 s.
+            const auto stall_started = std::chrono::steady_clock::now();
+            while (true)
+            {
+                bool drained = false;
+                {
+                    std::unique_lock<std::mutex> lock{drain_mutex};
+                    drained = drain_cv.wait_for(lock, stall_warning_period,
+                                                [this] { return in_flight.load(std::memory_order_seq_cst) == 0; });
+                }
+
+                // Reported with drain_mutex released: log_warning invokes the user's log
+                // callback, which is free to use provizio APIs (publishing a log line onto
+                // a topic is a supported use), and holding this class' mutex across that
+                // would silently add it to that contract. The participant's
+                // registration_mutex IS still held here — see the note on this function for
+                // why that cannot be helped, and why creating an endpoint from a log
+                // callback is ruled out because of it. try/catch keeps the noexcept promise
+                // if such a callback throws.
+                if (drained)
+                {
+                    if (stalled_slices != 0)
+                    {
+                        // Only where a stall was reported: the log needs an end as well as
+                        // a beginning, or the last warning stands as the final word on a
+                        // reset that in fact completed.
+                        try
+                        {
+                            log_warning() << "listener drain completed after " << elapsed_seconds_since(stall_started)
+                                          << " s; the reset is no longer blocked.";
+                        }
+                        catch (...)
+                        {
+                            // As below.
+                        }
+                    }
+                    return;
+                }
+
+                ++stalled_slices;
+                try
+                {
+                    log_warning() << "listener drain has been waiting for " << in_flight.load(std::memory_order_seq_cst)
+                                  << " in-flight callback(s) for over " << waited_seconds(stalled_slices)
+                                  << " s. A callback that never returns blocks the "
+                                     "network-recovery reset (and endpoint teardown) "
+                                     "indefinitely: callbacks must not block and must "
+                                     "not create publishers / subscribers / services.";
+                }
+                catch (...)
+                {
+                    // Nothing useful to do — a logging failure must not turn a
+                    // diagnostic into a crash.
+                }
+            }
         }
 
         /**
@@ -163,6 +266,35 @@ namespace provizio::dds::detail
         }
 
       private:
+        /// @brief How long ago @p started was, in seconds. What the completion report needs:
+        /// the drain can finish part way through a slice, so the number of slices that
+        /// expired is a floor rather than the answer.
+        static double elapsed_seconds_since(const std::chrono::steady_clock::time_point started) noexcept
+        {
+            return std::chrono::duration_cast<std::chrono::duration<double>>(std::chrono::steady_clock::now() - started)
+                .count();
+        }
+
+        /// @brief How long @p slices of stalled waiting add up to, in seconds. Seconds
+        /// because that is the unit an operator reading the log thinks in; a double because
+        /// a slice need not be a whole number of them.
+        double waited_seconds(const std::size_t slices) const noexcept
+        {
+            constexpr double milliseconds_per_second = 1000.0;
+            return static_cast<double>(stall_warning_period.count()) * static_cast<double>(slices) /
+                   milliseconds_per_second;
+        }
+
+        /// The default slice: long enough that a wedged process reports itself a few times
+        /// a minute rather than flooding the log.
+        static constexpr std::chrono::milliseconds default_stall_warning_period{5000};
+
+        /// How long the drain waits before reporting that it is still waiting, and between
+        /// repeats of that report. Purely diagnostic: it does not bound the total wait (see
+        /// detach_and_drain). Const, so it needs no synchronisation against the callback
+        /// threads that read nothing but the atomics below.
+        const std::chrono::milliseconds stall_warning_period{default_stall_warning_period};
+
         std::atomic<int> in_flight{0};
         std::atomic<bool> detached{false};
         std::mutex drain_mutex;

@@ -111,6 +111,13 @@ namespace provizio::dds::detail
      *  - Loopback interfaces.
      *  - IPv6 link-local @c fe80::/10 addresses (RFC 4291) — not useful for
      *    cross-host DDS.
+     *  - VPN / overlay-tunnel interfaces, unless
+     *    @c PROVIZIO_DDS_ALLOW_VPN_INTERFACES re-admits them (see
+     *    detail/vpn_interfaces.h). They are excluded from the DDS transports
+     *    themselves, so their address churn can no longer change any locator and
+     *    rebuilding participants over it would be pure disruption. This one is
+     *    NOT a heuristic about churn: it keeps change detection and the
+     *    transports modelling the same interface set.
      *  - Interfaces that are not operationally up, i.e. carrier-down as well as
      *    administratively down (Linux/macOS: @c IFF_RUNNING not set; Windows:
      *    @c OperStatus != @c IfOperStatusUp). This deliberately mirrors
@@ -128,9 +135,9 @@ namespace provizio::dds::detail
      *  - Interfaces whose @c IFLA_INFO_KIND from rtnetlink matches one of:
      *    @c bridge, @c veth, @c dummy, @c vxlan, @c macvlan, @c ipvlan
      *    (physical Ethernet and Wi-Fi have no kind name and pass through).
-     *    Tunnel kinds (@c tun, @c ip6tnl) are deliberately NOT excluded: a
-     *    VPN / tunnel endpoint routinely carries real DDS traffic and, unlike
-     *    container plumbing, is not a churn source.
+     *    Tunnel kinds are handled separately, by the VPN filter described
+     *    below, so that one environment variable governs both them and the
+     *    transports.
      *  - Interfaces whose name starts with one of @c docker, @c br-,
      *    @c cni, @c kube, @c lxc, @c flannel, @c weave, @c veth — the
      *    name-prefix list catches container/Kubernetes/LXC adapters whose
@@ -159,22 +166,90 @@ namespace provizio::dds::detail
      *    @c "VMware Virtual", @c "TAP-Windows", @c "Loopback Pseudo-Interface",
      *    @c "Tunnel adapter".
      *
+     * @param enumeration_failed Optional out-parameter, assigned on every call: @c true
+     *        when the OS could not be asked for its interfaces at all (@c getifaddrs /
+     *        @c GetAdaptersAddresses failing), @c false when it answered. It matters
+     *        because an empty snapshot is a legitimate value — a container whose only
+     *        device is a filtered-out veth reports exactly that — so a failure returning
+     *        an empty set is indistinguishable from a host that genuinely has no usable
+     *        address, and a caller comparing snapshots would read it as "every address
+     *        disappeared". A caller that passes @c nullptr must therefore not treat an
+     *        empty result as a network change. Assigned rather than only set, so a caller
+     *        that declares the flag without initialising it reads a real answer instead
+     *        of whatever was on the stack.
      * @return Snapshot of the interesting (interface, address, prefix) triples. Two
      * equal snapshots produced at different times mean the set of interesting
      * addresses hasn't changed; @c operator== on @c std::unordered_set compares
      * contents order-independently and is the no-op-reset signal.
      */
-    PROVIZIO_DDS_API address_snapshot capture_address_snapshot();
+    PROVIZIO_DDS_API address_snapshot capture_address_snapshot(bool *enumeration_failed = nullptr);
+
+    /**
+     * @brief Everything the snapshot's POLICY filters read about one interface — what the
+     * platform calls it, and the platform-specific type signals that go with the name.
+     *
+     * Fields a platform has no equivalent for are left empty / false, and its
+     * @c snapshot_policy_excludes_interface never reads them.
+     */
+    struct interface_identity
+    {
+        /// Device name on POSIX (@c eth0, @c utun3); on Windows the GUID-ish @c AdapterName,
+        /// which is also the name Fast-DDS matches a blocklist entry against.
+        std::string name;
+        /// Windows adapter friendly name (@c "Ethernet 2", @c "Tailscale"), which a user can
+        /// rename — hence matched only against vendor names. Empty on POSIX.
+        std::string friendly_name;
+        /// Windows driver-supplied description (@c "TAP-Windows Adapter V9"). Empty on POSIX.
+        std::string description;
+        /// Linux @c IFLA_INFO_KIND from rtnetlink (@c wireguard, @c bridge, @c veth), empty
+        /// when the kernel reported none. Empty on every other platform.
+        std::string kind;
+        /// Windows @c IF_TYPE_TUNNEL. False on POSIX, where the name and the kind carry the
+        /// whole signal.
+        bool platform_says_tunnel{false};
+        /// Windows: @c IfType is one of @c IF_TYPE_ETHERNET_CSMACD, @c IF_TYPE_IEEE80211,
+        /// @c IF_TYPE_PPP. Unused on POSIX.
+        bool platform_says_physical{false};
+    };
+
+    /**
+     * @brief Whether @c capture_address_snapshot drops an interface with this identity on
+     * POLICY grounds: the VPN filter, the name / kind / adapter-type heuristics, and the
+     * @c force_included_interfaces escape hatch that bypasses them.
+     *
+     * The OPERATIONAL filters are deliberately NOT part of this — loopback, carrier state,
+     * address family, IPv6 link-local, Windows' duplicate-address state — because they are
+     * properties of a live device rather than of its identity, and the walk applies them
+     * before ever asking this.
+     *
+     * It exists as its own function, called by the walk, for two reasons. The policy is
+     * then stated exactly once per platform, so the snapshot's answer for an interface and
+     * @c vpn_interface_blocklist_entries' answer for the same one cannot drift apart — a
+     * divergence would mean either watching an interface whose addresses the transports
+     * refuse to bind, or (worse) not watching one they do bind. And it makes the policy
+     * testable on a host that does not have the interface in question: no runner has a
+     * tunnel up, so every assertion about a tunnel's treatment would otherwise degenerate
+     * into a vacuous pass, which is exactly how a broken
+     * @c PROVIZIO_DDS_ALLOW_VPN_INTERFACES override on one platform can ship green.
+     *
+     * @param identity What the platform reports about the interface.
+     * @return true when the interface is kept out of the snapshot.
+     */
+    PROVIZIO_DDS_API bool snapshot_policy_excludes_interface(const interface_identity &identity);
 
     /**
      * @brief Interface names the user has force-included via the
      * @c PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES environment variable
      * (comma-separated, e.g. @c "br0,virbr2"). An interface named here bypasses
-     * every name-prefix / kind / adapter-type exclusion listed on
+     * the name-prefix / kind / adapter-type exclusions listed on
      * @c capture_address_snapshot, but still has to be operationally up, carry a
-     * non-link-local address, and not be loopback.
+     * non-link-local address, and not be loopback. It does NOT bypass the VPN
+     * filter — @c PROVIZIO_DDS_ALLOW_VPN_INTERFACES is the only knob that
+     * re-admits a tunnel, because re-admitting one here would put an interface
+     * back into change detection whose addresses the transports still refuse to
+     * bind.
      *
-     * The escape hatch exists because the exclusions are heuristics: a host whose
+     * The escape hatch exists because those exclusions are heuristics: a host whose
      * primary NIC *is* a bridge (@c br0 on a vehicle PC, @c br-lan on a router-like
      * unit) would otherwise have its only DDS-relevant interface filtered out of
      * the snapshot, and no address change on it would ever trigger a recovery.

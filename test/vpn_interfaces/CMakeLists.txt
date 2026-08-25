@@ -44,13 +44,21 @@ endif()
 set(_VPN_CASES classifier blocklist blocklist_forced blocklist_override_all blocklist_override_named
     blocklist_override_unmatched blocklist_override_all_matched blocklist_participant_netmask_off
     blocklist_allowed_enumeration_failure_changes_nothing
+    blocklist_enumeration_failure_changes_nothing
+    interface_kind_lookup_failure_reported
     no_op_with_builtin_transports_env leaves_caller_transports_alone
     snapshot_excludes_vpn snapshot_honours_override
-    snapshot_policy_excludes_tunnel snapshot_policy_follows_transports classifier_table)
+    snapshot_policy_excludes_tunnel snapshot_policy_follows_transports classifier_table
+    loopback_address loopback_table)
 if(NOT WIN32)
     # POSIX-only: the helper it covers is the getifaddrs backends' own, and does not
     # compile (or exist) on Windows, whose enumeration is GetAdaptersAddresses.
     list(APPEND _VPN_CASES blocklist_entries_from_walk)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Linux-only: an interface-kind lookup is Linux's rtnetlink dump. macOS and Windows
+    # classify by name and adapter description, so there is nothing there to fail.
+    list(APPEND _VPN_CASES interface_kind_lookup_failure_warns)
 endif()
 
 foreach(_case ${_VPN_CASES})

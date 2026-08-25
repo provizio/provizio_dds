@@ -213,6 +213,18 @@ namespace provizio::dds::detail
             return entries;
         }
 
+        /// Whether a test has made the enumeration behind vpn_interface_blocklist_entries
+        /// report failure. Separate from forced_blocklist_entries for the same reason the
+        /// allowed-interfaces pair is separate: a substituted set is an answer rather than a
+        /// reading of the host, so it can only ever express success. Guarded by the same
+        /// mutex as the substitution it sits beside, because a test installs it from its own
+        /// thread while participants read it from theirs.
+        bool &forced_blocklist_enumeration_failure()
+        {
+            static bool fail = false;
+            return fail;
+        }
+
         // Substitution installed by force_allowed_interfaces_for_test, guarded for the
         // same reason as the one above: a test installs it from its own thread while
         // participants read it from theirs.
@@ -265,6 +277,27 @@ namespace provizio::dds::detail
             static std::atomic<bool> not_applied{false};
             return not_applied;
         }
+
+        /// Set by the platform backends when a classification ran without the host's
+        /// interface-kind information, and cleared by whoever reports it. Process-wide and
+        /// re-armable, unlike the latch above: this describes one enumeration rather than a
+        /// property of the process, and a lookup that starts failing again after the first
+        /// report is worth a second line.
+        std::atomic<bool> &interface_kind_lookup_failed()
+        {
+            static std::atomic<bool> failed{false};
+            return failed;
+        }
+
+        /// Set by force_link_kind_lookup_failure_for_test. Atomic rather than mutex-guarded
+        /// like the two forced-enumeration flags beside it, because the backend reads it on
+        /// whatever thread is enumerating while a test writes it from its own, and it guards
+        /// no other state.
+        std::atomic<bool> &forced_link_kind_lookup_failure()
+        {
+            static std::atomic<bool> fail{false};
+            return fail;
+        }
     }  // namespace
 
     scoped_vpn_blocklist_cache::scoped_vpn_blocklist_cache() noexcept
@@ -300,6 +333,19 @@ namespace provizio::dds::detail
     bool vpn_exclusion_applies_to_transports() noexcept
     {
         return !vpn_exclusion_not_applied().load(std::memory_order_relaxed);
+    }
+
+    void report_interface_kind_lookup_failed() noexcept
+    {
+        interface_kind_lookup_failed().store(true, std::memory_order_relaxed);
+    }
+
+    bool take_interface_kind_lookup_failure_report() noexcept
+    {
+        // Exchange rather than load-then-store: two participants created concurrently would
+        // otherwise both see the flag set and both report, which is the repetition the
+        // take-once contract exists to prevent.
+        return interface_kind_lookup_failed().exchange(false, std::memory_order_relaxed);
     }
 
     bool is_vpn_description(std::string_view description)
@@ -351,6 +397,11 @@ namespace provizio::dds::detail
         return vpn_kinds.find(kind) != vpn_kinds.end();
     }
 #endif
+
+    bool is_loopback_address(const std::string_view address)
+    {
+        return address.rfind("127.", 0) == 0 || address == "::1";
+    }
 
     bool excluded_as_vpn_interface(const std::string &name, const bool platform_says_vpn)
     {
@@ -475,7 +526,11 @@ namespace provizio::dds::detail
         std::unordered_set<std::string> seen_addresses;
         for (const auto &info : found)
         {
-            const bool is_loopback = info.type == eprosima::fastdds::rtps::IPFinder::IP4_LOCAL;
+            // By address text, not by IPFinder::IP4_LOCAL: that type is an exact 127.0.0.1
+            // compare, and a second loopback-range address on lo (a 127.0.1.1 alias, a service
+            // address) would then count as a REAL interface -- switching netmask filtering on
+            // for the host's one NIC and leaving the alias sending, and warning, per datagram.
+            const bool is_loopback = is_loopback_address(info.name);
             if (info.type != eprosima::fastdds::rtps::IPFinder::IP4 && !is_loopback)
             {
                 // IPv4 only: an interface holding no IPv4 address can neither be blocked by
@@ -513,6 +568,22 @@ namespace provizio::dds::detail
         forced_blocklist_entries() = std::move(entries);
     }
 
+    void force_vpn_blocklist_enumeration_failure_for_test(const bool fail)
+    {
+        const std::lock_guard<std::mutex> lock{forced_blocklist_mutex()};
+        forced_blocklist_enumeration_failure() = fail;
+    }
+
+    void force_link_kind_lookup_failure_for_test(const bool fail)
+    {
+        forced_link_kind_lookup_failure().store(fail, std::memory_order_relaxed);
+    }
+
+    bool link_kind_lookup_forced_to_fail() noexcept
+    {
+        return forced_link_kind_lookup_failure().load(std::memory_order_relaxed);
+    }
+
     std::unordered_set<std::string> vpn_interface_blocklist_entries(bool *const enumeration_failed)
     {
         if (enumeration_failed != nullptr)
@@ -522,6 +593,19 @@ namespace provizio::dds::detail
 
         {
             const std::lock_guard<std::mutex> lock{forced_blocklist_mutex()};
+            if (forced_blocklist_enumeration_failure())
+            {
+                // Checked before the substitution, so a case can force a failure while a
+                // substituted set stands for what the host would have reported had the
+                // reading succeeded -- which is what makes "leave every list exactly as it
+                // stands" observable rather than indistinguishable from an empty host.
+                if (enumeration_failed != nullptr)
+                {
+                    *enumeration_failed = true;
+                }
+                return {};
+            }
+
             const auto &forced = forced_blocklist_entries();
             if (forced)
             {

@@ -876,6 +876,58 @@ namespace provizio::dds
 
     void domain_participant::refresh_vpn_interface_blocklist()
     {
+        // Whether this participant is the one applying the exclusion, which decides what the
+        // guard below does with an interface-kind-lookup report. Set once the branches that
+        // step aside have all been passed.
+        bool applying_the_exclusion = false;
+
+        // Consumes whatever interface-kind-lookup report THIS refresh's own enumerations
+        // produced, however this function returns. A guard rather than a call before each
+        // return, for the same reason no_link_kinds() is a funnel in address_snapshot_linux.cpp:
+        // the ways out are several and a branch added later must not be able to skip it.
+        //
+        // Leaving a report unconsumed is not merely a lost line. The flag is process-wide, so
+        // the next participant to refresh picks it up and logs it against ITS domain -- having
+        // itself classified the host with full kind information -- while the participant whose
+        // enumeration actually degraded says nothing. Three of the branches below enumerate
+        // before returning (the caller-owns and netmask-OFF branches ask whether the host has
+        // a tunnel at all, and the failed-read branch is a reading), so all three can arm it.
+        //
+        // Reported only where this participant applies the exclusion. Where it stepped aside,
+        // the branch that did so has already said something strictly more useful about the
+        // same participant -- that the exclusion is not reaching its transports at all -- and
+        // how the classifier reached verdicts nothing acts on would only bury it. Taking it
+        // there regardless is the point: dropped deliberately by the participant it belongs
+        // to, rather than left to mislead the next one.
+        //
+        // Swallows, and is noexcept because ~scope_exit is: composing the message allocates,
+        // and letting a bad_alloc out of a destructor would terminate the process over a
+        // diagnostic. The same rule flush_pending_vpn_blocklist_log follows -- a report must
+        // not decide whether the operation it describes succeeds. The take still happens
+        // first, so a throw cannot leave the flag armed for the next participant either.
+        const scope_exit kind_lookup_report_guard{[this, &applying_the_exclusion]() noexcept {
+            if (!detail::take_interface_kind_lookup_failure_report() || !applying_the_exclusion)
+            {
+                return;
+            }
+            try
+            {
+                stash_vpn_blocklist_log(
+                    log_level::warning,
+                    "could not read this host's interface kinds while configuring domain " + std::to_string(domain_id) +
+                        ": VPN / tunnel interfaces are being identified by name alone, so one renamed away from the "
+                        "usual names (tailscale0, wg0, tun0, ...) is treated as ordinary hardware and DDS will bind "
+                        "and announce it. Name it in " +
+                        detail::allow_vpn_interfaces_env +
+                        " if that is intended, or exclude it in your own transport descriptors' interface_blocklist.");
+            }
+            // Reporting is what threw, so there is nothing left to report the failure with -- and
+            // a diagnostic must never propagate out of a destructor.
+            catch (...)  // NOLINT(bugprone-empty-catch): nothing to handle it with, see above
+            {
+            }
+        }};
+
         // Nothing of ours to configure when the caller took over transport
         // configuration — XML they wrote themselves (see transports_come_from_user_xml:
         // their descriptors, blocklist and all, are the ones sitting in cached_qos) or
@@ -962,12 +1014,45 @@ namespace provizio::dds
         // empty host would unblock a tunnel that is still up -- on exactly the rebuild a
         // network change triggered, which is when the enumeration is most likely to fail
         // and the exclusion most needed. Leaving every list exactly as it stands is the one
-        // answer that cannot be wrong: the tunnel that was blocked stays blocked, and the
-        // next creation or rebuild reads the host again.
+        // answer that cannot be wrong for the TRANSPORTS: the tunnel that was blocked stays
+        // blocked, and the next creation or rebuild reads the host again. It says nothing
+        // about what the transports were left binding, though, which is why the branch below
+        // reports to change detection as well as returning.
         bool enumeration_failed = false;
         const auto blocked = detail::vpn_interface_blocklist_entries(&enumeration_failed);
+
         if (enumeration_failed)
         {
+            // Change detection has to learn this, and the first construction is why. There
+            // is nothing in the transports yet for "leave every list exactly as it stands"
+            // to preserve, so they keep Fast-DDS' default -- no interface_blocklist at all
+            // -- and DDS binds and announces every tunnel the host has. Without the report,
+            // vpn_exclusion_applies_to_transports() would keep saying the exclusion reached
+            // the transports and the snapshot filter would keep dropping that same tunnel,
+            // leaving a re-auth or a reconnect with a dead locator no rebuild replaces. The
+            // two filters disagreeing about one interface is the one outcome neither may
+            // produce (see report_vpn_exclusion_not_applied). Reported on a rebuild too,
+            // where the previously applied entries do still stand: the flag is one-way and
+            // conservative by design, a tunnel that came up since that reading is bound and
+            // unwatched exactly as at first construction, and watching one that is in fact
+            // excluded costs an unnecessary rebuild at worst.
+            detail::report_vpn_exclusion_not_applied();
+
+            // Said once per participant, for the reason the branches above are: silence
+            // here is what an operator gets when the exclusion is documented as on by
+            // default and did not apply. Not gated on the host having a tunnel up, unlike
+            // those branches -- whether it has one is precisely what could not be read.
+            if (!vpn_exclusion_skip_reported)
+            {
+                vpn_exclusion_skip_reported = true;
+                stash_vpn_blocklist_log(
+                    log_level::warning,
+                    "could not read this host's network interfaces while configuring domain " +
+                        std::to_string(domain_id) +
+                        ": this participant keeps whatever VPN / tunnel exclusion it already had (none, if this "
+                        "is its first creation) and may bind and announce a tunnel. The next participant "
+                        "creation, or the next network-recovery rebuild, reads the host again.");
+            }
             return;
         }
 
@@ -1025,8 +1110,37 @@ namespace provizio::dds
             // the duplication this feature removes from the tunnel onto the LAN. Leaving
             // every list exactly as it stands cannot be wrong: the next creation or rebuild
             // reads the host again.
+            //
+            // And change detection is told, for the same reason as the failed blocklist read
+            // above: nothing was applied, so on a first creation the transports carry no
+            // exclusion at all and DDS binds and announces every tunnel the host has. Told
+            // even where this reading found nothing to block, because "the next rebuild
+            // reads the host again" is exactly what a silent bail-out would forfeit: a
+            // tunnel coming up later would be dropped from the snapshot, so no rebuild would
+            // be triggered, so nothing would ever re-read the host -- leaving it bound and
+            // unwatched for the life of the process.
+            detail::report_vpn_exclusion_not_applied();
+
+            if (!vpn_exclusion_skip_reported)
+            {
+                vpn_exclusion_skip_reported = true;
+                stash_vpn_blocklist_log(
+                    log_level::warning,
+                    "could not read which interfaces would be left after excluding this host's VPN / tunnel "
+                    "interface(s) on domain " +
+                        std::to_string(domain_id) +
+                        ": this participant keeps whatever exclusion it already had (none, if this is its first "
+                        "creation) and may bind and announce a tunnel. Applying the exclusion without knowing "
+                        "what is left would send a copy of every unicast datagram out of each remaining "
+                        "interface, which is worse. The next creation or rebuild reads the host again.");
+            }
             return;
         }
+        // Past every branch that steps aside: from here this participant writes its own
+        // descriptors, so a classification that ran on names alone is acted on and the guard
+        // installed at the top of this function reports it.
+        applying_the_exclusion = true;
+
         const auto real_interface_count = static_cast<std::size_t>(
             std::count_if(allowed_interfaces.begin(), allowed_interfaces.end(),
                           [](const detail::allowed_interface &entry) { return !entry.is_loopback; }));
@@ -1274,8 +1388,12 @@ namespace provizio::dds
         {
             // Test hook: behave exactly as Fast-DDS does when it cannot create a
             // participant — return null without throwing.
-            log_error() << "participant creation failed on domain " << domain_id
-                        << " (forced by fail_next_participant_creation_for_test)";
+            // Stashed rather than logged: this runs from the reset with both lifecycle locks
+            // held as well as from the constructor, and logging.h promises a log callback may
+            // publish onto a DDS topic, which takes the lifecycle lock.
+            stash_vpn_blocklist_log(log_level::error, "participant creation failed on domain " +
+                                                          std::to_string(domain_id) +
+                                                          " (forced by fail_next_participant_creation_for_test)");
             return nullptr;
         }
 
@@ -1872,9 +1990,16 @@ namespace provizio::dds
             participant = create_fastdds_participant();
             if (participant == nullptr)
             {
-                log_error() << "failed to recreate participant on domain " << domain_id
-                            << "; endpoints left in torn-down state, will be retried by the "
-                               "network-recovery safety-net check";
+                // Every diagnostic in this locked scope is STASHED, never logged: registration_mutex
+                // and reset_mutex are both held exclusively here, and logging.h promises a log
+                // callback may publish onto a DDS topic -- which takes reset_mutex shared on this
+                // very thread, a recursive acquire that glibc reports as EDEADLK and MSVC's
+                // shared_mutex simply deadlocks on. flush_vpn_blocklist_log, declared outside the
+                // locked block, emits them once both locks are released, on every exit path.
+                stash_vpn_blocklist_log(log_level::error,
+                                        "failed to recreate participant on domain " + std::to_string(domain_id) +
+                                            "; endpoints left in torn-down state, will be retried by the "
+                                            "network-recovery safety-net check");
                 // Bump generation anyway so any in-flight teardown observing the
                 // mismatch skips its Fast-DDS-side deletes (the contained entities
                 // were freed by delete_contained_entities above).
@@ -1902,8 +2027,10 @@ namespace provizio::dds
                 {
                     if (participant->register_type(type_pair.second) != RETCODE_OK)
                     {
-                        log_error() << "type re-registration failed on domain " << domain_id << " for type '"
-                                    << type_pair.first << "'";
+                        // Stashed: see the recreate-failure report above.
+                        stash_vpn_blocklist_log(log_level::error, "type re-registration failed on domain " +
+                                                                      std::to_string(domain_id) + " for type '" +
+                                                                      type_pair.first + "'");
                     }
                 }
             }
@@ -1919,9 +2046,12 @@ namespace provizio::dds
                 catch (const std::exception &exception)
                 {
                     any_endpoint_failed = true;
-                    log_error() << "endpoint rebuild failed on domain " << domain_id << ": " << exception.what()
-                                << "; this endpoint stays inactive (publish/take return failure) until the "
-                                   "network-recovery safety-net check retries the reset";
+                    // Stashed: see the recreate-failure report above.
+                    stash_vpn_blocklist_log(log_level::error,
+                                            "endpoint rebuild failed on domain " + std::to_string(domain_id) + ": " +
+                                                exception.what() +
+                                                "; this endpoint stays inactive (publish/take return failure) until "
+                                                "the network-recovery safety-net check retries the reset");
                 }
             }
 

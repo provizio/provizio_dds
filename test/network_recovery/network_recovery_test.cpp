@@ -379,6 +379,24 @@ namespace
         const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
 
         auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+
+        // The snapshot is SUBSTITUTED for the duration, so that "does not actually change" is
+        // true by construction rather than by the host holding still. Reading the real host
+        // here makes the case assert something it does not control: a runner whose network
+        // comes up mid-test produces a genuine change, a genuine rebuild, and a failure that
+        // looks like the coalescer letting a no-change event through. Seen exactly so on a
+        // macos-15-intel runner -- "network change detected: +1 / -0 interface address(es)
+        // (0 -> 1)" landed inside the burst below, and the case reported reset_count=1.
+        // The sibling cases already force the snapshot for the same reason.
+        //
+        // Seeded as the last known snapshot too, so the first injected event compares equal
+        // rather than reading as the initial-baseline transition.
+        const provizio::dds::detail::address_snapshot steady{
+            {provizio::dds::detail::interface_address{"provizio_test_steady_if", "203.0.113.11"}}};
+        coordinator.wait_for_idle();
+        coordinator.force_snapshot_for_test(steady);
+        coordinator.seed_last_known_snapshot_for_test(steady);
+
         const auto reset_before = coordinator.reset_count_for_test();
         const auto skipped_before = coordinator.skipped_reset_count_for_test();
 
@@ -395,6 +413,10 @@ namespace
 
         const auto reset_after = coordinator.reset_count_for_test();
         const auto skipped_after = coordinator.skipped_reset_count_for_test();
+
+        // Restored before the assertions, so a failing run still leaves the coordinator
+        // reading the real host for whatever runs after it.
+        coordinator.force_snapshot_for_test(std::nullopt);
 
         passed &= EXPECT(reset_after == reset_before);          // no participant rebuild
         passed &= EXPECT(skipped_after == skipped_before + 1);  // exactly one coalesced burst observed
@@ -420,13 +442,24 @@ namespace
 
         auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
 
-        // last_known_snapshot was seeded with the real host snapshot when this
-        // participant registered. Build a start snapshot that DIFFERS from it (an
-        // extra address, gone by the real end-snapshot) so the burst "deviated"
-        // mid-window yet returns to the real set by the time it settles.
-        auto simulated_start = provizio::dds::detail::capture_address_snapshot();
-        simulated_start.insert(
+        // The end-state carries an address that the burst-start does NOT: that address
+        // left and came back inside the window, which is the shape that needs a rebuild
+        // (whatever was bound to it died while it was gone). The reverse shape — an extra
+        // address at burst start, gone by the end — is an address that appeared and
+        // vanished; nothing was ever bound to it, and a rebuild would achieve nothing.
+        //
+        // Both snapshots are substituted rather than read from the host, so the case runs
+        // identically in a CI container, whose snapshot is legitimately empty (veth is
+        // filtered out by design) and in which nothing could be made to return.
+        auto end_state = provizio::dds::detail::capture_address_snapshot();
+        end_state.insert(
             provizio::dds::detail::interface_address{"provizio_test_transient_if", "203.0.113.7"});  // TEST-NET-3
+        auto simulated_start = end_state;
+        simulated_start.erase(provizio::dds::detail::interface_address{"provizio_test_transient_if", "203.0.113.7"});
+
+        coordinator.wait_for_idle();
+        coordinator.force_snapshot_for_test(end_state);
+        coordinator.seed_last_known_snapshot_for_test(end_state);
 
         const auto reset_before = coordinator.reset_count_for_test();
         const auto skipped_before = coordinator.skipped_reset_count_for_test();
@@ -437,11 +470,360 @@ namespace
         const auto reset_after = coordinator.reset_count_for_test();
         const auto skipped_after = coordinator.skipped_reset_count_for_test();
 
+        coordinator.force_snapshot_for_test(std::nullopt);
+
         passed &= EXPECT(reset_after == reset_before + 1);  // transient → participant rebuild
         passed &= EXPECT(skipped_after == skipped_before);  // NOT coalesced away as "no change"
 
         std::cout << "coalescer_resets_on_transient_flap: " << (passed ? "PASS" : "FAIL")
                   << " (reset_count=" << reset_after << " skipped=" << skipped_after << ")" << '\n';
+        return passed ? 0 : 1;
+    }
+
+    int test_rebuild_on_address_change()
+    {
+        // "Rebuild only for what was gained" is about snapshot ENTRIES, not interfaces, and
+        // an entry is (interface name, address, prefix length). So re-addressing an
+        // interface that never went away is a gain — the old entry leaves and a new one
+        // arrives — and so is re-subnetting one without changing its address at all, which
+        // changes which peers Fast-DDS considers on-link. Both must rebuild; only a change
+        // that is purely subtractive must not.
+        bool passed = true;
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+
+        auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+        coordinator.wait_for_idle();
+
+        const provizio::dds::detail::interface_address before{"provizio_test_dhcp_if", "203.0.113.20", 24};
+        const provizio::dds::detail::interface_address readdressed{"provizio_test_dhcp_if", "203.0.113.21", 24};
+        const provizio::dds::detail::interface_address resubnetted{"provizio_test_dhcp_if", "203.0.113.21", 16};
+
+        // A new address on an interface that never left.
+        coordinator.seed_last_known_snapshot_for_test(provizio::dds::detail::address_snapshot{before});
+        coordinator.force_snapshot_for_test(provizio::dds::detail::address_snapshot{readdressed});
+        const auto reset_before_readdress = coordinator.reset_count_for_test();
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.reset_count_for_test() == reset_before_readdress + 1);
+
+        // Same address, different prefix — Fast-DDS' on-link decision changes with it.
+        coordinator.force_snapshot_for_test(provizio::dds::detail::address_snapshot{resubnetted});
+        const auto reset_before_resubnet = coordinator.reset_count_for_test();
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.reset_count_for_test() == reset_before_resubnet + 1);
+
+        coordinator.force_snapshot_for_test(std::nullopt);
+
+        std::cout << "rebuild_on_address_change: " << (passed ? "PASS" : "FAIL")
+                  << " (reset_count=" << coordinator.reset_count_for_test() << ")" << '\n';
+        return passed ? 0 : 1;
+    }
+
+    int test_no_baseline_empty_list_is_not_a_rebuild()
+    {
+        // The other half of the rule above: with no baseline, a first readable list that is
+        // EMPTY has nothing a rebuild could bind, so it must not rebuild -- the same judgement
+        // the added == 0 path makes in steady state. Worth pinning separately because "no usable
+        // address" is the normal reading inside a container whose only device is filtered out,
+        // and rebuilding every participant on startup there would be a pure regression.
+        bool passed = true;
+
+        auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+        coordinator.force_enumeration_failure_for_test(true);
+        coordinator.force_snapshot_for_test(provizio::dds::detail::address_snapshot{});
+
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+        passed &= EXPECT(participant != nullptr);
+
+        coordinator.wait_for_idle();
+        const auto reset_before = coordinator.reset_count_for_test();
+        const auto skipped_before = coordinator.skipped_reset_count_for_test();
+
+        coordinator.force_enumeration_failure_for_test(false);
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.reset_count_for_test() == reset_before);
+        passed &= EXPECT(coordinator.skipped_reset_count_for_test() > skipped_before);
+
+        coordinator.force_snapshot_for_test(std::nullopt);
+
+        std::cout << "no_baseline_empty_list_is_not_a_rebuild: " << (passed ? "PASS" : "FAIL")
+                  << " (reset_count=" << coordinator.reset_count_for_test() << ")" << '\n';
+        return passed ? 0 : 1;
+    }
+
+    int test_unreadable_interfaces_are_not_a_change()
+    {
+        // Asking the OS for its interfaces can fail — getifaddrs is a sysctl(NET_RT_IFLIST)
+        // pair on macOS and can lose a race with a routing-table change, GetAdaptersAddresses
+        // can fail outright. Returning an empty set for that is indistinguishable from a host
+        // that genuinely has no usable address, so a failed read used to present itself as
+        // "every address disappeared" and rebuild every participant — then rebuild them again
+        // when the next read succeeded. Two rebuilds, no network change, and any in-flight
+        // request/response lost with them.
+        //
+        // What this pins: a failed read decides nothing and leaves the last known set alone,
+        // so the next successful read of the SAME set is not a change either.
+        bool passed = true;
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+
+        auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+
+        auto host_addresses = provizio::dds::detail::capture_address_snapshot();
+        host_addresses.insert(provizio::dds::detail::interface_address{"provizio_test_present_if", "203.0.113.11"});
+
+        coordinator.wait_for_idle();
+        coordinator.force_snapshot_for_test(host_addresses);
+        coordinator.seed_last_known_snapshot_for_test(host_addresses);
+
+        const auto reset_before = coordinator.reset_count_for_test();
+        const auto skipped_before = coordinator.skipped_reset_count_for_test();
+
+        // The read fails.
+        coordinator.force_enumeration_failure_for_test(true);
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.reset_count_for_test() == reset_before);
+        // Not even a skipped reset: nothing was decided at all.
+        passed &= EXPECT(coordinator.skipped_reset_count_for_test() == skipped_before);
+
+        // The read succeeds again with the set unchanged. Had the failure been recorded as
+        // an empty snapshot, this would read as every address returning, and rebuild.
+        coordinator.force_enumeration_failure_for_test(false);
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.reset_count_for_test() == reset_before);
+        passed &= EXPECT(coordinator.skipped_reset_count_for_test() == skipped_before + 1);
+
+        coordinator.force_snapshot_for_test(std::nullopt);
+
+        std::cout << "unreadable_interfaces_are_not_a_change: " << (passed ? "PASS" : "FAIL")
+                  << " (reset_count=" << coordinator.reset_count_for_test() << ")" << '\n';
+        return passed ? 0 : 1;
+    }
+
+    // Case: how OFTEN a host that cannot be asked for its interfaces says so. The read is
+    // attempted on every kernel event and on every safety-net tick, so a host that has
+    // genuinely lost the ability to enumerate would fill the log with one identical line
+    // every few seconds for the life of the process -- and the operator watching for the
+    // actual fault would be reading it in a screenful of that. The other half is the
+    // re-arm: a warning suppressed forever after the first streak would leave a LATER
+    // outage completely silent, which is the failure this diagnostic exists to catch.
+    int test_unreadable_interfaces_warn_once_per_streak()
+    {
+        bool passed = true;
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+        passed &= EXPECT(participant != nullptr);
+
+        auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+        coordinator.wait_for_idle();
+
+        // Installed after the participant exists: its own creation reads the interfaces
+        // too, and this case is about the reads it drives deliberately.
+        const log_capture capture;
+        constexpr std::string_view needle{"could not read this host's network interfaces"};
+
+        const auto warnings = [&capture, needle] {
+            std::size_t found = 0;
+            for (const auto &entry : capture.snapshot())
+            {
+                if (entry.message.find(needle) != std::string::npos)
+                {
+                    ++found;
+                }
+            }
+            return found;
+        };
+
+        // The streak begins.
+        coordinator.force_enumeration_failure_for_test(true);
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(warnings() == 1);
+
+        // Still failing: the same line again would say nothing new.
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(warnings() == 1);
+
+        // A successful read ends the streak. Nothing is logged for it -- recovering the
+        // ability to enumerate is not news -- but the warning must be armed again.
+        coordinator.force_enumeration_failure_for_test(false);
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(warnings() == 1);
+
+        // A second, separate outage, which an operator has to hear about.
+        coordinator.force_enumeration_failure_for_test(true);
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        const auto after_second_streak = warnings();
+        passed &= EXPECT(after_second_streak == 2);
+
+        coordinator.force_enumeration_failure_for_test(false);
+
+        std::cout << "unreadable_interfaces_warn_once_per_streak: " << (passed ? "PASS" : "FAIL") << " ("
+                  << after_second_streak << " warning(s) over two streaks)" << '\n';
+        return passed ? 0 : 1;
+    }
+
+    int test_no_baseline_rebuilds_for_first_readable_list()
+    {
+        // The interface read at startup can fail exactly as any later one can, and the baseline
+        // is seeded from it. A failure there is not "no addresses" and not "the addresses we
+        // have" -- it is not knowing, and specifically not knowing what the participants
+        // actually bound to.
+        //
+        // So the first readable list REBUILDS rather than being quietly adopted. An interface
+        // can come up while the list is unreadable, and adopting it as the baseline would lose
+        // that rebuild permanently: the address would no longer count as a gain against any
+        // later snapshot, so nothing would ever bind it short of a process restart. An extra
+        // rebuild costs one reconnect; a missed one costs the interface.
+        //
+        // What this pins: a failed seed leaves NO baseline, the first readable list rebuilds
+        // exactly once, and a real change measured from it still rebuilds after that.
+        bool passed = true;
+
+        auto host_addresses = provizio::dds::detail::capture_address_snapshot();
+        host_addresses.insert(provizio::dds::detail::interface_address{"provizio_test_seeded_if", "203.0.113.30"});
+
+        // Both hooks are set BEFORE the participant exists, so the failure is already in force
+        // when register_participant seeds the baseline, and every later read returns one known
+        // set. Forcing the snapshot as well is what makes this deterministic on a developer
+        // machine: a real kernel event can fire at any point below, and it must not be able to
+        // adopt a DIFFERENT list than the one this test reasons about. The failure flag wins
+        // over the forced snapshot in current_snapshot(), so the seed still fails.
+        auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+        coordinator.force_enumeration_failure_for_test(true);
+        coordinator.force_snapshot_for_test(host_addresses);
+
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+        passed &= EXPECT(participant != nullptr);
+
+        coordinator.wait_for_idle();
+        const auto reset_before = coordinator.reset_count_for_test();
+
+        // Reads start succeeding. With no baseline, everything now visible counts as new, so
+        // this rebuilds -- exactly once. Injected twice to pin that: the second pass finds the
+        // baseline in place and must see no change, which is also what proves the first pass
+        // stored it. One rebuild whichever pass performs it, so this is not timing-dependent
+        // even though a real kernel event may get there first.
+        coordinator.force_enumeration_failure_for_test(false);
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.reset_count_for_test() == reset_before + 1);
+
+        // A genuine gain measured from that baseline still rebuilds -- establishing the baseline
+        // must not have left the detector inert.
+        auto grown = host_addresses;
+        grown.insert(provizio::dds::detail::interface_address{"provizio_test_seeded_if2", "203.0.113.31"});
+        coordinator.force_snapshot_for_test(grown);
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.reset_count_for_test() == reset_before + 2);
+
+        coordinator.force_snapshot_for_test(std::nullopt);
+
+        std::cout << "no_baseline_rebuilds_for_first_readable_list: " << (passed ? "PASS" : "FAIL")
+                  << " (reset_count=" << coordinator.reset_count_for_test() << ")" << '\n';
+        return passed ? 0 : 1;
+    }
+
+    int test_no_rebuild_on_address_loss()
+    {
+        // An address going away is not worth a rebuild: nothing can be bound to what is
+        // gone, and tearing down endpoints that still work over the remaining interfaces
+        // costs every in-flight sample for no gain. The rebuild belongs to the moment the
+        // address comes BACK, which is when it can achieve something — so this drives the
+        // pair and asserts exactly one rebuild across both halves.
+        //
+        // Losing and regaining the SAME address is the case that matters, and the one a
+        // set-difference alone gets wrong: a host that ends up where it started looks
+        // unchanged, yet its sockets died in between. The snapshot is substituted so both
+        // halves are reachable on any host, CI containers included.
+        bool passed = true;
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+
+        auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+
+        auto with_address = provizio::dds::detail::capture_address_snapshot();
+        with_address.insert(provizio::dds::detail::interface_address{"provizio_test_lost_if", "203.0.113.9"});
+        auto without_address = with_address;
+        without_address.erase(provizio::dds::detail::interface_address{"provizio_test_lost_if", "203.0.113.9"});
+
+        coordinator.wait_for_idle();
+        coordinator.seed_last_known_snapshot_for_test(with_address);
+
+        // Half one: the address goes away and stays away.
+        coordinator.force_snapshot_for_test(without_address);
+        const auto reset_before_loss = coordinator.reset_count_for_test();
+        const auto skipped_before_loss = coordinator.skipped_reset_count_for_test();
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.reset_count_for_test() == reset_before_loss);
+        passed &= EXPECT(coordinator.skipped_reset_count_for_test() == skipped_before_loss + 1);
+
+        // Half two: the same address returns. The loss above must have been adopted as the
+        // new baseline, or this would read as "no change" and never rebuild.
+        coordinator.force_snapshot_for_test(with_address);
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        const auto reset_after_return = coordinator.reset_count_for_test();
+        passed &= EXPECT(reset_after_return == reset_before_loss + 1);
+
+        coordinator.force_snapshot_for_test(std::nullopt);
+
+        std::cout << "no_rebuild_on_address_loss: " << (passed ? "PASS" : "FAIL") << " (reset_count "
+                  << reset_before_loss << " -> " << reset_after_return << ")" << '\n';
+        return passed ? 0 : 1;
+    }
+
+    int test_safety_net_no_rebuild_on_address_loss()
+    {
+        // The periodic tick decides exactly as the event path does, and for the same
+        // reason: it exists to catch changes whose kernel events were never delivered (a
+        // dropped ENOBUFS datagram, a monitor that died between ticks), and such a change
+        // is no more deserving of a rebuild than one that arrived normally. A pure loss
+        // therefore adopts the smaller set and rebuilds nothing here too. Before the
+        // decision was shared, this path rebuilt every participant for a loss the event
+        // path deliberately skips — a disruption no user could tell from a real recovery.
+        bool passed = true;
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+
+        auto &coordinator = provizio::dds::detail::network_recovery_coordinator::instance();
+
+        auto with_address = provizio::dds::detail::capture_address_snapshot();
+        with_address.insert(provizio::dds::detail::interface_address{"provizio_test_lost_if", "203.0.113.9"});
+        auto without_address = with_address;
+        without_address.erase(provizio::dds::detail::interface_address{"provizio_test_lost_if", "203.0.113.9"});
+
+        coordinator.wait_for_idle();
+        coordinator.seed_last_known_snapshot_for_test(with_address);
+
+        // Half one: the tick finds the address gone, with no event having reported it.
+        coordinator.force_snapshot_for_test(without_address);
+        const auto reset_before_loss = coordinator.reset_count_for_test();
+        const auto skipped_before_loss = coordinator.skipped_reset_count_for_test();
+        coordinator.run_safety_net_tick_for_test();
+        passed &= EXPECT(coordinator.reset_count_for_test() == reset_before_loss);
+        passed &= EXPECT(coordinator.skipped_reset_count_for_test() == skipped_before_loss + 1);
+
+        // Half two: the same address returns, and THAT rebuilds — which also proves the
+        // loss was adopted as the baseline rather than merely ignored.
+        coordinator.force_snapshot_for_test(with_address);
+        coordinator.run_safety_net_tick_for_test();
+        const auto reset_after_return = coordinator.reset_count_for_test();
+        passed &= EXPECT(reset_after_return == reset_before_loss + 1);
+
+        coordinator.force_snapshot_for_test(std::nullopt);
+
+        std::cout << "safety_net_no_rebuild_on_address_loss: " << (passed ? "PASS" : "FAIL") << " (reset_count "
+                  << reset_before_loss << " -> " << reset_after_return << ")" << '\n';
         return passed ? 0 : 1;
     }
 
@@ -841,7 +1223,6 @@ namespace
 
     int test_safety_net_detects_missed_change()
     {
-        using provizio::dds::detail::address_snapshot;
         using provizio::dds::detail::network_recovery_coordinator;
 
         bool passed = true;
@@ -852,12 +1233,23 @@ namespace
 
         const auto resets_before = coordinator.reset_count_for_test();
 
-        // Simulate "the host's addresses changed but no kernel event told us" — a
-        // dropped netlink datagram, a transition on a channel we don't subscribe to, or
-        // a change that raced the monitor's startup. Seeding a last-known snapshot the
-        // host cannot possibly match is equivalent from the tick's point of view.
-        const address_snapshot stale{{"provizio_test_missing_if", "203.0.113.9", 24}};  // TEST-NET-3
-        coordinator.seed_last_known_snapshot_for_test(stale);
+        // Simulate "the host's addresses changed but no kernel event told us" — a dropped
+        // netlink datagram, a transition on a channel we don't subscribe to, or a change
+        // that raced the monitor's startup.
+        //
+        // The CAPTURE is substituted, not the baseline seeded, and the difference matters:
+        // what the tick has to notice is an address the host GAINED without telling us,
+        // which is the only kind of change a rebuild can act on (see decide_and_apply — a
+        // pure loss adopts the smaller set and rebuilds nothing, on this path exactly as on
+        // the event path). Seeding a stale baseline and letting the tick read the real host
+        // would produce a gain only where the host happens to have an address at all: on a
+        // CI container, whose snapshot is legitimately empty because its veth is filtered
+        // out, it would read as a pure loss and correctly rebuild nothing. Mirrors the
+        // Python case, which substitutes its capture for the same reason.
+        auto with_unreported = provizio::dds::detail::capture_address_snapshot();
+        constexpr int unreported_prefix_length = 24;  // a /24 in TEST-NET-3 (RFC 5737)
+        with_unreported.insert({"provizio_test_missing_if", "203.0.113.9", unreported_prefix_length});
+        coordinator.force_snapshot_for_test(with_unreported);
 
         coordinator.run_safety_net_tick_for_test();
         passed &= EXPECT(coordinator.reset_count_for_test() == resets_before + 1);
@@ -867,7 +1259,68 @@ namespace
         coordinator.run_safety_net_tick_for_test();
         passed &= EXPECT(coordinator.reset_count_for_test() == resets_before + 1);
 
+        coordinator.force_snapshot_for_test(std::nullopt);
+
         std::cout << "safety_net_detects_missed_change: " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
+    }
+
+    // Case: a log callback may create a participant, even from the line the very first
+    // registration emits. logging.h promises exactly that, and this is the one diagnostic
+    // on that path that used to be logged from inside registry_mutex + monitor_mutex: the
+    // callback's make_domain_participant re-enters register_participant, which blocks on a
+    // non-recursive mutex the same thread already holds. A deadlock, not a slow path --
+    // so if this case ever regresses it hangs, and CTest's timeout is what reports it.
+    //
+    // The trigger is an interface read that fails at the first registration, which is not
+    // hypothetical: it is the macOS sysctl(NET_RT_IFLIST) race this feature exists to
+    // tolerate. Forced here rather than waited for.
+    int test_log_callback_may_create_participant()
+    {
+        using provizio::dds::detail::network_recovery_coordinator;
+
+        bool passed = true;
+        auto &coordinator = network_recovery_coordinator::instance();
+        coordinator.force_enumeration_failure_for_test(true);
+
+        std::atomic_bool callback_created_participant{false};
+        std::shared_ptr<provizio::dds::domain_participant> from_callback;
+        std::atomic_bool reentered{false};
+        auto previous =
+            provizio::dds::set_log_callback([&](const provizio::dds::log_level level, const std::string_view message) {
+                std::cout << "  [log] " << message << '\n' << std::flush;
+                // Once, and only for the line this case is about: a callback that creates a
+                // participant for every line would recurse without end.
+                if (level != provizio::dds::log_level::warning ||
+                    message.find("could not read this host's network interfaces") == std::string_view::npos ||
+                    reentered.exchange(true))
+                {
+                    return;
+                }
+                // Recovery-enabled deliberately: an "off" participant never registers, so it
+                // would not re-enter the function that holds the lock and would prove
+                // nothing.
+                from_callback = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+                callback_created_participant.store(from_callback != nullptr);
+            });
+
+        // The registration that starts the monitor, reads the interfaces, fails, and emits
+        // the warning. Reaching the next line at all is the assertion.
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+        coordinator.wait_for_idle();
+
+        provizio::dds::set_log_callback(std::move(previous));
+        coordinator.force_enumeration_failure_for_test(false);
+
+        passed &= EXPECT(participant != nullptr);
+        // Vacuity guard: silence from the callback would let this case pass without ever
+        // exercising the path, e.g. if the warning stopped being emitted at all.
+        passed &= EXPECT(reentered.load());
+        passed &= EXPECT(callback_created_participant.load());
+
+        from_callback.reset();
+
+        std::cout << "log_callback_may_create_participant: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;
     }
 
@@ -1079,6 +1532,30 @@ int main(int argc, char **argv)
     {
         return test_coalescer_skips_no_change();
     }
+    if (subcommand == "rebuild_on_address_change")
+    {
+        return test_rebuild_on_address_change();
+    }
+    if (subcommand == "unreadable_interfaces_warn_once_per_streak")
+    {
+        return test_unreadable_interfaces_warn_once_per_streak();
+    }
+    if (subcommand == "unreadable_interfaces_are_not_a_change")
+    {
+        return test_unreadable_interfaces_are_not_a_change();
+    }
+    if (subcommand == "no_rebuild_on_address_loss")
+    {
+        return test_no_rebuild_on_address_loss();
+    }
+    if (subcommand == "no_baseline_rebuilds_for_first_readable_list")
+    {
+        return test_no_baseline_rebuilds_for_first_readable_list();
+    }
+    if (subcommand == "no_baseline_empty_list_is_not_a_rebuild")
+    {
+        return test_no_baseline_empty_list_is_not_a_rebuild();
+    }
     if (subcommand == "coalescer_resets_on_transient_flap")
     {
         return test_coalescer_resets_on_transient_flap();
@@ -1104,6 +1581,10 @@ int main(int argc, char **argv)
     {
         return test_extra_interfaces_env();
     }
+    if (subcommand == "safety_net_no_rebuild_on_address_loss")
+    {
+        return test_safety_net_no_rebuild_on_address_loss();
+    }
     if (subcommand == "safety_net_env_clamped")
     {
         return test_safety_net_env_clamped();
@@ -1112,6 +1593,11 @@ int main(int argc, char **argv)
     {
         return test_safety_net_detects_missed_change();
     }
+    if (subcommand == "log_callback_may_create_participant")
+    {
+        return test_log_callback_may_create_participant();
+    }
+
     if (subcommand == "safety_net_reopens_dead_monitor")
     {
         return test_safety_net_reopens_dead_monitor();

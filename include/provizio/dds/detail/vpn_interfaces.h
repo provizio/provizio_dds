@@ -167,6 +167,19 @@ namespace provizio::dds::detail
     PROVIZIO_DDS_API bool excluded_as_vpn_interface(const std::string &name, bool platform_says_vpn);
 
     /**
+     * @brief Whether an address text names the loopback interface: anything in
+     * 127.0.0.0/8, or @c ::1.
+     *
+     * The whole /8, not just 127.0.0.1: an alias such as 127.0.1.1 or a service address on
+     * @c lo can reach no other host either, so for @c vpn_allowed_interfaces it needs the
+     * same netmask filter as 127.0.0.1 and must not count as a real interface. This is
+     * deliberately NOT Fast-DDS' @c IPFinder::IP4_LOCAL, which is an exact 127.0.0.1
+     * compare. Mirrors @c _is_loopback_address in python/network_recovery.py, and the two
+     * are held to the same verdicts by test/python/vpn_classifier_parity_test.py.
+     */
+    PROVIZIO_DDS_API bool is_loopback_address(std::string_view address);
+
+    /**
      * @brief The @c PROVIZIO_DDS_ALLOW_VPN_INTERFACES names that have re-admitted nothing,
      * lower-cased and sorted; empty when every name given has matched an interface this
      * process classified as a tunnel, when the variable names none, or when it was set to a
@@ -199,11 +212,13 @@ namespace provizio::dds::detail
      * transports, so nothing in this process may assume a tunnel is unbound.
      *
      * Called by @c domain_participant::refresh_vpn_interface_blocklist wherever it steps
-     * aside: the caller owns the transport configuration, or a participant-level netmask
-     * filter of @c OFF rules a blocklist out. Process-wide and one-way, because the
-     * consumer is process-wide (the address snapshot the recovery coordinator keeps) and
-     * because the safe direction is to watch an interface that might be bound rather than
-     * to ignore one that is.
+     * aside: the caller owns the transport configuration, a participant-level netmask
+     * filter of @c OFF rules a blocklist out, or the host's interfaces could not be read
+     * (which is not the same as having no tunnel, and on a first creation leaves the
+     * transports with no blocklist at all). Process-wide and one-way, because the consumer
+     * is process-wide (the address snapshot the recovery coordinator keeps) and because the
+     * safe direction is to watch an interface that might be bound rather than to ignore one
+     * that is.
      *
      * Not called for @c transport_mode::localhost_only: such a participant announces
      * nothing off this host and takes no part in auto-recovery, so it has no opinion on
@@ -228,6 +243,38 @@ namespace provizio::dds::detail
      * makes the whole process watch tunnels, which costs an unnecessary rebuild at worst.
      */
     PROVIZIO_DDS_API bool vpn_exclusion_applies_to_transports() noexcept;
+
+    /**
+     * @brief Record that an interface classification ran without the platform's own
+     * interface-kind information, so every verdict it produced came from names alone.
+     *
+     * Linux identifies a tunnel by its rtnetlink @c IFLA_INFO_KIND, which is what keeps
+     * the classification working for a device renamed away from the conventional prefixes
+     * (a WireGuard interface called @c office0). That dump can fail -- no @c AF_NETLINK
+     * socket, a kernel reply that never arrives, a dump cut short -- and the classifier
+     * then falls back to name prefixes, which is correct for every conventionally named
+     * tunnel and wrong for a renamed one: DDS binds and announces it as if it were
+     * ordinary hardware, which is the duplication this whole feature exists to remove.
+     *
+     * Recorded rather than logged, and process-wide, for the same reason
+     * @c take_unmatched_vpn_allow_override_names is: this runs deep inside a participant
+     * creation, under the lifecycle locks, where invoking the caller's log callback could
+     * deadlock. The participant takes the report once its locks are released.
+     */
+    PROVIZIO_DDS_API void report_interface_kind_lookup_failed() noexcept;
+
+    /**
+     * @brief Whether an interface classification has run without the platform's
+     * interface-kind information since this was last asked.
+     *
+     * Takes: answers @c true at most once per occurrence, so the caller need not latch and
+     * a process that keeps re-enumerating a host whose kind lookup keeps failing still says
+     * it once. Re-arms if the lookup fails again after being reported, because by then the
+     * operator has acted on the first line or the condition has outlived it.
+     *
+     * @return Whether a classification since the last call ran on names alone.
+     */
+    PROVIZIO_DDS_API bool take_interface_kind_lookup_failure_report() noexcept;
 
     /**
      * @brief Everything Fast-DDS should be handed as its transports'
@@ -380,6 +427,49 @@ namespace provizio::dds::detail
      * @param entries Substitute entries, or @c std::nullopt to enumerate the host again.
      */
     PROVIZIO_DDS_API void force_vpn_blocklist_entries_for_test(std::optional<std::unordered_set<std::string>> entries);
+
+    /**
+     * @brief Test hook: make @c vpn_interface_blocklist_entries report that the host could
+     * not be enumerated at all, or stop doing so.
+     *
+     * Separate from @c force_vpn_blocklist_entries_for_test for the same reason
+     * @c force_allowed_interfaces_enumeration_failure_for_test is separate from its
+     * substitution: a substituted set is an answer, not a reading of the host, so it can
+     * only ever express success. Without this the first enumeration's failure branch is
+     * unreachable from a test, and so is what depends on it -- leaving every interface list
+     * untouched AND telling change detection that this participant's transports may be
+     * binding a tunnel after all (see @c domain_participant::refresh_vpn_interface_blocklist).
+     *
+     * @param fail Whether the enumeration should report failure.
+     */
+    PROVIZIO_DDS_API void force_vpn_blocklist_enumeration_failure_for_test(bool fail);
+
+    /**
+     * @brief Test hook: make the platform's interface-kind lookup fail, or stop doing so.
+     *
+     * The third hook of the same shape as the two above, and for the same reason: a
+     * substituted answer can only express success, so a failure branch needs its own way in.
+     * Without it the only thing a test can do is call @c report_interface_kind_lookup_failed
+     * by hand, which pins the flag's own semantics and nothing about how a failing dump
+     * reaches it -- so deleting the report from the funnel every failure exit goes through
+     * would leave the suite green.
+     *
+     * Honoured only where such a lookup exists (Linux's rtnetlink dump). On the platforms
+     * that classify by name alone there is nothing to fail, so setting it changes nothing.
+     *
+     * @param fail Whether the interface-kind lookup should report failure.
+     */
+    PROVIZIO_DDS_API void force_link_kind_lookup_failure_for_test(bool fail);
+
+    /**
+     * @brief Whether @c force_link_kind_lookup_failure_for_test has been set.
+     *
+     * For the platform backends that perform a kind lookup, so they can take their failure
+     * path on demand. Not for general use.
+     *
+     * @return Whether the lookup should behave as though it failed.
+     */
+    PROVIZIO_DDS_API bool link_kind_lookup_forced_to_fail() noexcept;
 }  // namespace provizio::dds::detail
 
 #endif  // DDS_DETAIL_VPN_INTERFACES
