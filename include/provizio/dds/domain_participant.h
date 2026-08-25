@@ -25,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,7 @@
 #include <fastdds/dds/topic/qos/TopicQos.hpp>
 
 #include "provizio/dds/common.h"
+#include "provizio/dds/logging.h"
 #include "provizio/dds/network_recovery.h"
 #include "provizio/dds/topic.h"
 
@@ -508,10 +510,121 @@ namespace provizio::dds
         /// from @c trigger_network_recovery_reset.
         eprosima::fastdds::dds::DomainParticipant *create_fastdds_participant();
 
+        /// @brief Re-point the stored transports' interface blocklist at the host's
+        /// current VPN / tunnel addresses, so this participant neither binds nor
+        /// announces a locator on one (see detail/vpn_interfaces.h for why that
+        /// matters), and turn their netmask filter on for as long as that blocklist is
+        /// non-empty. Called immediately before every participant creation, not once in
+        /// the constructor: a tunnel can come up, go down or change address while the
+        /// process runs, and a rebuild triggered by a real network change must bind the
+        /// interface set that exists at that moment. A no-op when the transports came
+        /// from an XML profile or from FASTDDS_BUILTIN_TRANSPORTS — then no descriptor
+        /// of ours exists to configure, and the caller has taken over transport
+        /// configuration wholesale.
+        void refresh_vpn_interface_blocklist();
+
+        /// @brief Stash @p message, to be emitted at @p level by
+        /// @c flush_pending_vpn_blocklist_log, under @c pending_vpn_blocklist_log_mutex.
+        /// The one route for ANY diagnostic produced while a lifecycle lock is held -- the VPN
+        /// exclusion reports it was named for, and every report of the reset path (a
+        /// participant that could not be recreated, a type or an endpoint that could not be
+        /// rebuilt): logging.h promises a log callback may publish onto a DDS topic, and
+        /// publishing takes the lifecycle lock. One writer for every producer so the
+        /// synchronisation cannot be forgotten at a new call site.
+        void stash_vpn_blocklist_log(log_level level, std::string message);
+
+        /// @brief Emit the reports stashed by @c stash_vpn_blocklist_log, if any. MUST be
+        /// called with no participant lock held: it invokes the caller's log callback, which
+        /// is free to re-enter provizio APIs that take the lifecycle lock. @c noexcept because
+        /// it is called from a scope-exit guard during a reset: a throwing log callback must
+        /// not turn a diagnostic into a terminate.
+        void flush_pending_vpn_blocklist_log() noexcept;
+
         DomainId_t domain_id;
         bool recovery_enabled;
+        /// Last VPN / tunnel blocklist this participant logged, so an unchanged set is
+        /// reported once rather than on every creation and every recovery rebuild.
+        /// Touched only from create_fastdds_participant (from the constructor, or from
+        /// a reset that holds reset_mutex), so it needs no synchronisation of its own.
+        std::vector<std::string> last_logged_vpn_blocklist;
+        /// Reports produced under the participant's locks -- by refresh_vpn_interface_blocklist
+        /// and by the reset path -- and emitted by flush_pending_vpn_blocklist_log once they
+        /// are released.
+        /// Guarded, unlike its siblings here: those are touched only under the reset lock,
+        /// while these are deliberately read after that lock has been released, so two
+        /// concurrent resets of the same participant (a caller's
+        /// trigger_network_recovery_reset racing the coordinator's) would otherwise move
+        /// from and clear the same strings.
+        ///
+        /// A list rather than a single message: one refresh can have two independent things
+        /// to say -- which interfaces it excluded, and that a name given in
+        /// PROVIZIO_DDS_ALLOW_VPN_INTERFACES re-admitted none of them -- and the second is
+        /// worth saying precisely on the pass that produces the first.
+        std::vector<std::pair<log_level, std::string>> pending_vpn_blocklist_logs;
+        /// Guards @c pending_vpn_blocklist_logs, and nothing else. A leaf: never held while
+        /// calling out to the log callback or to Fast-DDS.
+        std::mutex pending_vpn_blocklist_log_mutex;
+        /// Whether this participant has already reported that it is NOT excluding VPN /
+        /// tunnel interfaces even though the host has some — because the caller owns the
+        /// transport configuration, or because a netmask filter of OFF rules the exclusion
+        /// out (see refresh_vpn_interface_blocklist). Neither condition can change while the
+        /// participant lives, so the report is worth making exactly once; without it, an
+        /// operator watching a metered uplink pay for duplicated traffic has nothing
+        /// anywhere to explain why the exclusion did not apply.
+        bool vpn_exclusion_skip_reported{false};
+        /// Whether this participant switched netmask filtering ON to suppress the duplicate
+        /// unicast sends whitelist mode would otherwise produce (see
+        /// refresh_vpn_interface_blocklist). Kept because it changes what the participant
+        /// can reach — a peer outside every local subnet, reachable only through a router,
+        /// stops receiving unicast — which is worth saying once, in the same line that
+        /// reports the exclusion.
+        bool netmask_filtering_applied{false};
+        /// The blocklist entries this participant actually appended last time, and
+        /// therefore the only ones the next refresh may remove. Recorded per append rather
+        /// than from the computed set: an entry already present is deliberately not
+        /// re-added, and recording it as ours anyway would have the next refresh delete
+        /// somebody else's entry. Same single-threaded access as
+        /// last_logged_vpn_blocklist.
+        std::unordered_set<std::string> last_applied_vpn_blocklist;
+        /// Allowlist entries this participant appended, so a later refresh removes exactly
+        /// those and leaves any the caller wrote. The allowlist exists to carry a netmask
+        /// filter per interface -- ON for loopback, which can reach no other host, and only
+        /// where it collapses real duplicates for the rest (see refresh_vpn_interface_blocklist).
+        std::unordered_set<std::string> last_applied_vpn_allowlist;
+        /// The transport descriptors this library created (whatever @c setup_transports
+        /// appended in the constructor), and the only ones @c
+        /// refresh_vpn_interface_blocklist may modify. @c setup_transports appends to
+        /// @c user_transports rather than replacing it, so a descriptor a caller
+        /// configured — including one from @c load_XML_profiles_file called directly,
+        /// which no environment probe can detect — sits in the same vector, is shared
+        /// process-wide through @c get_default_participant_qos, and must be left exactly
+        /// as the caller set it. The descriptors themselves rather than their addresses,
+        /// so "is this one ours?" is a question about the object and needs no argument
+        /// about when the vector holding it is reassigned.
+        std::unordered_set<std::shared_ptr<eprosima::fastdds::rtps::TransportDescriptorInterface>>
+            own_transport_descriptors;
         eprosima::fastdds::dds::DomainParticipantQos cached_qos;
         bool used_xml_profile{false};
+        /// Whether the transport descriptors in `cached_qos` are the caller's rather than
+        /// this library's — true for FASTDDS_DEFAULT_PROFILES_FILE and for a
+        /// DEFAULT_FASTDDS_PROFILES.xml that Fast-DDS auto-loads from the working
+        /// directory. Wider than `used_xml_profile`, which gates only the QoS this
+        /// library configures for itself; rewriting a blocklist the caller declared is a
+        /// different kind of damage, so it gets its own answer.
+        bool xml_profile_owns_transports{false};
+        /// Whether Fast-DDS built the transports from @c FASTDDS_BUILTIN_TRANSPORTS instead
+        /// of this library building them — read ONCE, in the constructor, at the same moment
+        /// @c setup_transports either ran or did not.
+        ///
+        /// Answered once because the answer has to stay the one the descriptors were built
+        /// under. Re-reading the variable per refresh would let a value set later in the
+        /// process — a Python participant in a mixed application does exactly that, via
+        /// @c os.environ.setdefault — turn a participant whose descriptors this library owns
+        /// and has already written blocklist entries into into one that takes the
+        /// caller-owns early return, so those entries would never be erased again. A tunnel
+        /// address left blocked after the tunnel is gone drops genuine traffic if the OS
+        /// hands that address to a real interface.
+        bool env_owns_transports{false};
 
         // Shared by every operation that touches `participant` and by reset.
         std::shared_mutex reset_mutex;

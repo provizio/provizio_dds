@@ -1262,10 +1262,18 @@ _MIN_INTERVAL_SEC = 0.1
 
 
 def _sanitise_env_value_for_log(raw: str) -> str:
-    """Cap and de-control-character an env value before quoting it in a warning, so a
-    pathological value cannot flood the log or forge log lines downstream."""
+    """Cap and reduce a value to printable ASCII before quoting it in a warning, so a
+    pathological one cannot flood the log, forge log lines downstream, or vanish entirely.
+
+    Everything outside ``[0x20, 0x7F)`` is replaced, not only the C0 controls and DEL. That
+    mattered once interface identities started reaching this alongside environment values: a
+    Windows adapter's friendly name is administrator-settable arbitrary Unicode, and on
+    Windows :func:`_emit_log` prints through a cp1252 stdout where a non-ASCII character
+    raises ``UnicodeEncodeError`` inside a swallowing ``except`` -- so the whole warning
+    disappears rather than merely mis-rendering. Mirrors ``sanitise_env_value_for_log`` in
+    src/detail/env_utils.h."""
     capped = raw[:32]
-    cleaned = "".join("?" if ord(c) < 0x20 or ord(c) == 0x7F else c for c in capped)
+    cleaned = "".join(c if 0x20 <= ord(c) < 0x7F else "?" for c in capped)
     return cleaned + "..." if len(raw) > 32 else cleaned
 
 

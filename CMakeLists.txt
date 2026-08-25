@@ -779,6 +779,7 @@ else(HAS_BIN_CACHE)
         src/request_response.cpp
         src/shm_cleanup.cpp
         src/topic.cpp
+        src/vpn_interfaces.cpp
     )
     # Per-platform network monitoring + address-snapshot backends. Each .cpp is
     # gated internally by the matching #ifdef so the build can also tolerate the
