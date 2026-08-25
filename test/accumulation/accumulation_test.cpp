@@ -840,7 +840,13 @@ namespace
 
     // Discovery/matching is asynchronous; generous ceiling for cross-participant matches on busy runners —
     // mirrors the Python tests' _wait_until_matched(timeout_sec=15)
-    constexpr auto match_timeout = std::chrono::milliseconds{15000};
+    // Scaled by the environment, as the ctest TIMEOUT wrapped around this case already is. An
+    // unscaled deadline inside a test is the defect this branch has now fixed three times
+    // elsewhere: under a sanitizer everything it waits for takes several times longer while
+    // this budget stays put, so the case reports a discovery failure that is really a slow
+    // machine. Discovery here is genuinely quick -- the sibling cases match in well under a
+    // second -- so the bound is never what ends the wait on a healthy runner.
+    constexpr auto match_timeout = std::chrono::milliseconds{15000 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
 
     /// Block until each publisher has at least one matched subscriber. With the match-publisher reader default the
     /// accumulator's subscribers are DEFERRED (the DataReader is created only once a writer is discovered), so a

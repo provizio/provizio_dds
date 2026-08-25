@@ -115,12 +115,31 @@ if(WIN32)
         PROPERTIES ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}"
     )
 else()
-    set_tests_properties(request_response PROPERTIES TIMEOUT 30)
+    # A test's own budget must stay STRICTLY under its ctest TIMEOUT, or its diagnostic is
+    # unreachable. These four wait `30 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE` internally
+    # (request_response_client.cpp:34, request_response_service_client.cpp:34,
+    # request_response_concurrent_requests_service_client.cpp:35,
+    # request_response_concurrent_service_client.cpp:37) against what used to be a TIMEOUT of
+    # exactly 30, so CTest's SIGKILL landed at the same instant their own `wait_for_service`
+    # would have returned false: the branch that prints WHY never ran, and a failure arrived as
+    # a bare ***Timeout with no attribution. That is what a macos-15-intel failure on this
+    # branch looked like, and only the harness's own 25 s process dump said anything useful --
+    # it showed the client had completed and the SERVICE had not exited.
+    #
+    # 45 restores the ordering the rest of the suite relies on: internal budget 30 < deadline
+    # report at TIMEOUT-5 = 40 < SIGKILL at 45. It also leaves room for the library's own
+    # bounded listener detach, which is 30 s (domain_participant.cpp listener_swap_timeout) and
+    # so could alone consume the whole of a 30 s budget.
+    #
+    # The others keep 30: their internal budgets are 10 s and 15 s, already clear of it.
+    set_tests_properties(request_response PROPERTIES TIMEOUT 45)
     set_tests_properties(
-        request_response_concurrent_requests_serial_service
         request_response_service_client
         request_response_concurrent_requests_service_client
         request_response_concurrent_service_client
+        PROPERTIES TIMEOUT 45)
+    set_tests_properties(
+        request_response_concurrent_requests_serial_service
         request_response_dual_service_test
         PROPERTIES TIMEOUT 30)
     set_tests_properties(
@@ -158,5 +177,6 @@ set_tests_properties(
     request_response_ignore_async
     PROPERTIES RESOURCE_LOCK provizio_dds_test_request_response_ignore)
 
-# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
-provizio_dds_scale_test_timeouts()
+# Scale this directory's test timeouts under a sanitizer, and let a stuck test report
+# itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
+provizio_dds_finalize_tests()

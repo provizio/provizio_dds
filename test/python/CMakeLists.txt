@@ -593,10 +593,14 @@ else()
     # detects a genuine hang/regression while tolerating the slower containers.
     set_tests_properties(python_pub_python_sub PROPERTIES TIMEOUT 40)
     set_tests_properties(python_pub_python_sub_type_reuse PROPERTIES TIMEOUT 40)
+    # 60, as on Windows, and for the same reason the pub/sub budgets above were raised:
+    # these two spend ~25 s by design (the service waits out its request budget and then
+    # sleeps), so 30 left about five seconds of margin -- which a jetson runner duly
+    # consumed, failing a test whose assertions had already passed.
     set_tests_properties(
         python_request_response_ignore
         python_request_response_ignore_async
-        PROPERTIES TIMEOUT 30)
+        PROPERTIES TIMEOUT 60)
 endif()
 
 if(WIN32)
@@ -657,5 +661,6 @@ set_tests_properties(
     python_request_response_ignore_async
     PROPERTIES RESOURCE_LOCK provizio_dds_test_request_response_ignore)
 
-# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
-provizio_dds_scale_test_timeouts()
+# Scale this directory's test timeouts under a sanitizer, and let a stuck test report
+# itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
+provizio_dds_finalize_tests()
