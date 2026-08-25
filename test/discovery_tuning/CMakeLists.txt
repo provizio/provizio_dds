@@ -48,5 +48,6 @@ foreach(_case defaults env_overrides env_invalid multi_participant)
     endif()
 endforeach()
 
-# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
-provizio_dds_scale_test_timeouts()
+# Scale this directory's test timeouts under a sanitizer, and let a stuck test report
+# itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
+provizio_dds_finalize_tests()

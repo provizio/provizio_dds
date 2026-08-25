@@ -56,7 +56,9 @@ IFACE_BOND=bond0
 BOND_MEMBER=provizio1
 ADDR_LINK=203.0.113.5     # TEST-NET-3, RFC 5737 — never routable
 ADDR_BOND=203.0.113.6
-AWAIT_TIMEOUT=40
+# Scaled like the ctest TIMEOUT around this script (provizio_dds_finalize_tests exports the
+# factor), so a sanitizer build does not turn a slow rebuild into a reported miss.
+AWAIT_TIMEOUT=$((40 * ${PROVIZIO_DDS_TEST_TIMEOUT_SCALE:-1}))
 
 # Run privileged helpers directly when root, else via non-interactive sudo.
 if [ "$(id -u)" = "0" ]; then

@@ -32,4 +32,4 @@ endif()
 set_tests_properties(request_response_concurrent
     PROPERTIES RESOURCE_LOCK provizio_dds_test_request_response)
 
-provizio_dds_scale_test_timeouts()
+provizio_dds_finalize_tests()

@@ -81,7 +81,10 @@ int main(int argc, char *argv[])
     // BETWEEN requests keeps the regression signal (a client that dies or hangs is still caught,
     // within a bounded time) while being indifferent to how slow the host is. The ctest TIMEOUT
     // bounds the whole run regardless.
-    constexpr std::chrono::seconds idle_timeout{60};
+    // Scaled for the same reason as the client's response deadline: this is how long the
+    // service waits for the next request before concluding the client side has stopped
+    // producing them, and the whole sequence runs slower in a sanitized build.
+    constexpr std::chrono::seconds idle_timeout{60 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
 
     const std::string log_prefix = "request_response_reliability_service" + test_name_postfix + ": ";
     const std::string service_name{"provizio_dds_test_request_response_reliability" + test_name_postfix};
