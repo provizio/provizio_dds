@@ -1023,6 +1023,32 @@ else(HAS_BIN_CACHE)
         endif()
         file(WRITE "${FASTDDS_PYTHON_SWIG_CMAKE_FILE}" "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
 
+        # SWIG 4.5.0 stopped emitting the Python-2 compatibility aliases its generated
+        # header used to carry, and four of Fast-DDS-python's interface files still call
+        # PyInt_FromLong through one of them. Under Python 3 that name never meant anything
+        # but PyLong_FromLong -- SWIG's own alias defined it as exactly that -- so the call
+        # sites are rewritten to the name that survives, which compiles identically under
+        # every SWIG version and needs no version pin.
+        #
+        # Not hypothetical, and not a macOS quirk either: Homebrew moved swig to 4.5.0, and
+        # every macOS bindings build started failing to compile the generated wrapper with
+        # "use of undeclared identifier 'PyInt_FromLong'". Linux and Windows install a
+        # pinned 4.4.x today and so were unaffected, but they inherit the fix the moment
+        # their pin moves. A missing file here is a hard CMake error rather than a silent
+        # skip, which is what should happen if a version bump moves these interfaces.
+        foreach(_fastdds_python_py2_alias_file
+                "fastdds/rtps/common/EntityId_t.i"
+                "fastdds/rtps/common/GuidPrefix_t.i"
+                "fastdds/rtps/common/InstanceHandle.i"
+                "fastdds/rtps/common/Locator.i")
+            set(_fastdds_python_py2_alias_path
+                "${fast_dds_python_SOURCE_DIR}/fastdds_python/src/swig/${_fastdds_python_py2_alias_file}")
+            file(READ "${_fastdds_python_py2_alias_path}" _fastdds_python_py2_alias_content)
+            string(REPLACE "PyInt_FromLong" "PyLong_FromLong"
+                _fastdds_python_py2_alias_content "${_fastdds_python_py2_alias_content}")
+            file(WRITE "${_fastdds_python_py2_alias_path}" "${_fastdds_python_py2_alias_content}")
+        endforeach()
+
         set(FASTDDS_PYTHON_CMAKE_DIR "${fast_dds_python_SOURCE_DIR}/fastdds_python")
         set(FASTDDS_PYTHON_CMAKE_FILE "${FASTDDS_PYTHON_CMAKE_DIR}/CMakeLists.txt")
         set(FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER "${CMAKE_CURRENT_BINARY_DIR}/FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER.h")
