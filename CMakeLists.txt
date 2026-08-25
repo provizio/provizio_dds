@@ -350,7 +350,7 @@ if(WIN32)
     # Fast-DDS via provizio_dds headers also get the same surface. Set
     # OUTSIDE the coding-standards if/else above so it activates on every
     # Windows build, including the StandardConfig(SAFETY_CRITICAL) branch
-    # that downstream consumers (apt_gui) take.
+    # that downstream consumers take.
     add_compile_definitions(
         NOMINMAX
         WIN32_LEAN_AND_MEAN
