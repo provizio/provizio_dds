@@ -52,7 +52,7 @@ def main():
 
     # Matches e.g. "struct qos_defaults<::sensor_msgs::msg::ImagePubSubType> final".
     specialized = set(re.findall(r"struct qos_defaults<::[A-Za-z_]+::msg::(\w+)>", header))
-    expect(specialized, "no qos_defaults specializations parsed — header layout or this regex drifted")
+    expect(specialized, "no qos_defaults specializations parsed -- header layout or this regex drifted")
 
     registered = {
         cls.__name__

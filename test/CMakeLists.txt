@@ -174,6 +174,7 @@ add_subdirectory(shm_cleanup)
 add_subdirectory(callback_exceptions)
 add_subdirectory(point_cloud2)
 add_subdirectory(accumulation)
+add_subdirectory(source_text)
 
 if(PYTHON_BINDINGS)
     message(STATUS "PYTHON_BINDINGS is ON: Python tests will be built and enabled.")

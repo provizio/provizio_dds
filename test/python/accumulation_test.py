@@ -2210,7 +2210,7 @@ def test_kalman_localization_predicts_at_pointcloud_receive_time():
     )
     assert kalman_x > last_fix_x + 1.0, (
         f"kalman=True: expected extrapolation > {last_fix_x + 1.0:.4f} m, got {kalman_x:.4f} "
-        f"(filter may not have extrapolated — check wiring)"
+        f"(filter may not have extrapolated -- check wiring)"
     )
 
 
@@ -2964,7 +2964,7 @@ def test_timesync_stale_cloud_uses_previous_fix():
         )
     )
     assert len(acc.get_points_local_frame_relative()) == 0, \
-        "no cloud fed yet — accumulator must be empty after Fix A and Fix B"
+        "no cloud fed yet -- accumulator must be empty after Fix A and Fix B"
 
     # Cloud arrives with header H_cloud < H_A.  When _on_point_cloud calls
     # _flush_timesync_buffer, it immediately finds:

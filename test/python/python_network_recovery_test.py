@@ -322,7 +322,7 @@ def test_reset_refreshes_fastdds_interface_cache():
 
     # (1) and (2): refresh helper is wired up and works.
     assert nr.refresh_fastdds_interface_cache() is True, (
-        "refresh_fastdds_interface_cache() returned False — either "
+        "refresh_fastdds_interface_cache() returned False -- either "
         "libprovizio_dds wasn't found or the underlying "
         "eprosima::SystemInfo::update_interfaces failed."
     )

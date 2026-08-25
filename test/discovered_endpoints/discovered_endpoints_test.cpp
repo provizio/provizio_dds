@@ -459,7 +459,7 @@ namespace
         });
         if (!got_after)
         {
-            std::cerr << "no post-reset discovery event — listener was not re-installed?\n";
+            std::cerr << "no post-reset discovery event -- listener was not re-installed?\n";
             return 1;
         }
         return 0;
@@ -534,7 +534,7 @@ namespace
         });
         if (!control_saw)
         {
-            std::cerr << "control participant never saw the post-unregister publisher — test inconclusive\n";
+            std::cerr << "control participant never saw the post-unregister publisher -- test inconclusive\n";
             return 1;
         }
         {

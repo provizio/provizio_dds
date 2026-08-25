@@ -335,7 +335,7 @@ def test_survives_reset():
 
     if not _wait_for(writer_seen, DISCOVERY_TIMEOUT_SEC):
         print(
-            "no post-reset discovery event — listener was not re-installed?",
+            "no post-reset discovery event -- listener was not re-installed?",
             file=sys.stderr,
         )
         return 1
@@ -397,7 +397,7 @@ def test_unregister():
 
     if not _wait_for(c_saw_topic2, DISCOVERY_TIMEOUT_SEC):
         print(
-            "control participant never saw the post-unregister publisher — test inconclusive",
+            "control participant never saw the post-unregister publisher -- test inconclusive",
             file=sys.stderr,
         )
         return 1
