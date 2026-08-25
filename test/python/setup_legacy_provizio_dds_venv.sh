@@ -181,6 +181,35 @@ if [[ "${IS_WINDOWS}" -eq 0 ]]; then
     export CXXFLAGS="${CXXFLAGS:+${CXXFLAGS} }-include cstdint"
 fi
 
+# SWIG 4.5.0 stopped emitting the Python-2 compatibility aliases its generated
+# header used to carry, and the Fast-DDS-python that 1.10.1 pins still calls
+# PyInt_FromLong through one of them, so its wrapper fails to compile with
+# "use of undeclared identifier 'PyInt_FromLong'". This repository rewrites those
+# call sites at fetch time (see CMakeLists.txt), but 1.10.1 is a released tag that
+# pip builds exactly as it was, so the macro is supplied from the command line
+# instead. PyLong_FromLong is not a guess at what it should be: it is verbatim
+# what SWIG's own alias expanded to (python/pyhead.swg).
+#
+# Injected through CMAKE_PROJECT_INCLUDE rather than as a compile flag, because
+# 1.10.1's CMakeLists.txt ERASES a non-empty CMAKE_CXX_FLAGS -- "Runtime analysis
+# tools will be disabled due to known issues in Fast-DDS" -- so a -D passed that way
+# is silently dropped before any target is created. CMAKE_PROJECT_INCLUDE runs as
+# the last step of every project() call, and the directory-scope definition it adds
+# survives that wipe and reaches the fetched Fast-DDS-python targets.
+#
+# Applied ONLY when the installed SWIG actually needs it, because any non-empty
+# CMAKE_ARGUMENTS turns 1.10.1's prebuilt binary cache off (its setup.py tests the
+# variable verbatim), which would turn a download into a full from-source build of
+# Fast-DDS on every Linux job that runs this test.
+swig_version=$(swig -version 2>/dev/null | sed -n 's/.*SWIG Version \([0-9][0-9.]*\).*/\1/p' || true)
+if [[ -n "${swig_version}" ]] &&
+   [[ "$(printf '%s\n%s\n' "4.5.0" "${swig_version}" | sort -V | head -n1)" == "4.5.0" ]]; then
+    echo "SWIG ${swig_version} needs the Python-2 alias supplied for the 1.10.1 bindings" >&2
+    PY2_ALIAS_CMAKE="${VENV_DIR}/py2_alias.cmake"
+    printf '%s\n' 'add_compile_definitions(PyInt_FromLong=PyLong_FromLong)' > "${PY2_ALIAS_CMAKE}"
+    export CMAKE_ARGUMENTS="${CMAKE_ARGUMENTS:+${CMAKE_ARGUMENTS} }-DCMAKE_PROJECT_INCLUDE=\"${PY2_ALIAS_CMAKE}\""
+fi
+
 # Build from the immutable tag, not the moving branch — the whole point
 # of this test is to compare against the deployed-fleet baseline that
 # 1.10.1 represents.
