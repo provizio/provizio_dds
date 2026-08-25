@@ -324,7 +324,7 @@ namespace
         }
 
         // End-to-end: a non-trivial visitor that creates a typed publisher_handle
-        // for the runtime-known type. This is the apt_gui recorder shape — the
+        // for the runtime-known type. This is the recorder shape — the
         // visitor's body is written once, instantiated once per known type by
         // the dispatcher's generated code, and produces a fully typed handle.
         // Side effect: make_publisher<T> internally registers T on the
