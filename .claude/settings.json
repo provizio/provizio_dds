@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git fetch)",
+      "Bash(git fetch origin)",
+      "Bash(git fetch origin *)",
+      "Bash(nm *)",
+      "Bash(readelf *)",
+      "Bash(flake8 *)",
+      "Bash(shellcheck *)",
+      "Bash(clang-format *)",
+      "Bash(cmake -S *)",
+      "Bash(cmake .. *)",
+      "Bash(cmake --build *)",
+      "Bash(ctest)",
+      "Bash(ctest --output-on-failure*)",
+      "Bash(ctest -R *)",
+      "Bash(ctest -N*)",
+      "Bash(journalctl *)",
+      "Bash(getent *)",
+      "Bash(systemctl is-active *)",
+      "Bash(systemctl list-units *)",
+      "Bash(systemctl show *)"
+    ]
+  }
+}
