@@ -13,4 +13,8 @@
 # the License.
 
 add_executable(ros_interop_publisher ros_interop_publisher.cpp)
-target_link_libraries(ros_interop_publisher PUBLIC provizio_dds)
+# Threads::Threads for the same reason as the service beside it: this sleeps between
+# samples, and nm reports pthread_cond_clockwait and pthread_rwlock_rdlock undefined in
+# the built binary -- both of which lived in libpthread rather than libc before glibc 2.34.
+find_package(Threads REQUIRED)
+target_link_libraries(ros_interop_publisher PUBLIC provizio_dds Threads::Threads)
