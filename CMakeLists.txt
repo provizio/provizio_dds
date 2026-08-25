@@ -614,6 +614,18 @@ else(HAS_BIN_CACHE)
         ExternalProject_Add(libfast_dds
             GIT_REPOSITORY "https://github.com/${FAST_DDS_GITHUB_PROJECT}.git"
             GIT_TAG "${FAST_DDS_VERSION}"
+            # Shallow: the ref is a tag and nothing here derives anything from git history
+            # (no git describe), so a full clone of a repository this size only buys a longer
+            # transfer — the window in which a runner's network can stall it. A macOS runner
+            # lost DNS partway through this very clone and failed the job; CMake's three
+            # built-in retries have no backoff, so all three failed with it. Measured on this
+            # repository: 194 MiB of history down to 9.1 MiB, cloned in seconds.
+            #
+            # NOTE: a shallow clone truncates history to depth 1 and then checks GIT_TAG out of
+            # what was fetched, so the ref has to be a branch or tag — CMake documents a commit
+            # hash as not allowed with GIT_SHALLOW. Pinning FAST_DDS_VERSION to a raw SHA means
+            # dropping this with it.
+            GIT_SHALLOW TRUE
             UPDATE_COMMAND ""
             # Decorate eprosima::SystemInfo::update_interfaces() with
             # FASTDDS_EXPORTED_API so it is reachable in the Windows DLL
@@ -654,6 +666,9 @@ else(HAS_BIN_CACHE)
     FetchContent_Declare(provizio_dds_idls
         GIT_REPOSITORY "https://github.com/provizio/provizio_dds_idls"
         GIT_TAG "${PROVIZIO_DDS_IDLS_VERSION}"
+        # Tag, no git-history consumer — see the note on libfast_dds above, including why a
+        # SHA pin would have to drop this.
+        GIT_SHALLOW TRUE
     )
     FetchContent_Populate(provizio_dds_idls)
 
@@ -922,6 +937,9 @@ else(HAS_BIN_CACHE)
         FetchContent_Declare(fast_dds_python
             GIT_REPOSITORY "https://github.com/provizio/Fast-DDS-python"
             GIT_TAG "${FAST_DDS_PYTHON_VERSION}"
+            # Tag, no git-history consumer — see the note on libfast_dds above, including why
+            # a SHA pin would have to drop this.
+            GIT_SHALLOW TRUE
         )
         FetchContent_Populate(fast_dds_python)
 
