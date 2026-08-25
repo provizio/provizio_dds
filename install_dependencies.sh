@@ -28,6 +28,9 @@ CC=${CC:-"gcc"}
 
 FAST_DDS_VERSION=${FAST_DDS_VERSION:-v3.6.2.0}
 FAST_CDR_VERSION=${FAST_CDR_VERSION:-v2.3.5}
+# The same tag the CMake build pins (FOONATHAN_MEMORY_VENDOR_VERSION in CMakeLists.txt), so a
+# system-wide install and a from-source build ship one foonathan_memory.
+FOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION:-v1.4.1}
 SWIG_VERSION=${SWIG_VERSION:-4.4.1}
 
 if [[ "${OSTYPE}" == "darwin"* ]]; then
@@ -301,8 +304,12 @@ else
       mkdir /tmp/fastdds
 
       # Foonathan memory
+      # --depth 1 throughout this block: none of these builds reads its git history, and the
+      # transfer is where a clone breaks — a stalled connection or a DNS failure partway
+      # through a large pack fails the whole install. The refs below are tags, which is what
+      # --branch needs; a raw SHA would need the depth dropped with it.
       cd /tmp/fastdds
-      git clone https://github.com/eProsima/foonathan_memory_vendor.git
+      git clone --depth 1 --branch "${FOONATHAN_MEMORY_VENDOR_VERSION}" https://github.com/eProsima/foonathan_memory_vendor.git
       mkdir foonathan_memory_vendor/build
       cd foonathan_memory_vendor/build
       cmake .. -G Ninja -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
@@ -310,9 +317,8 @@ else
 
       # Fast CDR
       cd /tmp/fastdds
-      git clone https://github.com/eProsima/Fast-CDR.git
+      git clone --depth 1 --branch "${FAST_CDR_VERSION}" https://github.com/eProsima/Fast-CDR.git
       cd Fast-CDR
-      git checkout ${FAST_CDR_VERSION}
       mkdir build
       cd build
       cmake .. -G Ninja -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
@@ -320,9 +326,8 @@ else
 
       # Fast DDS
       cd /tmp/fastdds
-      git clone https://github.com/eProsima/Fast-DDS.git
+      git clone --depth 1 --branch "${FAST_DDS_VERSION}" https://github.com/eProsima/Fast-DDS.git
       cd Fast-DDS
-      git checkout ${FAST_DDS_VERSION}
       mkdir build
       cd build
       cmake .. -G Ninja -DCMAKE_INSTALL_PREFIX="${FAST_DDS_INSTALL}" -DBUILD_SHARED_LIBS=ON
