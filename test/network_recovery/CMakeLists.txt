@@ -98,6 +98,10 @@ _nr_add_test(network_recovery_no_baseline_empty_list_is_not_a_rebuild
     ARGS no_baseline_empty_list_is_not_a_rebuild TIMEOUT ${_NR_TIMEOUT_DDS})
 _nr_add_test(network_recovery_rebuild_on_address_change
     ARGS rebuild_on_address_change TIMEOUT ${_NR_TIMEOUT_DDS})
+# transport_mode::localhost_only declines auto-recovery whatever the recovery mode says:
+# a locator set that holds nothing but 127.0.0.1 has nothing a network change can affect.
+_nr_add_test(network_recovery_localhost_only_not_monitored
+    ARGS localhost_only_not_monitored TIMEOUT ${_NR_TIMEOUT_DDS})
 # A log callback is documented as free to create a participant. This pins the one
 # diagnostic that used to be emitted while registry_mutex was held, where doing so
 # deadlocked; a regression hangs, so the TIMEOUT is what reports it.

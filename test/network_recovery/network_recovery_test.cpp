@@ -1265,6 +1265,75 @@ namespace
         return passed ? 0 : 1;
     }
 
+    // Case: transport_mode::localhost_only opts a participant out of network auto-recovery,
+    // however loudly its network_recovery_mode asks for it. Every locator such a participant
+    // holds lives on 127.0.0.1, which no network change can take away or re-address, so there
+    // is nothing for the monitor to detect on its behalf -- and a reset it did not need would
+    // still cost its peers a full rediscovery. The contrast in the second half is what makes
+    // the first half mean something: the same process, the same recovery mode and the same
+    // injected change do rebuild an ordinary participant.
+    int test_localhost_only_not_monitored()
+    {
+        using provizio::dds::detail::network_recovery_coordinator;
+
+        bool passed = true;
+        auto &coordinator = network_recovery_coordinator::instance();
+
+        // Nothing registered yet, so nothing to watch with.
+        passed &= EXPECT(!coordinator.monitor_alive_for_test());
+
+        const auto confined = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on, {},
+                                                                     provizio::dds::endpoint_kind::data_writer,
+                                                                     provizio::dds::transport_mode::localhost_only);
+        coordinator.wait_for_idle();
+        // Declining to REGISTER is what keeps this participant out of every rebuild, and the
+        // monitor left unstarted is how that shows from outside: a netlink socket and a
+        // thread that would have nothing to report. Note what this also means for the
+        // injection below -- an event has no coalescer to consume it until a participant that
+        // does take part exists, which is why the change is injected only after one does.
+        passed &= EXPECT(!coordinator.monitor_alive_for_test());
+
+        // Held as a raw pointer, taken and released inside this scope: locked_participant
+        // holds the reset lock, and keeping one alive would block the very reset this case
+        // has to let through.
+        const eprosima::fastdds::dds::DomainParticipant *confined_before = nullptr;
+        {
+            const auto handle = confined->fastdds_participant();
+            confined_before = handle.get();
+        }
+        passed &= EXPECT(confined_before != nullptr);
+
+        // The contrast: an ordinary participant, same process, same recovery mode. Its
+        // rebuild is what proves the injected change was one the coordinator acted on, so
+        // the confined participant surviving it untouched means something.
+        const auto ordinary = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.monitor_alive_for_test());
+
+        const provizio::dds::detail::interface_address before{"provizio_test_confined_if", "203.0.113.40", 24};
+        const provizio::dds::detail::interface_address after{"provizio_test_confined_if", "203.0.113.41", 24};
+        coordinator.seed_last_known_snapshot_for_test(provizio::dds::detail::address_snapshot{before});
+        coordinator.force_snapshot_for_test(provizio::dds::detail::address_snapshot{after});
+        const auto resets_before = coordinator.reset_count_for_test();
+        coordinator.inject_kernel_event_for_test();
+        coordinator.wait_for_idle();
+        passed &= EXPECT(coordinator.reset_count_for_test() == resets_before + 1);
+
+        // A reset replaces the underlying Fast-DDS participant, so the confined one still
+        // holding the instance it was built with is the observation that it was never in the
+        // set the reset walked.
+        {
+            const auto handle = confined->fastdds_participant();
+            passed &= EXPECT(handle.get() == confined_before);
+        }
+
+        coordinator.force_snapshot_for_test(std::nullopt);
+
+        std::cout << "localhost_only_not_monitored: " << (passed ? "PASS" : "FAIL")
+                  << " (reset_count=" << coordinator.reset_count_for_test() << ")" << '\n';
+        return passed ? 0 : 1;
+    }
+
     // Case: a log callback may create a participant, even from the line the very first
     // registration emits. logging.h promises exactly that, and this is the one diagnostic
     // on that path that used to be logged from inside registry_mutex + monitor_mutex: the
@@ -1593,6 +1662,11 @@ int main(int argc, char **argv)
     {
         return test_safety_net_detects_missed_change();
     }
+    if (subcommand == "localhost_only_not_monitored")
+    {
+        return test_localhost_only_not_monitored();
+    }
+
     if (subcommand == "log_callback_may_create_participant")
     {
         return test_log_callback_may_create_participant();
