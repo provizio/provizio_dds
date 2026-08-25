@@ -27,7 +27,8 @@ import threading
 import weakref
 from collections import deque
 from enum import Enum, IntFlag
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Collection, Optional
+from xml.sax.saxutils import quoteattr
 import time
 from queue import Queue
 
@@ -919,6 +920,370 @@ def _create_participant_with_listener(factory, domain_id, participant_qos, liste
     return participant
 
 
+# Fast-DDS' DomainParticipantFactory.load_profiles() auto-loads this file from the
+# working directory, in addition to whatever FASTDDS_DEFAULT_PROFILES_FILE names —
+# unless SKIP_DEFAULT_XML_FILE is "1", which switches that auto-load off
+# (XMLProfileManager::loadDefaultXMLFile). Keep both in sync with
+# src/domain_participant.cpp.
+_DEFAULT_FASTDDS_PROFILES_FILE_NAME = "DEFAULT_FASTDDS_PROFILES.xml"
+_SKIP_DEFAULT_XML_FILE_ENV = "SKIP_DEFAULT_XML_FILE"
+
+# Whether a DEFAULT_FASTDDS_PROFILES.xml in the WORKING DIRECTORY is what configured the
+# transports. Resolved once per process and cached, because that is when Fast-DDS decides it
+# too: load_profiles() reads the working directory on its FIRST call only and ignores every
+# later one, so the file state at that moment is the state that actually took effect.
+# Recomputing per creation would let a network-recovery rebuild disagree with what Fast-DDS
+# loaded, in both directions — a file deleted (or a chdir) after startup would make the
+# rebuild believe the caller owns nothing and hand the whole QoS to our generated profile,
+# discarding the caller's discovery configuration; a file created after startup would stop
+# the exclusion over a profile Fast-DDS never read.
+#
+# Deliberately NOT the whole answer: a profile named by FASTDDS_DEFAULT_PROFILES_FILE is a
+# per-participant fact and is re-read on every call — see
+# _xml_profile_owns_transports. Mirrors the working-directory half of
+# transports_come_from_user_xml in src/domain_participant.cpp.
+_xml_profile_owns_transports_cache: "Optional[bool]" = None
+_xml_profile_owns_transports_lock = threading.Lock()
+
+
+def _xml_profile_owns_transports(xml_profiles_env_variable: str) -> bool:
+    """Whether an XML profile the caller supplied is what configured the transports —
+    the profile named by ``FASTDDS_DEFAULT_PROFILES_FILE``, or a
+    ``DEFAULT_FASTDDS_PROFILES.xml`` that ``load_profiles()`` auto-loaded from the
+    working directory.
+
+    Only the working-directory half is resolved once, on the first call, which always lands
+    immediately after the process' first ``load_profiles()``; see
+    :data:`_xml_profile_owns_transports_cache` for why that half must not be re-derived
+    later. The env-named profile is a per-participant fact, so it is re-read every call:
+    folding it into the cache made the first participant's answer bind every later one, in
+    both directions -- a participant created after the variable was set would still have
+    been told the transports were this library's to rewrite, and one created after a first
+    participant that HAD it set would skip the exclusion for good."""
+    global _xml_profile_owns_transports_cache
+
+    path = os.environ.get(xml_profiles_env_variable)
+    if bool(path) and os.path.isfile(path):
+        return True
+
+    with _xml_profile_owns_transports_lock:
+        if _xml_profile_owns_transports_cache is None:
+            _xml_profile_owns_transports_cache = not os.environ.get(
+                _SKIP_DEFAULT_XML_FILE_ENV, ""
+            ).startswith("1") and os.path.isfile(_DEFAULT_FASTDDS_PROFILES_FILE_NAME)
+        return _xml_profile_owns_transports_cache
+
+_VPN_TRANSPORTS_PROFILE_PREFIX = "provizio_dds_vpn_excluded_transports"
+# Ceiling on how many distinct transport profiles one process may register. Fast-DDS
+# keeps XML profiles and transport descriptors in a process-wide registry with no way
+# to unload one, so every genuinely new blocked-address set costs a permanent entry.
+# One is normally all a process ever needs — a tunnel address is stable — but a VPN
+# that reconnects onto a new address each time would otherwise grow the registry for
+# the life of the process. 64 is far beyond any legitimate churn while still bounded;
+# past it the participant falls back to the default transports with a warning, which
+# reinstates the duplicate-traffic behaviour but is at least loud about it. Stale sets
+# are deliberately NOT merged into one ever-growing blocklist: an address that has left
+# the host can be handed to a real interface later, and blocking it then would break
+# real DDS traffic.
+_VPN_TRANSPORTS_PROFILE_LIMIT = 64
+# The FASTDDS_BUILTIN_TRANSPORTS value this library itself put in the environment, if
+# any. Needed to tell "the caller configured transports, leave them alone" from "an
+# earlier participant of ours pinned the default", which look identical in os.environ.
+_builtin_transports_set_by_library: "Optional[str]" = None
+# Guards the read-the-variable / setdefault / remember-what-we-set sequence below as one
+# step. Without it, two threads constructing participants with different transport modes
+# near process start both read the variable as absent, os.environ.setdefault fixes it to
+# whichever of them ran first, and the loser then records ITS value here -- after which a
+# later participant compares the environment against a value nobody set, concludes the
+# caller owns the transports and silently skips the VPN exclusion.
+_builtin_transports_lock = threading.Lock()
+_vpn_transports_profiles: dict = {}
+_vpn_transports_profiles_lock = threading.Lock()
+# Whether the ceiling below has already been reported. A flag rather than a cache
+# entry per refused configuration: once the ceiling is reached it is permanent for the
+# process, so remembering every set refused afterwards would grow
+# _vpn_transports_profiles without bound on a tunnel that reconnects onto a new address
+# each time — and would repeat a warning whose remedy never changes.
+_vpn_transports_profile_limit_warned = False
+
+
+def _caller_configured_transports(factory: "DomainParticipantFactory") -> bool:
+    """Whether the process' default participant QoS already carries transports the caller
+    configured.
+
+    This is the one form of caller ownership that is visible in the QoS itself rather than
+    inferred from the environment: ``load_XML_profiles_file`` / ``load_XML_profiles_string``
+    with a default participant profile puts their descriptors there (once
+    ``load_profiles()`` has run, which this library does before building any QoS), and no
+    environment variable or working-directory probe can see it. Fast-DDS' own default
+    carries no descriptors and leaves ``use_builtin_transports`` true, so either signal
+    means the transports are not this library's to replace.
+
+    An unreadable default QoS is reported as caller-owned: the safe answer is to leave
+    the transports alone rather than guess."""
+    qos = DomainParticipantQos()
+    if factory.get_default_participant_qos(qos) != RETCODE_OK:
+        return True
+    transport_config = qos.transport()
+    return len(transport_config.user_transports) > 0 or not transport_config.use_builtin_transports
+
+
+def _shared_memory_in_transports_value(value: str) -> bool:
+    """Whether a FASTDDS_BUILTIN_TRANSPORTS value selects a transport set that includes
+    shared memory.
+
+    Only values :meth:`_DomainParticipant._builtin_transports_value` produces are ever
+    passed here — ``DEFAULT?...`` or ``UDPv4?...`` — so the leading token decides it. A
+    value the caller set is never classified: that case is answered earlier, by refusing
+    to touch their transport selection at all."""
+    return value.split("?", 1)[0] == "DEFAULT"
+
+
+def _vpn_excluded_transports_xml(
+    use_shared_memory: bool,
+    sockets_size: int,
+    blocked_addresses: "Collection[str]",
+    allowed: "Optional[List[Tuple[str, bool]]]" = None,
+    profile_name: str = _VPN_TRANSPORTS_PROFILE_PREFIX,
+    shm_transport_id: str = f"{_VPN_TRANSPORTS_PROFILE_PREFIX}_shm",
+    udp_transport_id: str = f"{_VPN_TRANSPORTS_PROFILE_PREFIX}_udpv4",
+) -> str:
+    """An XML profiles document defining the transports FASTDDS_BUILTIN_TRANSPORTS
+    would have produced, plus an interface blocklist for ``blocked_addresses``.
+
+    Why XML rather than the env variable used everywhere else: the SWIG bindings
+    expose neither ``setup_transports()`` nor the concrete transport descriptors, so
+    there is no way to reach ``interface_blocklist`` from Python — but
+    ``load_XML_profiles_string`` is exposed, and an XML transport descriptor can
+    express the blocklist. This function therefore has to reproduce what
+    ``setup_transports(DEFAULT | UDPv4, {sockets_buffer_size})`` builds in
+    RTPSParticipantAttributes.cpp:
+
+      - UDPv4 with sendBufferSize == receiveBufferSize == sockets_size, and the
+        participant's own socket buffer sizes set to the same value;
+      - on Linux (shared memory in play), an SHM transport FIRST — the order
+        setup_transports uses — with segment_size = max(send, listen) * 2, Fast-DDS's
+        "UDP doubles the socket buffer in kernel" equivalence.
+
+    Everything else (discovery timing, the fastdds.max_message_size property) is
+    applied to the resulting QoS in Python exactly as on the env-variable path, so it
+    stays in one place. Mirrors ``refresh_vpn_interface_blocklist`` in
+    src/domain_participant.cpp, which does the same job by editing the descriptors
+    the C++ ``setup_transports`` left behind — including the ``netmask_filter``, which
+    is not optional alongside a blocklist: any non-empty interface list puts UDPv4 into
+    whitelist mode, and whitelist mode replaces the single any-address output socket
+    with one socket per remaining interface, each of which sends every unicast datagram.
+    ``ON`` is what makes each destination the business of the one socket whose subnet
+    contains it; without it the blocklist would move the duplicate traffic from the
+    tunnel onto the LAN instead of removing it."""
+    # Materialised once: a generator argument would be consumed by the first pass and
+    # silently yield an empty blocklist afterwards.
+    # Falsy entries dropped defensively: Fast-DDS rejects <interface name=""/> and
+    # fails the WHOLE document, which would silently take the tunnel-carrying path. Both
+    # backends already guard against empty names and addresses, so this is belt and
+    # braces for a future caller.
+    entries = sorted({entry for entry in blocked_addresses if entry})
+    # quoteattr() escapes and quotes each value. Today every entry is an interface
+    # name or a socket.inet_ntop() result, neither of which can contain XML
+    # metacharacters — but an unescaped attribute in a generated document is exactly
+    # the kind of thing that stops being true later, and a malformed document would
+    # fail to load and silently take the tunnel-carrying path.
+    blocklist_entries = "\n".join(
+        f"                    <interface name={quoteattr(entry)}/>" for entry in entries
+    )
+    # Fast-DDS parses segment_size as uint32, and sockets_size may legitimately be up
+    # to 0xFFFFFFFF (see _parse_positive_u32), so the doubling has to be clamped:
+    # an out-of-range value would make the whole document fail to parse, which is the
+    # one failure mode that silently reinstates the duplicate traffic.
+    segment_size = min(sockets_size * 2, 0xFFFFFFFF)
+    shm_descriptor = ""
+    shm_user_transport = ""
+    if use_shared_memory:
+        shm_descriptor = f"""        <transport_descriptor>
+            <transport_id>{shm_transport_id}</transport_id>
+            <type>SHM</type>
+            <segment_size>{segment_size}</segment_size>
+        </transport_descriptor>
+"""
+        shm_user_transport = f"                <transport_id>{shm_transport_id}</transport_id>\n"
+
+    # Netmask filtering, decided PER INTERFACE, because the interfaces this leaves behind
+    # need opposite answers. Any non-empty interface list turns Fast-DDS' single
+    # any-address output socket into one socket per allowed interface, and every one of
+    # them sends unless its own filter says otherwise.
+    #
+    # LOOPBACK is in that set (nothing blocks it, and it is how same-host participants
+    # reach each other where shared memory is off) and cannot carry a datagram to another
+    # host at all, so every attempt it makes at one costs a failed sendto and a Fast-DDS
+    # warning -- per datagram. ON stops that with nothing lost.
+    #
+    # A REAL interface is the opposite: ON there means a peer outside its subnet silently
+    # receives nothing (eProsimaUDPSocket::should_filter), so it is worth switching on only
+    # where two or more real interfaces would each send their own copy. Mirrors
+    # refresh_vpn_interface_blocklist in src/domain_participant.cpp.
+    # Read here only when the caller did not: the profile CACHE keys on this same
+    # reading, and a second walk could see a different host -- keying on one state while
+    # generating a document for another.
+    if allowed is None:
+        allowed = _network_recovery.allowed_interfaces(blocked_addresses)
+    filter_real_interfaces = (
+        sum(1 for _address, is_loopback in allowed if not is_loopback) > 1
+    )
+    # Written only alongside a non-empty blocklist: an allowlist ALONE would put UDPv4 into
+    # whitelist mode, costing the any-address socket for no reason. Empty when the host
+    # could not be read, since an allowlist matching nothing leaves Fast-DDS' whitelist
+    # empty and it then fills it with a sentinel that allows nothing through.
+    allowlist_entries = ""
+    if entries and allowed:
+        allowlist_entries = "\n".join(
+            f"                    <interface name={quoteattr(address)}"
+            f' netmask_filter="{"ON" if is_loopback or filter_real_interfaces else "AUTO"}"/>'
+            for address, is_loopback in sorted(allowed)
+        )
+        allowlist_entries = (
+            "                <allowlist>\n" + allowlist_entries + "\n                </allowlist>\n"
+        )
+
+    return f"""<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com">
+    <transport_descriptors>
+{shm_descriptor}        <transport_descriptor>
+            <transport_id>{udp_transport_id}</transport_id>
+            <type>UDPv4</type>
+            <sendBufferSize>{sockets_size}</sendBufferSize>
+            <receiveBufferSize>{sockets_size}</receiveBufferSize>
+            <netmask_filter>AUTO</netmask_filter>
+            <interfaces>
+{allowlist_entries}                <blocklist>
+{blocklist_entries}
+                </blocklist>
+            </interfaces>
+        </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="{profile_name}">
+        <rtps>
+            <userTransports>
+{shm_user_transport}                <transport_id>{udp_transport_id}</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+            <sendSocketBufferSize>{sockets_size}</sendSocketBufferSize>
+            <listenSocketBufferSize>{sockets_size}</listenSocketBufferSize>
+        </rtps>
+    </participant>
+</profiles>
+"""
+
+
+def _vpn_excluded_transports_profile(
+    factory: "DomainParticipantFactory",
+    use_shared_memory: bool,
+    sockets_size: int,
+    blocked_addresses: "Collection[str]",
+) -> "Optional[str]":
+    """Name of a loaded XML profile carrying the VPN-excluding transports, or ``None``
+    if one could not be provided — the caller then falls back to the default
+    transports (today's behaviour) rather than failing to create a participant.
+
+    Resolved once per distinct configuration and cached, including failures: Fast-DDS
+    keeps transport ids and profile names in a process-wide registry and logs an error
+    when one is re-registered, so re-loading the same document on every participant
+    creation (and every network-recovery rebuild) would be pure noise. A configuration
+    that genuinely changes — a tunnel appearing or going away — gets its own profile,
+    up to :data:`_VPN_TRANSPORTS_PROFILE_LIMIT` of them."""
+    global _vpn_transports_profile_limit_warned
+
+    # The allowed interfaces are part of the KEY, not just of the generated document.
+    # The profile bakes in one <interface> entry per allowed address together with the
+    # netmask filter that address needs, so two hosts states that block the same tunnel
+    # but differ in what is left -- Wi-Fi associating after startup, a second NIC coming
+    # up -- must not share a cache entry. Keyed on the blocked set alone, the later state
+    # would be handed the earlier state's document: stale addresses in the allowlist, and
+    # a filter decision taken when there was nothing yet to duplicate across. That is the
+    # duplication this feature exists to remove, reinstated on the LAN. The C++ side has
+    # no equivalent staleness because refresh_vpn_interface_blocklist recomputes the
+    # descriptors on every creation.
+    allowed = _network_recovery.allowed_interfaces(blocked_addresses)
+    key = (
+        use_shared_memory,
+        sockets_size,
+        frozenset(blocked_addresses),
+        frozenset(allowed),
+    )
+    entries = sorted(set(blocked_addresses))
+    warning: "Optional[str]" = None
+
+    with _vpn_transports_profiles_lock:
+        if key in _vpn_transports_profiles:
+            # Cached, and a cached None means "already tried and warned about".
+            return _vpn_transports_profiles[key]
+
+        if len(_vpn_transports_profiles) >= _VPN_TRANSPORTS_PROFILE_LIMIT:
+            # Deliberately NOT cached, unlike the load failure below: that one consumes
+            # one of the limited slots and so is self-bounding, whereas every set
+            # refused here would be a new entry for a tunnel that reconnects onto a new
+            # address each time — an unbounded dict keyed by whatever the network
+            # hands us. Nothing is lost by forgetting them: from here on the answer is
+            # None for every configuration alike, and the flag below carries the
+            # once-only duty the cached None used to.
+            if not _vpn_transports_profile_limit_warned:
+                _vpn_transports_profile_limit_warned = True
+                warning = (
+                    f"{_VPN_TRANSPORTS_PROFILE_LIMIT} distinct VPN / tunnel interface "
+                    f"sets have been seen in this process, which is the ceiling on "
+                    f"transport profiles Fast-DDS can be given (it cannot unload one). "
+                    f"From now on participants keep the default transports, so they "
+                    f"WILL bind and announce every tunnel address -- starting with "
+                    f"{', '.join(entries)}. Restart the process to resume excluding "
+                    f"tunnels, or set "
+                    f"{_network_recovery._ALLOW_VPN_INTERFACES_ENV} if that is intended"
+                )
+            profile_name = None
+        else:
+            profile_name = (
+                f"{_VPN_TRANSPORTS_PROFILE_PREFIX}_{len(_vpn_transports_profiles)}"
+            )
+            xml = _vpn_excluded_transports_xml(
+                use_shared_memory=use_shared_memory,
+                sockets_size=sockets_size,
+                blocked_addresses=entries,
+                # The same reading the key above was built from, so the cached document
+                # and the entry it is filed under can never describe different hosts.
+                allowed=allowed,
+                profile_name=profile_name,
+                shm_transport_id=f"{profile_name}_shm",
+                udp_transport_id=f"{profile_name}_udpv4",
+            )
+            # load_XML_profiles_string reports RETCODE_OK even for a document Fast-DDS
+            # rejected (a duplicate transport id only logs), so the load is verified by
+            # asking for the profile back — that is the call whose failure would
+            # otherwise leave a bare, unconfigured QoS behind. The length is in bytes,
+            # not characters, which only differ if a non-ASCII interface name ever
+            # reaches the document.
+            probe = DomainParticipantQos()
+            if (
+                factory.load_XML_profiles_string(xml, len(xml.encode("utf-8"))) != RETCODE_OK
+                or factory.get_participant_qos_from_profile(profile_name, probe) != RETCODE_OK
+            ):
+                _vpn_transports_profiles[key] = None
+                warning = (
+                    "could not load the generated transport profile that excludes VPN "
+                    "interfaces; this participant will bind and announce "
+                    f"{', '.join(entries)} as before, and will keep doing so for the "
+                    f"life of this process (set "
+                    f"{_network_recovery._ALLOW_VPN_INTERFACES_ENV} to silence this)"
+                )
+                profile_name = None
+            else:
+                _vpn_transports_profiles[key] = profile_name
+
+    # Deliberately outside the lock: _emit_log calls the user's log callback, which is
+    # documented as free to create participants, and such a callback would re-enter
+    # this function and deadlock on a non-reentrant Lock.
+    if warning is not None:
+        _network_recovery._emit_log(_network_recovery.LogLevel.WARNING, warning)
+    return profile_name
+
+
 class TransportMode(Enum):
     """Network transport selection for :func:`make_domain_participant`, mirroring the
     C++ ``provizio::dds::transport_mode``. Controls only whether shared memory is used
@@ -1043,51 +1408,397 @@ def make_domain_participant(domain_id: int = 0,
             kind = "UDPv4" if disable_shm else "DEFAULT"
             return f"{kind}?sockets_size={_resolve_udp_socket_buffer_size()}"
 
-        def __init__(self, domain_id, initial_discovery_callback=None,
-                     initial_discovery_kinds=None, transport=TransportMode.AUTOMATIC):
-            self._cleaned_up = False
-            self._domain_id = domain_id
+        def _resolve_transports(
+            self, factory: "DomainParticipantFactory", transport: "TransportMode"
+        ) -> "Optional[str]":
+            """Decide how this participant's transports are configured, and return the
+            name of a loaded XML profile carrying them — or ``None`` to use Fast-DDS's
+            own builtin-transport setup driven by FASTDDS_BUILTIN_TRANSPORTS.
 
-            # Set before create_participant so Fast-DDS picks it up. FASTDDS_BUILTIN_TRANSPORTS
-            # is process-global, so the FIRST participant (or an external setting) fixes it for
-            # every later one — unlike C++, which applies transports per-participant via
-            # setup_transports(). When the caller explicitly asked for a non-AUTOMATIC transport
-            # but the env var is already set to a different value, that request will be silently
-            # ignored (e.g. a UDP_ONLY participant created to dodge SHM still inherits SHM), so
-            # warn rather than mislead. AUTOMATIC means "no preference" — never warn for it.
+            The profile route is taken only when the host has a VPN / tunnel interface
+            to keep out of the transports (see
+            :func:`network_recovery.vpn_interface_blocklist_entries`), because that is the one
+            thing the env variable cannot express. Hosts without a VPN therefore keep
+            byte-for-byte today's configuration path, and the new one is exercised only
+            where it is needed.
+
+            Re-resolved before every participant creation, including a
+            network-recovery rebuild: a tunnel can come up, go down or change address
+            while the process runs, and a rebuild must bind the interface set that
+            exists at that moment."""
+            global _builtin_transports_set_by_library
+
+            blocked_entries = _network_recovery.vpn_interface_blocklist_entries()
+            if _network_recovery.blocklist_read_failed():
+                # The host could not be read, which is NOT the same as having no tunnel --
+                # and on a rebuild the difference is the whole point: deriving fresh
+                # transports from an empty reading would drop the exclusion this
+                # participant already had, unblocking a tunnel that is still up. Reusing
+                # the profile last applied keeps the last known set excluded until a read
+                # succeeds. Mirrors refresh_vpn_interface_blocklist, which leaves its
+                # interface lists untouched for the same reason.
+                return self._last_vpn_profile_name
+
+            if not blocked_entries:
+                # Nothing is excluded any more, so forget what was last reported: a
+                # tunnel that comes back — even on the address it had before — is worth
+                # a line again. refresh_vpn_interface_blocklist() in
+                # src/domain_participant.cpp records the current set unconditionally for
+                # the same reason, and the two must not disagree about when they speak.
+                self._last_logged_vpn_blocklist = None
+
+            # Two ways the caller can own the transport configuration, both of which
+            # this layer must leave alone — matching what src/domain_participant.cpp
+            # does, and what the README promises:
+            #   - an XML profile, either named by FASTDDS_DEFAULT_PROFILES_FILE or
+            #     picked up as DEFAULT_FASTDDS_PROFILES.xml in the working directory,
+            #     which the process' first factory.load_profiles() auto-loads — and
+            #     which is therefore answered once, not per creation (see
+            #     _xml_profile_owns_transports). Taking the profile route then would
+            #     overwrite the whole wire_protocol section (discovery protocol, initial
+            #     peers, lease) with our profile's defaults, silently discarding the
+            #     caller's discovery configuration;
+            #   - FASTDDS_BUILTIN_TRANSPORTS set by someone other than us, which
+            #     selects a transport stack (LARGE_DATA, UDPv6, max_msg_size, ...)
+            #     that our generated profile would replace with plain SHM+UDPv4.
+            xml_profile_in_use = _xml_profile_owns_transports(
+                _DomainParticipant.xml_profiles_env_variable
+            )
+            #   - and a third way, the only one visible in the QoS rather than inferred from
+            #     the environment: descriptors the caller configured through
+            #     DomainParticipantFactory itself (see _caller_configured_transports).
+            #     Handing such a participant a profile of ours would override a transport
+            #     selection they made deliberately, so the exclusion does not reach it —
+            #     the same boundary the C++ side draws by only ever touching descriptors
+            #     its own setup_transports() created.
+            transports_configured_by_caller = _caller_configured_transports(factory)
+
+            # Resolved BEFORE the VPN branch below, and on both routes, because the
+            # transport stack is a process-wide decision that must not depend on whether
+            # a tunnel happens to be up. Taking the profile route first would skip the
+            # warning and the env pinning underneath, so the same application code would
+            # behave differently on two hosts: with FASTDDS_BUILTIN_TRANSPORTS already
+            # fixed to DEFAULT by an earlier participant, a later UDP_ONLY one keeps
+            # SHM+UDPv4 and is told so — but on a tunnel-carrying host it would silently
+            # get a UDP-only profile instead, and nothing would say so.
+            #
+            # Safe to pin the env variable even when the profile route wins: the
+            # generated profile sets <useBuiltinTransports>false</useBuiltinTransports>,
+            # and Fast-DDS reads FASTDDS_BUILTIN_TRANSPORTS only for participants where
+            # that flag is true (set_builtin_transports_from_env_var, called from
+            # RTPSParticipantImpl::setup_transports). So the value governs later
+            # participants that do not take the profile route — a tunnel going away, say
+            # — which is exactly the consistency wanted.
             desired_transports = _DomainParticipant._builtin_transports_value(transport)
-            existing_transports = os.environ.get("FASTDDS_BUILTIN_TRANSPORTS")
-            if (
-                transport != TransportMode.AUTOMATIC
-                and existing_transports is not None
-                and existing_transports != desired_transports
-            ):
-                _network_recovery._emit_log(
-                    _network_recovery.LogLevel.WARNING,
-                    f"transport={transport} requested but FASTDDS_BUILTIN_TRANSPORTS is already "
-                    f"set to '{existing_transports}' (it is process-global — fixed by the first "
-                    f"participant created in this process or by an external setting). This "
-                    f"participant keeps the existing transport, NOT the requested "
-                    f"'{desired_transports}'.",
+
+            # Reading the variable, pinning it and remembering what we pinned is ONE
+            # decision -- which process-wide transport stack is in force, and whether this
+            # library is what put it there -- so it happens under one lock (see
+            # _builtin_transports_lock for the drift two threads produce without it). The
+            # warning is only composed here and emitted after the lock is released: it goes
+            # through the user's log callback, which is free to create another participant
+            # and would then re-enter this very block.
+            transport_override_warning = None
+            with _builtin_transports_lock:
+                existing_transports = os.environ.get("FASTDDS_BUILTIN_TRANSPORTS")
+                transports_owned_by_caller = (
+                    existing_transports is not None
+                    and existing_transports != _builtin_transports_set_by_library
                 )
-            os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", desired_transports)
+                if (
+                    transport != TransportMode.AUTOMATIC
+                    and existing_transports is not None
+                    and existing_transports != desired_transports
+                ):
+                    transport_override_warning = (
+                        f"transport={transport} requested but FASTDDS_BUILTIN_TRANSPORTS is already "
+                        f"set to '{existing_transports}' (it is process-global -- fixed by the first "
+                        f"participant created in this process or by an external setting). This "
+                        f"participant keeps the existing transport, NOT the requested "
+                        f"'{desired_transports}'."
+                    )
+                os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", desired_transports)
+                if existing_transports is None:
+                    # Remembered so a later participant can tell this apart from a value
+                    # the caller set, and still take the VPN-excluding profile route.
+                    #
+                    # Keyed on the variable having been ABSENT (existing_transports was read
+                    # just above, before the setdefault), NOT on its value matching what we
+                    # would have chosen. A caller who sets it to that same value owns it
+                    # exactly as much as one who sets it to anything else, and the README
+                    # promises their transports are left alone -- claiming it because the two
+                    # strings happen to agree would take the profile route over a deliberate,
+                    # process-wide choice, on the one configuration where the coincidence
+                    # hides it.
+                    _builtin_transports_set_by_library = desired_transports
+                effective_transports = os.environ["FASTDDS_BUILTIN_TRANSPORTS"]
 
-            # Shared-memory housekeeping BEFORE the participant is created: reclaim the
-            # segments of participants that died without cleaning up (Fast-DDS never
-            # does, so a service restarted in a loop fills the shared-memory filesystem
-            # and silently degrades every participant on the host to UDP), and complain
-            # if it is nearly full anyway. Keyed off the resolved transport rather than
-            # the env variable above, which an external setting may have fixed for the
-            # whole process. Mirrors src/domain_participant.cpp.
-            if not _DomainParticipant._shared_memory_ruled_out(transport):
-                _shm_cleanup.manage_shared_memory_space()
+            if transport_override_warning is not None:
+                _network_recovery._emit_log(
+                    _network_recovery.LogLevel.WARNING, transport_override_warning
+                )
 
-            factory = DomainParticipantFactory.get_instance()
-            # It's required so consequent get_default_participant_qos() respects XML profiles
-            factory.load_profiles()
+            # The snapshot has to learn when the exclusion cannot be applied: DDS is about
+            # to bind and announce the tunnel, so change detection must keep watching it.
+            # Reported whether or not a tunnel is up right now -- one can come up later, by
+            # which time this participant's transports are long since fixed. Mirrors the
+            # report_vpn_exclusion_not_applied() calls in src/domain_participant.cpp.
+            if xml_profile_in_use or transports_owned_by_caller or transports_configured_by_caller:
+                _network_recovery.report_vpn_exclusion_not_applied()
 
+            if (
+                blocked_entries
+                and not xml_profile_in_use
+                and not transports_owned_by_caller
+                and not transports_configured_by_caller
+            ):
+                profile_name = _vpn_excluded_transports_profile(
+                    factory,
+                    # From the EFFECTIVE process-wide selection, not from this
+                    # participant's request: the warning above has just told the caller
+                    # their request is not what they get, and the profile has to match
+                    # what was actually said. Only values this library writes can be seen
+                    # here (an externally-set one means transports_owned_by_caller and no
+                    # profile route at all), so the leading token is DEFAULT or UDPv4.
+                    use_shared_memory=_shared_memory_in_transports_value(
+                        effective_transports
+                    ),
+                    sockets_size=_resolve_udp_socket_buffer_size(),
+                    blocked_addresses=blocked_entries,
+                )
+                if profile_name is not None:
+                    # A name in PROVIZIO_DDS_ALLOW_VPN_INTERFACES that re-admitted nothing.
+                    # Reported on this path because the enumeration that fed it is what
+                    # classified this host's interfaces, so this is the first moment the
+                    # answer is known -- and only where it is actionable: with something
+                    # excluded (which is the only reason this route was taken), a name
+                    # that matched none of it is a typo or the wrong identity for the platform
+                    # ("tailscale" for a device called "tailscale0"), and the deployment
+                    # that needed DDS over the tunnel is not getting it. Where nothing is
+                    # excluded there is nothing the name could have re-admitted, which is
+                    # the ordinary case for one setting given fleet-wide to hosts whose
+                    # tunnels differ. The names come back once per process. Mirrors
+                    # refresh_vpn_interface_blocklist in src/domain_participant.cpp.
+                    unmatched = _network_recovery.take_unmatched_vpn_allow_override_names()
+                    if unmatched:
+                        # Each name sanitised because it is an environment value, i.e.
+                        # arbitrary text reaching a log line.
+                        listed = ", ".join(
+                            _network_recovery._sanitise_env_value_for_log(name)
+                            for name in unmatched
+                        )
+                        self._pending_vpn_blocklist_logs.append(
+                            (
+                                _network_recovery.LogLevel.WARNING,
+                                f"{_network_recovery._ALLOW_VPN_INTERFACES_ENV} names "
+                                f"{listed}, which matched no VPN / tunnel interface on this "
+                                f"host, so DDS still does not use "
+                                f"{'it' if len(unmatched) == 1 else 'them'}. Name the "
+                                f"interface exactly as this host reports it (on Windows, the "
+                                f"adapter's friendly name or its description), or set the "
+                                f"variable to 1 to carry DDS over every tunnel.",
+                                # Stays true whatever the transports turn out to be: the
+                                # name matched nothing regardless. Its source latch is
+                                # one-shot, so dropping this message loses the report for the
+                                # life of the process -- the operator would never learn the
+                                # name is a typo.
+                                False,
+                            )
+                        )
+                    # Worth reporting: a VPN address silently missing from the locator
+                    # set is otherwise indistinguishable from a peer that cannot be
+                    # reached at all, and this is the only place that decision is made.
+                    # Logged once per distinct set, not once per creation, so a process
+                    # with several participants (or one rebuilt by network recovery)
+                    # does not repeat an identical line indefinitely.
+                    entries = sorted(blocked_entries)
+                    if entries != self._last_logged_vpn_blocklist:
+                        # Stashed rather than emitted here: _build_participant_qos runs
+                        # from the reset while _registration_mutex and _lifecycle_lock are
+                        # held, and _emit_log calls the caller's log callback — one that
+                        # creates an endpoint would deadlock on the non-reentrant
+                        # _registration_mutex every endpoint constructor takes. The reset
+                        # and the constructor flush it once their locks are released.
+                        # Each entry sanitised for the same reason a rejected environment
+                        # value is: the text comes from the OS, and on Windows an adapter's
+                        # friendly name is administrator-settable and far less constrained
+                        # than a POSIX device name, which the kernel already refuses to give
+                        # whitespace or control characters. Mirrors the C++ report.
+                        listed = ", ".join(
+                            _network_recovery._sanitise_env_value_for_log(entry)
+                            for entry in entries
+                        )
+                        self._pending_vpn_blocklist_logs.append(
+                            (
+                                _network_recovery.LogLevel.INFO,
+                                f"excluding VPN / tunnel interface(s) from the DDS "
+                                f"transports on domain {self._domain_id}: {listed} "
+                                f"(set {_network_recovery._ALLOW_VPN_INTERFACES_ENV} to "
+                                f"carry DDS over them)",
+                                # The one claim a failed profile read-back invalidates.
+                                True,
+                            )
+                        )
+                    self._last_logged_vpn_blocklist = entries
+                    self._last_vpn_profile_name = profile_name
+                    return profile_name
+
+                # The profile could not be built (the per-process ceiling, or a document
+                # Fast-DDS refused) and this participant will bind the tunnel after all, so
+                # change detection has to keep watching every tunnel from here on.
+                _network_recovery.report_vpn_exclusion_not_applied()
+
+                # Forget what was last reported, too: the C++ side records the current set
+                # unconditionally, and without this a later participant that DOES exclude
+                # the same set would say nothing, leaving the operator with the "will bind
+                # and announce" warning and no line to supersede it.
+                self._last_logged_vpn_blocklist = None
+            elif blocked_entries and not self._vpn_exclusion_skip_reported:
+                # A tunnel is up and the exclusion is NOT being applied, because the caller
+                # owns the transport configuration. Said once per participant, and only when
+                # it makes a difference: silence here is what a vehicle paying for
+                # duplicated traffic over a metered tunnel would otherwise get, with the
+                # exclusion documented as on by default and nothing anywhere saying why it
+                # did not apply. Note what counts as owning the transports: ANY
+                # DEFAULT_FASTDDS_PROFILES.xml in the working directory does, even one that
+                # configures no transports at all, which is the case an operator is least
+                # likely to guess. Mirrors refresh_vpn_interface_blocklist in
+                # src/domain_participant.cpp.
+                self._vpn_exclusion_skip_reported = True
+                self._pending_vpn_blocklist_logs.append(
+                    (
+                        _network_recovery.LogLevel.INFO,
+                        f"not excluding VPN / tunnel interface(s) on domain "
+                        f"{self._domain_id}: the transports are yours (an XML profile, or "
+                        f"FASTDDS_BUILTIN_TRANSPORTS), so this library configures none of "
+                        f"them and cannot exclude an interface from them. DDS will bind and "
+                        f"announce on the tunnel; exclude it in your own transport "
+                        f"descriptors' interface_blocklist if that is not what you want.",
+                        # Says the exclusion did NOT apply, so nothing below invalidates it.
+                        False,
+                    )
+                )
+
+            # Nothing left to decide: FASTDDS_BUILTIN_TRANSPORTS was pinned above (it is
+            # process-global, so the first participant — or an external setting — fixes it
+            # for every later one, unlike C++, which applies transports per participant via
+            # setup_transports). None means "no profile of ours", i.e. let Fast-DDS build
+            # the transports from that variable.
+            return None
+
+        def _discard_reports_of_an_exclusion_that_did_not_apply(self) -> None:
+            """Drop the queued reports that CLAIMED an exclusion this participant turns out
+            not to have, and only those.
+
+            Called where the transports end up as the defaults after all, so "these
+            interfaces were excluded" would be false. Everything else queued on the same pass
+            stays, and the unmatched-name warning is why that distinction matters: the latch
+            behind it hands the names out once per process, so discarding it here would bury
+            a misconfigured PROVIZIO_DDS_ALLOW_VPN_INTERFACES for the life of the process --
+            even once the transport-profile read-back starts succeeding again on a later
+            rebuild."""
+            self._pending_vpn_blocklist_logs = [
+                entry
+                for entry in self._pending_vpn_blocklist_logs
+                if not entry[2]  # describes_applied_exclusion
+            ]
+
+        def _flush_pending_vpn_blocklist_log(self) -> None:
+            """Emit the report :meth:`_resolve_transports` stashed, if any.
+
+            MUST be called with no participant lock held: _emit_log calls the caller's
+            log callback, which is free to re-enter provizio APIs that take
+            _registration_mutex or the lifecycle lock."""
+            messages = self._pending_vpn_blocklist_logs
+            if not messages:
+                return
+            self._pending_vpn_blocklist_logs = []
+            for level, message, _describes_applied_exclusion in messages:
+                _network_recovery._emit_log(level, message)
+
+        def _build_participant_qos(
+            self, factory: "DomainParticipantFactory", transport: "TransportMode"
+        ) -> None:
+            """Build ``self._participant_qos`` from scratch: the transports (see
+            :meth:`_resolve_transports`) plus this library's discovery timing and
+            message-size configuration, both skipped when the caller supplied an XML
+            profile of their own.
+
+            Called before every participant creation, not once in __init__, so a
+            network-recovery rebuild re-resolves the transports against the interfaces
+            that exist at that moment — a tunnel can come up, go down or change address
+            while the process runs. Mirrors the per-creation
+            ``refresh_vpn_interface_blocklist`` call in src/domain_participant.cpp."""
             self._participant_qos = DomainParticipantQos()
+            transport_profile_name = self._resolve_transports(factory, transport)
+            # The factory default is ALWAYS the base, profile or not. Anything the caller
+            # configured through DomainParticipantFactory lives there — initial peers, a
+            # discovery server, lease durations — including from a load_XML_profiles_file /
+            # load_XML_profiles_string call that no environment probe can detect. Reading
+            # the whole QoS out of our generated profile instead (as this did) would hand
+            # back set_qos_from_attributes' result, which replaces wire_protocol().builtin
+            # wholesale and silently drops every one of those settings on any host that
+            # happens to have a tunnel up. A failure here leaves the library defaults the
+            # QoS was constructed with, which is the same floor as before.
             factory.get_default_participant_qos(self._participant_qos)
+            if transport_profile_name is not None:
+                profile_qos = DomainParticipantQos()
+                # Checked, not assumed: an unreadable profile would otherwise leave the
+                # transports untouched while the report claimed the tunnel was excluded.
+                if (
+                    factory.get_participant_qos_from_profile(transport_profile_name, profile_qos)
+                    == RETCODE_OK
+                ):
+                    profile_transports = profile_qos.transport()
+                    own_transports = self._participant_qos.transport()
+                    # Transports only, and only these fields. user_transports is empty here
+                    # (a caller who configured descriptors never reaches this route — see
+                    # _caller_configured_transports), use_builtin_transports comes from the
+                    # profile as false so FASTDDS_BUILTIN_TRANSPORTS cannot append an
+                    # unfiltered stack next to ours, and the socket buffer sizes are the
+                    # same tuning the env-variable route applies. Deliberately NOT
+                    # netmask_filter: the profile leaves the participant-level field at its
+                    # default, so copying it would overwrite a caller's choice with AUTO —
+                    # the blocklisting descriptor carries its own ON.
+                    #
+                    # LIMITATION, and the reason the C++ side has a guard this one cannot
+                    # mirror: Fast-DDS refuses to register a socket transport whose
+                    # descriptor asks for netmask filtering ON while the PARTICIPANT-level
+                    # filter says OFF, which would leave the participant with no UDP at all.
+                    # refresh_vpn_interface_blocklist in src/domain_participant.cpp therefore
+                    # checks the participant-level value and steps aside when it is OFF. Here
+                    # it cannot be read: the SWIG bindings expose netmask_filter as an opaque
+                    # pointer and export no NetmaskFilterKind values to compare it against.
+                    # A caller in this position has no way to set OFF from Python either --
+                    # for the same missing binding -- so it takes an XML profile of their own
+                    # that sets participant-level OFF while configuring no transports (a
+                    # profile that configures transports takes the caller-owned route and
+                    # never reaches here). Such a profile should exclude the tunnel in its own
+                    # descriptors rather than rely on this library.
+                    own_transports.user_transports.clear()
+                    for descriptor in profile_transports.user_transports:
+                        own_transports.user_transports.append(descriptor)
+                    own_transports.use_builtin_transports = (
+                        profile_transports.use_builtin_transports
+                    )
+                    own_transports.send_socket_buffer_size = (
+                        profile_transports.send_socket_buffer_size
+                    )
+                    own_transports.listen_socket_buffer_size = (
+                        profile_transports.listen_socket_buffer_size
+                    )
+                else:
+                    _network_recovery._emit_log(
+                        _network_recovery.LogLevel.WARNING,
+                        f"could not read back the generated transport profile "
+                        f"'{transport_profile_name}'; this participant keeps the default "
+                        f"transports and will bind and announce any VPN / tunnel interface",
+                    )
+                    self._discard_reports_of_an_exclusion_that_did_not_apply()
+                    # Forgotten for the same reason as on the profile-not-built path above:
+                    # this participant binds the tunnel, so a later one that excludes the
+                    # same set must be allowed to say so.
+                    self._last_logged_vpn_blocklist = None
 
             # Unless defined in the XML Profile, enable more reliable participants matching
             if (
@@ -1128,6 +1839,60 @@ def make_domain_participant(domain_id: int = 0,
                 self._participant_qos.properties().properties().push_back(
                     Property("fastdds.max_message_size", str(_resolve_max_message_size()))
                 )
+
+        def __init__(self, domain_id, initial_discovery_callback=None,
+                     initial_discovery_kinds=None, transport=TransportMode.AUTOMATIC):
+            self._cleaned_up = False
+            self._domain_id = domain_id
+            # Last VPN / tunnel blocklist this participant logged (see
+            # _resolve_transports), so an unchanged set is reported once rather than on
+            # every creation and every recovery rebuild.
+            self._last_logged_vpn_blocklist: "Optional[list]" = None
+            # The generated transport profile this participant last applied, reused when a
+            # later read of the host fails: an unreadable interface list must not cost a
+            # rebuild the exclusion it already had (see _resolve_transports).
+            self._last_vpn_profile_name: "Optional[str]" = None
+            # Reports produced by _resolve_transports under this participant's locks and
+            # emitted by _flush_pending_vpn_blocklist_log once they are released. A list
+            # rather than a single message: one pass can have two independent things to
+            # say -- which interfaces it excluded, and that a name given in
+            # PROVIZIO_DDS_ALLOW_VPN_INTERFACES re-admitted none of them -- and the second
+            # is worth saying precisely on the pass that produces the first. Mirrors
+            # domain_participant::pending_vpn_blocklist_logs.
+            # Entries are (level, message, describes_applied_exclusion). The third field is
+            # what lets a failed transport-profile read-back discard exactly the claim it
+            # invalidates -- "these interfaces were excluded" -- while keeping the reports
+            # that stay true whatever the transports ended up being.
+            self._pending_vpn_blocklist_logs: "list" = []
+            # Whether this participant has already reported that it is NOT excluding VPN /
+            # tunnel interfaces even though the host has some, because the caller owns the
+            # transport configuration. The condition cannot change while the participant
+            # lives, so the report is worth making exactly once. Mirrors
+            # domain_participant::vpn_exclusion_skip_reported.
+            self._vpn_exclusion_skip_reported = False
+
+            # Shared-memory housekeeping BEFORE the participant is created: reclaim the
+            # segments of participants that died without cleaning up (Fast-DDS never
+            # does, so a service restarted in a loop fills the shared-memory filesystem
+            # and silently degrades every participant on the host to UDP), and complain
+            # if it is nearly full anyway. Keyed off the resolved transport rather than
+            # the env variable above, which an external setting may have fixed for the
+            # whole process. Mirrors src/domain_participant.cpp.
+            if not _DomainParticipant._shared_memory_ruled_out(transport):
+                _shm_cleanup.manage_shared_memory_space()
+
+            factory = DomainParticipantFactory.get_instance()
+            # It's required so consequent get_default_participant_qos() respects XML profiles
+            factory.load_profiles()
+
+            # Remembered so a network-recovery rebuild can re-resolve the transports
+            # against the interfaces that exist at that moment (see
+            # _build_participant_qos).
+            self._transport = transport
+            self._build_participant_qos(factory, transport)
+            # No lock is held in the constructor, so this is the first safe point to
+            # report what the transports excluded.
+            self._flush_pending_vpn_blocklist_log()
 
             # Type / topic registries. Initialised BEFORE create_participant
             # below: an initial_discovery_callback can fire as soon as the
@@ -1691,8 +2456,16 @@ def make_domain_participant(domain_id: int = 0,
                 each endpoint.
             """
             # Phase 0: serialise against new registrations.
-            with self._registration_mutex:
-                self._reset_hook_locked(old_snapshot, new_snapshot)
+            try:
+                with self._registration_mutex:
+                    self._reset_hook_locked(old_snapshot, new_snapshot)
+            finally:
+                # Both locks are released here, so the log callback can safely re-enter
+                # this participant — see _resolve_transports. In a finally block, and not
+                # merely after the with, for the reason the C++ side uses a scope_exit
+                # guard: the path where an operator most needs to know which interfaces the
+                # transports left out is the one where the rebuild failed.
+                self._flush_pending_vpn_blocklist_log()
 
         def _reset_hook_locked(self, old_snapshot, new_snapshot):
             # Phase 1: snapshot.
@@ -1755,7 +2528,14 @@ def make_domain_participant(domain_id: int = 0,
                 # domain_participant::trigger_network_recovery_reset path.
                 _network_recovery.refresh_fastdds_interface_cache()
 
-                # Recreate with the same QoS, attaching the discovery listener
+                # Re-resolve the QoS before recreating: the interface set is exactly
+                # what changed, so the transports must be rebuilt against the tunnels
+                # that exist now rather than the ones that existed at construction
+                # time. Mirrors the per-creation refresh_vpn_interface_blocklist() call
+                # in src/domain_participant.cpp.
+                self._build_participant_qos(factory, self._transport)
+
+                # Recreate with the freshly resolved QoS, attaching the discovery listener
                 # BEFORE the new participant starts discovery (see
                 # _create_participant_with_listener). This is the load-bearing part
                 # of the fix for survives_reset: the peer's writer already exists, so

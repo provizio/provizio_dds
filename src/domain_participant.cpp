@@ -26,12 +26,17 @@
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "detail/env_utils.h"
 #include "provizio/dds/detail/network_recovery_coordinator.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/detail/shm_cleanup.h"
+#include "provizio/dds/detail/vpn_interfaces.h"
 #include "provizio/dds/logging.h"
 #include "provizio/dds/network_recovery.h"
 #include "provizio/dds/topic.h"
@@ -47,6 +52,9 @@
 #include <fastdds/rtps/builtin/data/PublicationBuiltinTopicData.hpp>
 #include <fastdds/rtps/builtin/data/SubscriptionBuiltinTopicData.hpp>
 #include <fastdds/rtps/reader/ReaderDiscoveryStatus.hpp>
+#include <fastdds/rtps/transport/SocketTransportDescriptor.hpp>
+#include <fastdds/rtps/transport/network/AllowedNetworkInterface.hpp>
+#include <fastdds/rtps/transport/network/NetmaskFilterKind.hpp>
 #include <fastdds/rtps/transport/shared_mem/SharedMemTransportDescriptor.hpp>
 #include <fastdds/rtps/writer/WriterDiscoveryStatus.hpp>
 
@@ -416,6 +424,89 @@ namespace provizio::dds
         // constant. Keep provizio_dds.py's _DomainParticipant.xml_profiles_env_variable
         // in sync with this constant.
         constexpr const char *const default_fastdds_env_variable = "FASTDDS_DEFAULT_PROFILES_FILE";
+
+        // Runs an action when the enclosing scope ends, however it ends. Used to emit the
+        // stashed VPN report from a function-scope object, so that every way out of a
+        // construction or a reset reports it — the early returns and the exception paths as
+        // well as the normal one, which an explicit call at the end would be alone in
+        // covering. The action must not throw (see flush_pending_vpn_blocklist_log, which is
+        // noexcept for this reason).
+        template <typename action_type> class scope_exit final
+        {
+          public:
+            // Conditionally noexcept: moving the action into the member is only nothrow if
+            // the action type's move is, and promising more than that would turn a throwing
+            // move into a terminate. The destructor stays implicitly noexcept by contrast,
+            // deliberately — an action that throws there is a contract violation, which is
+            // why the only action used here is noexcept itself.
+            explicit scope_exit(action_type action) noexcept(std::is_nothrow_move_constructible_v<action_type>)
+                : action{std::move(action)}
+            {
+            }
+            scope_exit(const scope_exit &) = delete;
+            scope_exit(scope_exit &&) = delete;
+            scope_exit &operator=(const scope_exit &) = delete;
+            scope_exit &operator=(scope_exit &&) = delete;
+            ~scope_exit()
+            {
+                action();
+            }
+
+          private:
+            action_type action;
+        };
+
+        // The second XML profiles file Fast-DDS loads: DomainParticipantFactory::load_profiles
+        // picks this name up from the working directory, unless SKIP_DEFAULT_XML_FILE is "1"
+        // (XMLProfileManager::loadDefaultXMLFile). Neither name is exposed as a public
+        // constant. Keep provizio_dds.py's _DEFAULT_FASTDDS_PROFILES_FILE_NAME and
+        // _SKIP_DEFAULT_XML_FILE_ENV in sync with these.
+        constexpr const char *const default_fastdds_profiles_file_name = "DEFAULT_FASTDDS_PROFILES.xml";
+        constexpr const char *const skip_default_fastdds_profiles_env_variable = "SKIP_DEFAULT_XML_FILE";
+
+        // Whether a participant's transports come from XML the caller wrote rather than
+        // from this library: either the profile named by FASTDDS_DEFAULT_PROFILES_FILE, or
+        // a DEFAULT_FASTDDS_PROFILES.xml in the working directory that load_profiles()
+        // auto-loads. Both end up in the QoS returned by get_default_participant_qos, and
+        // setup_transports appends to userTransports rather than replacing it — so the
+        // caller's own transport descriptors, blocklist included, are sitting in
+        // cached_qos alongside ours and must not be rewritten.
+        bool probe_working_directory_xml_profile()
+        {
+            const auto *const raw_skip =
+                std::getenv(skip_default_fastdds_profiles_env_variable);  // NOLINT: getenv required
+            const std::string_view skip{raw_skip != nullptr ? raw_skip : ""};
+            if (!skip.empty() && skip.front() == '1')
+            {
+                return false;  // Fast-DDS will not load it, so there is nothing of the caller's here.
+            }
+
+            std::error_code error;  // Non-throwing overload: an unreadable working directory is just "no profile".
+            return std::filesystem::is_regular_file(std::filesystem::path{default_fastdds_profiles_file_name}, error);
+        }
+
+        // Only the WORKING-DIRECTORY probe is resolved once per process, and only it needs to
+        // be: load_profiles() reads that directory on its FIRST call, so re-deriving the answer
+        // later would let a chdir between creations flip it in both directions — a file created
+        // afterwards would stop the exclusion over a profile Fast-DDS never read, and a file
+        // deleted (or a chdir away) would make a later rebuild rewrite the caller's own
+        // descriptors.
+        //
+        // Whether THIS participant was configured from the profile named by
+        // FASTDDS_DEFAULT_PROFILES_FILE is a per-participant fact, decided in the constructor,
+        // so it is combined on every call instead of being folded into the cache. Folding it in
+        // made the first participant's answer bind every later one, in both directions: a
+        // participant created with the variable set skips load_profiles() and takes the caller's
+        // XML, yet would still have been told the transports were ours to rewrite — the one
+        // thing the surrounding code promises never to do — while one created after a first
+        // participant that HAD the variable set would skip the exclusion for good.
+        //
+        // Mirrors _xml_profile_owns_transports in python/provizio_dds.py.
+        bool transports_come_from_user_xml(const bool used_env_xml_profile)
+        {
+            static const bool working_directory_profile = probe_working_directory_xml_profile();
+            return used_env_xml_profile || working_directory_profile;
+        }
     }  // namespace
 
     namespace detail
@@ -637,6 +728,15 @@ namespace provizio::dds
         {
             used_xml_profile = std::filesystem::exists(file_path) && !std::filesystem::is_directory(file_path);
         }
+        // Resolved once, here rather than per creation: load_profiles() below reads the
+        // working directory exactly once per process, so this is the moment the answer is
+        // decided for every participant and every rebuild that follows.
+        xml_profile_owns_transports = transports_come_from_user_xml(used_xml_profile);
+        // Read here, with the XML answer, and never again: see env_owns_transports. This is
+        // the same moment the transport block below decides whether to call setup_transports
+        // at all, so the two answers cannot disagree.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): startup-only probe, as everywhere else here
+        env_owns_transports = std::getenv("FASTDDS_BUILTIN_TRANSPORTS") != nullptr;
 
         auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
         if (!used_xml_profile)  // Unless configured via the XML profile
@@ -693,10 +793,22 @@ namespace provizio::dds
                 eprosima::fastdds::rtps::BuiltinTransportsOptions transport_options;
                 const std::uint32_t socket_buffer_size = resolve_udp_socket_buffer_size();
                 transport_options.sockets_buffer_size = socket_buffer_size;
+                // setup_transports APPENDS, so anything already in user_transports came from
+                // the caller (an XML profile they loaded themselves is handed back by
+                // get_default_participant_qos as the very same shared_ptr the factory holds).
+                // Remembering where their descriptors end is what lets
+                // refresh_vpn_interface_blocklist confine itself to ours.
+                const std::size_t descriptors_before_setup = cached_qos.transport().user_transports.size();
                 cached_qos.setup_transports(use_shared_memory ? eprosima::fastdds::rtps::BuiltinTransports::DEFAULT
                                                               : eprosima::fastdds::rtps::BuiltinTransports::UDPv4,
                                             transport_options);
                 warn_if_socket_buffers_are_capped(socket_buffer_size);
+
+                const auto &configured_transports = cached_qos.transport().user_transports;
+                for (std::size_t index = descriptors_before_setup; index < configured_transports.size(); ++index)
+                {
+                    own_transport_descriptors.insert(configured_transports[index]);
+                }
 
                 if (use_shared_memory)
                 {
@@ -735,6 +847,15 @@ namespace provizio::dds
             manage_shared_memory_space();
         }
 
+        // A guard rather than a call after create_fastdds_participant(): the throw below,
+        // and anything else that leaves this constructor early, must still report what the
+        // transports excluded. A host whose participant fails to come up on a tunnel-carrying
+        // network is exactly where an operator needs that context, and the reset path already
+        // uses the same guard for the same reason. Constructed here, after the last of the
+        // locks this function never takes -- flush_pending_vpn_blocklist_log must run with
+        // none held, which is trivially true throughout the constructor.
+        const scope_exit flush_vpn_blocklist_log{[this] { flush_pending_vpn_blocklist_log(); }};
+
         participant = create_fastdds_participant();
         if (participant == nullptr)
         {
@@ -753,6 +874,400 @@ namespace provizio::dds
         generation.store(1, std::memory_order_release);
     }
 
+    void domain_participant::refresh_vpn_interface_blocklist()
+    {
+        // Nothing of ours to configure when the caller took over transport
+        // configuration — XML they wrote themselves (see transports_come_from_user_xml:
+        // their descriptors, blocklist and all, are the ones sitting in cached_qos) or
+        // FASTDDS_BUILTIN_TRANSPORTS (Fast-DDS builds the descriptors itself, and they
+        // never reach cached_qos). Checked before enumerating interfaces so neither the
+        // syscall nor the log line below happens where it would mean nothing.
+        if (xml_profile_owns_transports || env_owns_transports)
+        {
+            // The snapshot has to learn this: DDS is about to bind and announce the tunnel,
+            // so change detection must keep watching it (see
+            // report_vpn_exclusion_not_applied). Reported whether or not a tunnel is up
+            // right now -- one can come up later, and by then this participant's transports
+            // are long since fixed.
+            detail::report_vpn_exclusion_not_applied();
+
+            // Said once, and only when it makes a difference: silence here is what a
+            // vehicle paying for duplicated traffic over a metered tunnel would otherwise
+            // get, with the exclusion documented as on by default and nothing anywhere
+            // saying why it did not apply. Note what counts as the caller owning the
+            // transports: ANY DEFAULT_FASTDDS_PROFILES.xml in the working directory does,
+            // even one that configures no transports at all, which is the case an operator
+            // is least likely to guess.
+            //
+            // The enumeration this costs is the one the applied path performs anyway, and it
+            // is asked for only while the line is still unsaid — so a tunnel that comes up
+            // later is still reported, and a host that never has one pays a single
+            // enumeration per participant creation.
+            if (!vpn_exclusion_skip_reported && !detail::vpn_interface_blocklist_entries().empty())
+            {
+                vpn_exclusion_skip_reported = true;
+                stash_vpn_blocklist_log(
+                    log_level::info,
+                    "not excluding VPN / tunnel interface(s) on domain " + std::to_string(domain_id) +
+                        ": the transports are yours (an XML profile, or FASTDDS_BUILTIN_TRANSPORTS), so this "
+                        "library configures none of them and cannot exclude an interface from them. DDS will "
+                        "bind and announce on the tunnel; exclude it in your own transport descriptors' "
+                        "interface_blocklist if that is not what you want.");
+            }
+            return;
+        }
+
+        // A blocklist is only usable together with netmask filtering (see the long comment
+        // where netmask_filter is set below), and Fast-DDS refuses to register a socket
+        // transport whose descriptor asks for ON while the PARTICIPANT-level filter says
+        // OFF: RTPSParticipantImpl validates the two against each other
+        // (network::netmask_filter::validate_and_transform) and drops the whole transport
+        // when they disagree. Applying the exclusion to a participant configured that way
+        // would therefore take UDP away entirely — no cross-host communication at all,
+        // reported only as a Fast-DDS error line — which is far worse than the duplicate
+        // traffic the exclusion saves. So the exclusion steps aside, and says so.
+        //
+        // Only OFF collides: a participant-level AUTO adopts the descriptor's value, and
+        // ON matches it.
+        if (cached_qos.transport().netmask_filter == eprosima::fastdds::rtps::NetmaskFilterKind::OFF)
+        {
+            // Same reason as the branch above: the tunnel stays bound, so it stays watched.
+            detail::report_vpn_exclusion_not_applied();
+
+            // Stashed, not logged, for the reason given further down: this runs with the
+            // lifecycle locks held during a rebuild. Reported once per participant, on the
+            // first refresh that would have excluded something, so a rebuilt participant on
+            // a tunnel-carrying host does not repeat it every time.
+            if (!vpn_exclusion_skip_reported && !detail::vpn_interface_blocklist_entries().empty())
+            {
+                vpn_exclusion_skip_reported = true;
+                stash_vpn_blocklist_log(
+                    log_level::info, "not excluding VPN / tunnel interface(s) on domain " + std::to_string(domain_id) +
+                                         ": this participant's netmask filter is OFF, and excluding an "
+                                         "interface requires it (Fast-DDS would refuse to register the UDP "
+                                         "transport, leaving no cross-host communication at all). Set the "
+                                         "participant's netmask filter to AUTO or ON, or exclude the "
+                                         "interface in your own transport descriptors.");
+            }
+            return;
+        }
+
+        // Shared memory has no interfaces, so only the socket transports (UDPv4/UDPv6)
+        // carry a blocklist — dynamic_pointer_cast is exactly the filter for that
+        // (SharedMemTransportDescriptor derives from PortBasedTransportDescriptor, not
+        // from SocketTransportDescriptor).
+        // A failed read is not "this host has no tunnels", and the difference matters here
+        // in a way it does not at first creation: the loops below ERASE what a previous
+        // refresh applied before re-adding from the fresh read, so taking a failure for an
+        // empty host would unblock a tunnel that is still up -- on exactly the rebuild a
+        // network change triggered, which is when the enumeration is most likely to fail
+        // and the exclusion most needed. Leaving every list exactly as it stands is the one
+        // answer that cannot be wrong: the tunnel that was blocked stays blocked, and the
+        // next creation or rebuild reads the host again.
+        bool enumeration_failed = false;
+        const auto blocked = detail::vpn_interface_blocklist_entries(&enumeration_failed);
+        if (enumeration_failed)
+        {
+            return;
+        }
+
+        // A name in PROVIZIO_DDS_ALLOW_VPN_INTERFACES that re-admitted nothing. Reported
+        // here because the enumeration just above is what classified this host's
+        // interfaces, so this is the first moment the answer is known -- and reported only
+        // where it is actionable: with something excluded, a name that matched none of it
+        // is a typo or the wrong identity for the platform ("tailscale" for a device called
+        // "tailscale0"), and the deployment that needed DDS over the tunnel is not getting
+        // it. With nothing excluded there is nothing the name could have re-admitted, which
+        // is the ordinary case for one setting given fleet-wide to hosts whose tunnels
+        // differ. take_ hands the names back once per process; the branches above return
+        // before it precisely because the exclusion is not applying there either way.
+        if (!blocked.empty())
+        {
+            const auto unmatched = detail::take_unmatched_vpn_allow_override_names();
+            if (!unmatched.empty())
+            {
+                std::string message{detail::allow_vpn_interfaces_env};
+                message += " names ";
+                bool first = true;
+                for (const auto &name : unmatched)
+                {
+                    message += first ? "" : ", ";
+                    // Sanitised because it is an environment value, i.e. arbitrary text
+                    // that reaches a log line -- see the same treatment of the OS-supplied
+                    // interface names below.
+                    message += detail::sanitise_env_value_for_log(name);
+                    first = false;
+                }
+                message += ", which matched no VPN / tunnel interface on this host, so DDS "
+                           "still does not use ";
+                message += unmatched.size() == 1 ? "it" : "them";
+                message += ". Name the interface exactly as this host reports it (on "
+                           "Windows, the adapter's friendly name or its description), or "
+                           "set the variable to 1 to carry DDS over every tunnel.";
+                stash_vpn_blocklist_log(log_level::warning, std::move(message));
+            }
+        }
+        // What the transports are left with, enumerated the way UDPv4Transport enumerates
+        // it, and how many of those are real interfaces rather than loopback. Both feed the
+        // per-interface netmask filter decided below; read once here rather than per
+        // descriptor, since every descriptor of ours faces the same host.
+        bool allowed_enumeration_failed = false;
+        const auto allowed_interfaces = detail::vpn_allowed_interfaces(blocked, &allowed_enumeration_failed);
+        if (allowed_enumeration_failed)
+        {
+            // The same rule as the failed blocklist read above, and for a sharper reason.
+            // These are two independent enumerations, so the second can fail where the first
+            // succeeded -- and going on with a non-empty blocklist and no allowlist is the
+            // one outcome this whole section may not produce: any non-empty interface list
+            // puts UDPv4 into whitelist mode, giving every remaining interface its own
+            // sender socket, and without the per-interface netmask filters the allowlist
+            // carries, each of them sends its own copy of every unicast datagram. That moves
+            // the duplication this feature removes from the tunnel onto the LAN. Leaving
+            // every list exactly as it stands cannot be wrong: the next creation or rebuild
+            // reads the host again.
+            return;
+        }
+        const auto real_interface_count = static_cast<std::size_t>(
+            std::count_if(allowed_interfaces.begin(), allowed_interfaces.end(),
+                          [](const detail::allowed_interface &entry) { return !entry.is_loopback; }));
+        std::unordered_set<std::string> applied;
+        std::unordered_set<std::string> applied_allowlist;
+        for (const auto &descriptor : cached_qos.transport().user_transports)
+        {
+            // Ours only. A descriptor the caller configured is shared process-wide and
+            // must be left exactly as they set it — including its own blocklist and its
+            // own netmask_filter, neither of which this library may second-guess. Where
+            // such a descriptor carries the traffic, the exclusion simply does not reach
+            // it: the caller took over transport configuration, so the tunnel is theirs
+            // to exclude (PROVIZIO_DDS_ALLOW_VPN_INTERFACES is not what they need — an
+            // interface_blocklist entry in their own XML is).
+            if (own_transport_descriptors.count(descriptor) == 0)
+            {
+                continue;
+            }
+
+            const auto socket_descriptor =
+                std::dynamic_pointer_cast<eprosima::fastdds::rtps::SocketTransportDescriptor>(descriptor);
+            if (!socket_descriptor)
+            {
+                continue;
+            }
+
+            // Only OUR entries are replaced, never the whole list. Two reasons the
+            // descriptors cannot simply be cleared: they outlive every rebuild, so an
+            // append would accumulate tunnels that have since gone away (and, worse, keep
+            // blocking an address the OS has meanwhile handed to a real interface) — but a
+            // clear would also discard entries that are not ours. A caller who loaded XML
+            // through DomainParticipantFactory::load_XML_profiles_file/_string themselves
+            // has their blocklist sitting in this very descriptor (get_default_participant_qos
+            // hands out the same shared_ptr), and erasing it would re-expose DDS on an
+            // interface they deliberately excluded.
+            auto &blocklist = socket_descriptor->interface_blocklist;
+            blocklist.erase(std::remove_if(blocklist.begin(), blocklist.end(),
+                                           [this](const eprosima::fastdds::rtps::BlockedNetworkInterface &entry) {
+                                               return last_applied_vpn_blocklist.count(entry.name) != 0;
+                                           }),
+                            blocklist.end());
+            for (const auto &address : blocked)
+            {
+                if (std::none_of(blocklist.begin(), blocklist.end(),
+                                 [&address](const eprosima::fastdds::rtps::BlockedNetworkInterface &entry) {
+                                     return entry.name == address;
+                                 }))
+                {
+                    blocklist.emplace_back(address);
+                    // Only what this call appended is ours to remove next time. An entry
+                    // that was already there is somebody else's — recording it here would
+                    // have the erase above delete it once the tunnel goes away.
+                    applied.insert(address);
+                }
+            }
+
+            // Netmask filtering, decided PER INTERFACE, because the two interfaces this
+            // leaves behind need opposite answers.
+            //
+            // Any non-empty interface list puts UDPv4 into whitelist mode: UDPv4Transport's
+            // constructor fills interface_whitelist_ with every interface the blocklist did
+            // NOT name, and open_output_channel then replaces the single any-address output
+            // socket with one UDPSenderResource(..., only_multicast_purpose=false,
+            // whitelisted=true) per allowed interface. RTPSParticipantImpl::sendSync calls
+            // send() on every one of them, and UDPTransportInterface::send transmits
+            // whenever `whitelisted` is set unless eProsimaUDPSocket::should_filter says
+            // otherwise -- which it only does with netmask_filter ON.
+            //
+            // LOOPBACK is in that set and must stay in it: it is how same-host participants
+            // reach each other wherever shared memory is off. But it cannot carry a datagram
+            // to another host at all, so every attempt it makes at one is a failed sendto
+            // and an EPROSIMA_LOG_WARNING -- per datagram, per remote locator. ON is what
+            // stops that: 127.0.0.1/8 matches no LAN destination, so the send returns before
+            // the syscall. Nothing is lost, because nothing off this host was ever reachable
+            // through it.
+            //
+            // A REAL interface is the opposite case. ON there means a peer outside its
+            // subnet -- reachable through a gateway, discovered perfectly well over
+            // multicast -- silently receives nothing, so it is worth switching on only where
+            // it buys the thing this feature exists for: with two or more real interfaces
+            // left, each sends its own copy of every unicast datagram, and filtering is what
+            // collapses those copies back to the one socket whose subnet holds the
+            // destination. With a single real interface there is nothing to collapse.
+            //
+            // Fast-DDS applies an allowlist entry's own filter (AllowedNetworkInterface
+            // carries one) after validate_and_transform against the descriptor's, which
+            // stays AUTO here so that both ON and AUTO entries are accepted.
+            const bool filter_real_interfaces = real_interface_count > 1;
+            auto &allowlist = socket_descriptor->interface_allowlist;
+            allowlist.erase(std::remove_if(allowlist.begin(), allowlist.end(),
+                                           [this](const eprosima::fastdds::rtps::AllowedNetworkInterface &entry) {
+                                               return last_applied_vpn_allowlist.count(entry.name) != 0;
+                                           }),
+                            allowlist.end());
+            // Written only alongside a blocklist, and only when the host reported something
+            // usable. Two degenerate cases it stays out of: with nothing to block there is
+            // nothing to filter either, and an allowlist ALONE would put UDPv4 into whitelist
+            // mode -- costing the any-address socket for no reason on every host without a
+            // tunnel. With nothing enumerated, an allowlist that matches no interface leaves
+            // interface_whitelist_ empty, and UDPv4Transport then fills it with a sentinel
+            // address that allows nothing through at all (UDPv4Transport.cpp:218-221).
+            if (!blocked.empty() && !allowed_interfaces.empty())
+            {
+                for (const auto &interface : allowed_interfaces)
+                {
+                    const auto filter = (interface.is_loopback || filter_real_interfaces)
+                                            ? eprosima::fastdds::rtps::NetmaskFilterKind::ON
+                                            : eprosima::fastdds::rtps::NetmaskFilterKind::AUTO;
+                    if (std::none_of(allowlist.begin(), allowlist.end(),
+                                     [&interface](const eprosima::fastdds::rtps::AllowedNetworkInterface &entry) {
+                                         return entry.name == interface.address;
+                                     }))
+                    {
+                        allowlist.emplace_back(interface.address, filter);
+                        applied_allowlist.insert(interface.address);
+                    }
+                }
+            }
+            // AUTO at descriptor level, so each entry's own filter is what decides. Assigned
+            // rather than left alone because a rebuild may find a different interface set
+            // than the one that set it last time.
+            socket_descriptor->netmask_filter = eprosima::fastdds::rtps::NetmaskFilterKind::AUTO;
+            // ASSIGNED, not latched. It describes what THIS refresh configured, and the
+            // report below reads it as such: a host that loses one of two tunnels goes back
+            // to a single real interface and to AUTO, and a latched flag would keep telling
+            // an operator diagnosing a reachability complaint that a filter is on when it
+            // is not. Every descriptor of ours faces the same host, so the last write and
+            // the first agree.
+            netmask_filtering_applied = filter_real_interfaces;
+        }
+
+        // Sorted so the same host always logs the same line (the entries live in an
+        // unordered_set) — and so it reads the same as the Python side's. Parentheses,
+        // not braces: brace-init would look for an initializer_list<std::string> and
+        // reject the iterator pair.
+        std::vector<std::string> sorted_entries(blocked.begin(), blocked.end());
+        std::sort(sorted_entries.begin(), sorted_entries.end());
+
+        // Worth reporting: an interface silently missing from the locator set is
+        // otherwise indistinguishable from a peer that cannot be reached at all, and
+        // this is the only place that decision is made. Reported once per distinct set,
+        // not once per creation, so a process with several participants — or one rebuilt
+        // by network recovery — does not repeat an identical line indefinitely. A
+        // genuine change, a tunnel appearing or going away, still reports itself.
+        //
+        // Stashed rather than logged here: this function runs from
+        // create_fastdds_participant, which the recovery path calls while holding
+        // registration_mutex AND reset_mutex exclusively, and log_info invokes the
+        // caller's log callback — a callback that re-enters any provizio API taking the
+        // lifecycle lock shared (publish, get_guid, make_publisher) would deadlock on a
+        // shared_mutex that is not recursive. The two callers flush it once their locks
+        // are released; the coordinator and listener_drain route their own logs out of
+        // locked regions for exactly this reason.
+        if (!sorted_entries.empty() && sorted_entries != last_logged_vpn_blocklist)
+        {
+            std::string message = "excluding VPN / tunnel interface(s) from the DDS transports on domain ";
+            message += std::to_string(domain_id);
+            message += ": ";
+            bool first = true;
+            for (const auto &entry : sorted_entries)
+            {
+                message += first ? "" : ", ";
+                // Sanitised for the same reason a rejected environment value is: this text
+                // comes from the OS, and on Windows an adapter's friendly name is
+                // administrator-settable and far less constrained than a POSIX device name,
+                // which the kernel already refuses to give whitespace or control characters.
+                message += detail::sanitise_env_value_for_log(entry);
+                first = false;
+            }
+            message += " (set ";
+            message += detail::allow_vpn_interfaces_env;
+            message += " to carry DDS over them)";
+            if (netmask_filtering_applied)
+            {
+                // Said in the same breath as the exclusion, because it is the exclusion
+                // that brings it: with more than one interface left, netmask filtering is
+                // what stops every unicast datagram going out all of them, and it also
+                // means a peer outside every local subnet no longer receives unicast. A
+                // peer that quietly stops being reachable is otherwise indistinguishable
+                // from one that went away.
+                message += ". More than one interface is left, so netmask filtering is on "
+                           "for them and DDS peers outside their subnets are no longer "
+                           "reachable by unicast; on a routed network, exclude the tunnel in "
+                           "your own transport descriptors instead";
+            }
+            stash_vpn_blocklist_log(log_level::info, std::move(message));
+        }
+        last_logged_vpn_blocklist = std::move(sorted_entries);
+        // What the next refresh is allowed to remove — see the erase above. This is what
+        // was actually appended, NOT everything currently blocked.
+        last_applied_vpn_blocklist = std::move(applied);
+        last_applied_vpn_allowlist = std::move(applied_allowlist);
+    }
+
+    void domain_participant::stash_vpn_blocklist_log(const log_level level, std::string message)
+    {
+        const std::lock_guard<std::mutex> lock{pending_vpn_blocklist_log_mutex};
+        pending_vpn_blocklist_logs.emplace_back(level, std::move(message));
+    }
+
+    void domain_participant::flush_pending_vpn_blocklist_log() noexcept
+    {
+        // Only ever called with no participant lock held — see the rationale on
+        // refresh_vpn_interface_blocklist for why the message cannot be emitted where it
+        // is produced.
+        //
+        // Taken out under the mutex and logged without it. Both halves matter: the string
+        // is the one piece of this participant's VPN state that is touched OUTSIDE the
+        // reset lock -- the scope-exit guards in the constructor and in the reset run after
+        // their lock scopes have unwound, deliberately, because the log callback may
+        // re-enter this participant -- so a user's trigger_network_recovery_reset() racing
+        // the coordinator's would otherwise have two threads move from and clear the same
+        // std::string. And holding the mutex across the callback would put a lock this
+        // participant owns underneath arbitrary user code.
+        std::vector<std::pair<log_level, std::string>> messages;
+        {
+            const std::lock_guard<std::mutex> lock{pending_vpn_blocklist_log_mutex};
+            if (pending_vpn_blocklist_logs.empty())
+            {
+                return;
+            }
+            messages = std::move(pending_vpn_blocklist_logs);
+            pending_vpn_blocklist_logs.clear();
+        }
+        // A scope-exit guard calls this during a reset, so a throwing log callback would
+        // otherwise leave a destructor throwing. Swallowed for the same reason the
+        // listener drain swallows its stall warning: a diagnostic must not decide whether
+        // the operation it describes succeeds. Per message, so one callback that throws
+        // does not swallow the reports after it.
+        for (const auto &message : messages)
+        {
+            try
+            {
+                detail::log_stream{message.first} << message.second;
+            }
+            catch (...)  // NOLINT: a diagnostic must never propagate out of a destructor
+            {
+            }
+        }
+    }
+
     eprosima::fastdds::dds::DomainParticipant *domain_participant::create_fastdds_participant()
     {
         if (detail::consume_forced_participant_creation_failure())
@@ -763,6 +1278,11 @@ namespace provizio::dds
                         << " (forced by fail_next_participant_creation_for_test)";
             return nullptr;
         }
+
+        // Re-evaluated per creation, so a rebuild after a network change blocks the
+        // tunnels that exist at that moment rather than the ones that existed at
+        // construction time.
+        refresh_vpn_interface_blocklist();
 
         auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
         // Pass the (possibly null) discovery listener to Fast-DDS at create
@@ -1230,6 +1750,16 @@ namespace provizio::dds
         // returns inside the block are fine: the block-scope locks unwind before this
         // function-scope vector does.)
         std::vector<std::shared_ptr<detail::resettable_endpoint>> live_endpoints;
+
+        // Declared here, outside the locked block, for the same reason live_endpoints is:
+        // the report must go out only once both lifecycle locks have unwound, because the
+        // log callback may re-enter this participant (see refresh_vpn_interface_blocklist).
+        // A guard rather than a call at the end, so that the early return on a failed
+        // re-creation — the path where an operator most needs to know which interfaces the
+        // transports left out — reports it too, as does an exception from any phase.
+        // Declared AFTER live_endpoints so it runs BEFORE that snapshot is released,
+        // keeping the order the explicit call had.
+        const scope_exit flush_vpn_blocklist_log{[this] { flush_pending_vpn_blocklist_log(); }};
         {
             // Serialize against new endpoint registrations for the whole reset. With
             // this in place, no endpoint can be registered while we are tearing down
@@ -1400,6 +1930,9 @@ namespace provizio::dds
             // tick will make (a later network event alone cannot be relied on).
             recovery_retry_needed.store(any_endpoint_failed, std::memory_order_release);
         }  // close the registration_mutex / reset_mutex scope BEFORE live_endpoints destructs
+
+        // The stashed VPN report goes out from flush_vpn_blocklist_log above, on every
+        // exit path, once both locks are released.
     }
 
     std::shared_ptr<domain_participant> make_domain_participant(

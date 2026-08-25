@@ -14,11 +14,10 @@
 
 #include "provizio/dds/network_recovery.h"
 
-#include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <string>
 
+#include "detail/env_utils.h"
 #include "provizio/dds/logging.h"
 
 namespace provizio::dds
@@ -39,21 +38,18 @@ namespace provizio::dds
                 return true;  // Default: enabled.
             }
 
-            std::string value{raw};
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char chr) { return static_cast<char>(std::tolower(chr)); });
-
-            if (value == "off" || value == "0" || value == "false" || value == "no")
+            bool enabled = true;
+            if (detail::try_parse_bool(raw, enabled))
             {
-                return false;
-            }
-            if (value == "on" || value == "1" || value == "true" || value == "yes")
-            {
-                return true;
+                return enabled;
             }
 
             // Unknown value: log once, treat as default-on.
-            log_warning() << env_var_name << "=" << raw << " is not recognised (use on/off); auto-recovery enabled";
+            // Sanitised before quoting, as everywhere else a rejected PROVIZIO_DDS_* value
+            // is echoed: an arbitrarily long or control-character-carrying value must not be
+            // able to flood the log or forge lines in whatever ingests it.
+            log_warning() << env_var_name << "='" << detail::sanitise_env_value_for_log(raw)
+                          << "' is not recognised (use on/off); auto-recovery enabled";
             return true;
         }
     }  // namespace

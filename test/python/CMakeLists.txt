@@ -273,8 +273,13 @@ add_test(NAME accumulation_test COMMAND
 set(_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV)
 foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         reset_refreshes_fastdds_interface_cache teardown_deferred
-        coalescer_resets_on_transient_flap snapshot_prefix_length
-        netmask_read_is_bounded netlink_binds_before_snapshot safety_net_env)
+        coalescer_resets_on_transient_flap no_rebuild_on_address_loss
+        unreadable_interfaces_are_not_a_change no_baseline_rebuilds_for_first_readable_list
+        rebuild_on_address_change snapshot_prefix_length
+        netmask_read_is_bounded linked_list_walk_advances
+        netlink_binds_before_snapshot safety_net_env
+        snapshot_policy_excludes_tunnel snapshot_policy_follows_transports
+        netlink_kinds_match_the_kernel)
     add_test(NAME python_network_recovery_${_nrt_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler
         ./python_network_recovery_test.py ${_nrt_case}
@@ -409,6 +414,40 @@ foreach(_tt_case defaults env_override env_invalid)
     set_tests_properties(python_transport_tuning_${_tt_case} PROPERTIES TIMEOUT 30)
 endforeach()
 
+# Keeping VPN / tunnel interfaces out of the DDS transports — Python mirror of the
+# C++ test/vpn_interfaces/ subcommands: the interface classifier, the generated
+# transport profile and its once-per-configuration loading, that a participant
+# configured with an interface blocklist still communicates, the
+# PROVIZIO_DDS_ALLOW_VPN_INTERFACES override, and the matching exclusion from
+# network-recovery change detection. Each subcommand is its own ctest entry so
+# per-case failure stays isolated — and because the override is parsed once per
+# process, so a case can set it before anything reads it.
+set(_PYTHON_VPN_INTERFACES_TEST_NAMES)
+foreach(_vpn_case classifier transports_profile profile_loaded_once profile_limit
+        profile_route_honours_process_transports leaves_caller_profile_alone
+        participant_communicates blocklist_read_failure_keeps_exclusion
+        profile_cache_follows_the_interfaces
+        override_all override_named override_unmatched_names_reported
+        override_all_matched_is_quiet unmatched_name_survives_a_failed_profile_readback
+        no_op_with_builtin_transports_env
+        caller_builtin_transports_matching_ours env_xml_profile_honoured_per_participant
+        snapshot_excludes_vpn
+        snapshot_excludes_vpn_ipv6 unreadable_interfaces_still_create_participant)
+    add_test(NAME python_vpn_interfaces_${_vpn_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        ./python_vpn_interfaces_test.py ${_vpn_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    list(APPEND _PYTHON_VPN_INTERFACES_TEST_NAMES python_vpn_interfaces_${_vpn_case})
+    # participant_communicates waits for a match and a delivered sample; the rest
+    # only enumerate interfaces or build a profile string and return near-instantly.
+    if(_vpn_case STREQUAL "participant_communicates")
+        set_tests_properties(python_vpn_interfaces_${_vpn_case} PROPERTIES TIMEOUT 90)
+    else()
+        set_tests_properties(python_vpn_interfaces_${_vpn_case} PROPERTIES TIMEOUT 30)
+    endif()
+endforeach()
+
 # Dead-owner shared-memory cleanup — Python mirror of the C++ test/shm_cleanup/
 # subcommands: what the sweep reclaims, what it must never touch, its age guard, its kill
 # switch, its rate limit, and that creating a participant triggers it. Each subcommand is
@@ -461,6 +500,22 @@ if(WIN32)
         ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
 else()
     set_tests_properties(python_large_sample_qos_parity PROPERTIES TIMEOUT 30)
+endif()
+
+# Cross-language parity of the VPN / tunnel classifier: the same table of interface
+# names is put to both languages' classifiers and the verdicts must match, so a vendor
+# needle or prefix rule added on one side only is caught here rather than by two hosts
+# disagreeing about one tunnel in the field. Import-only plus one short subprocess.
+add_test(NAME python_vpn_classifier_parity COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler
+    ./vpn_classifier_parity_test.py "$<TARGET_FILE:vpn_interfaces_test>"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+if(WIN32)
+    set_tests_properties(python_vpn_classifier_parity PROPERTIES TIMEOUT 60
+        ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
+else()
+    set_tests_properties(python_vpn_classifier_parity PROPERTIES TIMEOUT 60)
 endif()
 
 # Crash-safety of throwing user callbacks (Python mirror of the C++
@@ -523,6 +578,21 @@ if(WIN32)
 endif()
 set_tests_properties(python_network_recovery_extra_interfaces_env
     PROPERTIES TIMEOUT 30 ENVIRONMENT "${_extra_if_env}")
+
+# The override case needs PROVIZIO_DDS_ALLOW_VPN_INTERFACES set before the process starts:
+# it is parsed once per process, on first use, which is inside the very call the case
+# asserts on. Its no-override twin runs in the plain list above.
+add_test(NAME python_network_recovery_snapshot_policy_honours_override COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler
+    ./python_network_recovery_test.py snapshot_policy_honours_override
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set(_allow_vpn_env "PROVIZIO_DDS_ALLOW_VPN_INTERFACES=1")
+if(WIN32)
+    list(APPEND _allow_vpn_env "PATH=${PROVIZIO_DDS_TEST_PATH}")
+endif()
+set_tests_properties(python_network_recovery_snapshot_policy_honours_override
+    PROPERTIES TIMEOUT 30 ENVIRONMENT "${_allow_vpn_env}")
 
 # 1.10.x Python API source-compat: ensures `ReturnCode_t.RETCODE_OK`,
 # `pub_sub_type.getName()`, and other camelCase / enum-class spellings
@@ -610,6 +680,7 @@ if(WIN32)
         ${_PYTHON_MATCH_PUBLISHER_TEST_NAMES}
         ${_PYTHON_DISCOVERY_TUNING_TEST_NAMES}
         ${_PYTHON_TRANSPORT_TUNING_TEST_NAMES}
+        ${_PYTHON_VPN_INTERFACES_TEST_NAMES}
         ${_PYTHON_CALLBACK_EXCEPTIONS_TEST_NAMES}
         python_pub_python_sub python_pub_python_sub_type_reuse
         python_pub_cpp_sub cpp_pub_python_sub
