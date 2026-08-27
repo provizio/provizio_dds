@@ -373,8 +373,17 @@ def _get_stable_match_count(
     timeout_sec: float,
     settle_time_sec: float,
 ) -> int:
-    settle_time_sec = max(0.0, settle_time_sec)
-    timeout_sec = max(timeout_sec, 0.0) if timeout_sec is not None else 0.0
+    # Clamped at BOTH ends. The lower bound is the obvious one; the upper is not, and without
+    # it this diverges from the C++ contract it mirrors. threading.Condition.wait_for converts
+    # its timeout to a platform time_t, which raises OverflowError above threading.TIMEOUT_MAX
+    # (9223372036.0 s, ~292 years) -- so math.inf, or the numeric mirror of the
+    # milliseconds::max() that subscriber_handle::get_num_matched_publishers accepts as "wait
+    # as long as it takes", raises instead of waiting. The float arithmetic above cannot
+    # overflow, which is true but checks the wrong mechanism: the loss happens in the
+    # conversion, not the addition. TIMEOUT_MAX is longer than any process will live, so
+    # clamping to it IS "wait forever" for every practical purpose.
+    settle_time_sec = min(max(0.0, settle_time_sec), threading.TIMEOUT_MAX)
+    timeout_sec = min(max(timeout_sec, 0.0) if timeout_sec is not None else 0.0, threading.TIMEOUT_MAX)
     start_time = time.monotonic()
     timeout_point = start_time + timeout_sec
     wait_for_match = max(timeout_sec - settle_time_sec, _MIN_MATCH_WAIT_SEC)
