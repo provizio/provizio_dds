@@ -1870,7 +1870,12 @@ namespace provizio::dds
         // otherwise.
         if (participant != nullptr)
         {
-            participant->set_listener(discovery_listener.get(), eprosima::fastdds::dds::StatusMask::none());
+            // With an explicit finite timeout, never the infinite default: this is a public
+            // API a caller may invoke at any time, including while one of our discovery
+            // dispatches is in flight, and the infinite default spins rather than waits
+            // (see detach_participant_listener).
+            participant->set_listener(discovery_listener.get(), eprosima::fastdds::dds::StatusMask::none(),
+                                      listener_swap_timeout());
         }
     }
 
@@ -1890,6 +1895,75 @@ namespace provizio::dds
             names.push_back(entry.first);
         }
         return names;
+    }
+
+    std::chrono::seconds domain_participant::listener_swap_timeout() noexcept
+    {
+        // ANY finite value, which is the entire point -- see the note on
+        // detach_participant_listener. Generous enough that a discovery dispatch of ours
+        // (a cheap resolve against the deferred-subscriber registry) always finishes
+        // inside it, so the bound is never what ends the wait in practice.
+        constexpr std::chrono::seconds swap_timeout{30};
+        return swap_timeout;
+    }
+
+    void domain_participant::detach_participant_listener(const bool defer_diagnostic) noexcept
+    {
+        // Detached with a FINITE timeout before Fast-DDS detaches it with an infinite one,
+        // because "infinite" here is not a blocking wait -- it is a busy loop.
+        //
+        // DomainParticipantImpl::set_listener waits on a condition variable until no
+        // participant listener callback is executing. Its default timeout is
+        // std::chrono::seconds::max(), which it turns into a deadline of
+        // steady_clock::time_point::max(). libstdc++ implements wait_until for a clock
+        // other than its native one by adding (deadline - now) to system_clock::now() --
+        // which overflows for a deadline that far out. The underlying wait then returns
+        // immediately, the re-check against the caller's clock says the deadline has not
+        // passed, and the predicate loop goes round again at once: a spin that calls
+        // clock_gettime as fast as the CPU allows, for as long as a callback is in flight.
+        // On a small machine that also starves the callback thread it is waiting for, so
+        // the spin outlasts by orders of magnitude the microseconds the callback needs.
+        // Measured on an 8-core aarch64 CI runner: 100% of a core inside
+        // delete_participant, for tens of seconds, with every other thread idle.
+        //
+        // A finite timeout takes libstdc++'s ordinary blocking path instead. Once the
+        // listener is detached, the set_listener call Fast-DDS makes from disable() finds
+        // its predicate already satisfied and returns without waiting at all, so the
+        // infinite-timeout path is never entered.
+        if (participant == nullptr)
+        {
+            return;
+        }
+
+        if (participant->set_listener(nullptr, eprosima::fastdds::dds::StatusMask::none(), listener_swap_timeout()) !=
+            eprosima::fastdds::dds::RETCODE_OK)
+        {
+            // Timed out: a listener callback has been running for longer than any of ours
+            // can legitimately take. Worth saying, because what follows -- Fast-DDS
+            // detaching the listener itself, with the infinite timeout -- is the spin this
+            // function exists to avoid, and an operator seeing a core pegged inside
+            // participant destruction would otherwise have nothing to go on.
+            try
+            {
+                const std::string message =
+                    "a participant listener callback on domain " + std::to_string(domain_id) +
+                    " has not returned within " + std::to_string(listener_swap_timeout().count()) +
+                    " s; participant destruction will block until it does. Discovery callbacks must "
+                    "not block and must not create publishers / subscribers / services.";
+                if (defer_diagnostic)
+                {
+                    // Under the reset path's exclusive locks -- see the parameter's documentation.
+                    stash_vpn_blocklist_log(log_level::warning, message);
+                }
+                else
+                {
+                    log_warning() << message;
+                }
+            }
+            catch (...)  // NOLINT: a diagnostic must never propagate out of a destructor
+            {
+            }
+        }
     }
 
     domain_participant::~domain_participant()
@@ -1921,6 +1995,11 @@ namespace provizio::dds
         // (and has individually deleted its own Fast-DDS entities). This call cleans
         // up any residual entities (e.g. topics not individually freed) and is a
         // harmless no-op otherwise.
+        // Before anything is deleted: see detach_participant_listener for why leaving this
+        // to Fast-DDS costs a spinning core. No lock is held here, so the timeout warning (if
+        // any) goes out directly.
+        detach_participant_listener(false);
+
         if (participant != nullptr)
         {
             participant->delete_contained_entities();
@@ -2305,10 +2384,13 @@ namespace provizio::dds
             // to completion, so the drain wait does not deadlock. After this phase returns,
             // no endpoint (publisher/subscriber) listener callback owned by us is in flight.
             // The participant-level discovery listener is deliberately NOT drained here: it
-            // stays installed on the old participant and is quiesced instead by the
-            // delete_participant() call in Phase 4, which stops and joins Fast-DDS's
-            // discovery thread. That is sufficient because the only owner state its
-            // callbacks mutate (discovered_writer_reliability) is guarded by deferred_mutex.
+            // stays installed on the old participant and is detached in Phase 4 instead,
+            // by the same finite-timeout detach_participant_listener() the destructor uses,
+            // immediately before delete_participant() stops and joins Fast-DDS's discovery
+            // thread. Deferring it is safe because the only owner state its callbacks mutate
+            // (discovered_writer_reliability) is guarded by deferred_mutex. Leaving it to
+            // delete_participant() alone would NOT be: that reaches Fast-DDS' own listener
+            // swap, whose infinite default busy-spins rather than waits.
             for (const auto &endpoint : live_endpoints)
             {
                 endpoint->detach_for_reset();
@@ -2357,7 +2439,19 @@ namespace provizio::dds
                     registered_topics.clear();
                 }
 
-                // Destroy old participant.
+                // Destroy old participant. The finite-timeout detach comes first, exactly as
+                // it does in the destructor and for the same reason -- see
+                // detach_participant_listener -- and it matters MORE here: a reset runs on a
+                // network event, which is precisely when discovery callbacks are in flight,
+                // and an in-flight callback is the condition Fast-DDS' infinite-timeout
+                // set_listener spins on. Without this, Phase 4 pegs a core for as long as the
+                // callback runs on any toolchain carrying that defect.
+                //
+                // Diagnostics DEFERRED here: this runs holding registration_mutex and reset_mutex
+                // exclusively, and logging.h promises a log callback may publish onto a DDS topic,
+                // which would take reset_mutex shared on this very thread. The stash is flushed by
+                // flush_vpn_blocklist_log once both locks are released.
+                detach_participant_listener(true);
                 participant->delete_contained_entities();
                 DomainParticipantFactory::get_instance()->delete_participant(participant);
                 participant = nullptr;

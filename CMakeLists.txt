@@ -1050,6 +1050,166 @@ else(HAS_BIN_CACHE)
             file(WRITE "${_fastdds_python_py2_alias_path}" "${_fastdds_python_py2_alias_content}")
         endforeach()
 
+        # Expose DomainParticipant::set_listener's timeout overload to Python.
+        #
+        # TEMPORARY. The defect is reported to eProsima, and the fix expected from them is to
+        # the ROOT CAUSE -- DomainParticipantImpl::set_listener not building an unbounded
+        # deadline in the first place. Once a FAST_DDS_VERSION carries that, none of this is
+        # needed: not this patch, not python/provizio_dds.py's _detach_participant_listener,
+        # and not domain_participant::detach_participant_listener on the C++ side either.
+        # All three exist only to keep that unbounded deadline from being reached, and they
+        # should be retired together rather than one at a time.
+        #
+        # How to tell, on a FAST_DDS_VERSION bump: read DomainParticipantImpl::set_listener in
+        # the new Fast-DDS. While it still does
+        #     auto time_out = time_point<steady_clock>::max();
+        #     if (timeout < seconds::max()) { time_out = steady_clock::now() + timeout; }
+        # and waits on that, the defect is present and all three pieces stay. A green CI run
+        # proves nothing either way: the spin exists only where libstdc++ has to convert a
+        # steady_clock deadline (GCC 9 -- the jetson jobs), so every other platform is quiet
+        # whether or not the bug is fixed.
+        #
+        # Separately, on a FAST_DDS_PYTHON_VERSION bump: if upstream ever wraps a timeout
+        # overload of its own, inserting ours too would be a redefinition and would fail the
+        # wrapper compile. The guard below prevents that by keying on std::chrono::seconds
+        # rather than on our own wording, so the patch simply stops applying -- but the
+        # duplication is worth checking by hand on any Fast-DDS-python upgrade rather than
+        # trusting the guard alone, since it is one string away from the build breaking.
+        #
+        # Fast-DDS declares four set_listener overloads, two of which take an explicit
+        # std::chrono::seconds. Fast-DDS-python %ignores the real method and re-exposes only
+        # (listener) and (listener, mask) through %extend, so from Python the ONLY reachable
+        # form is the one whose timeout defaults to std::chrono::seconds::max(). That default
+        # is not a long wait -- on some standard libraries it is a busy loop:
+        #
+        #   DomainParticipantImpl::set_listener turns seconds::max() into a deadline of
+        #   steady_clock::time_point::max() and waits on it until no listener callback is in
+        #   flight. libstdc++ only has a conversion-free wait_until for its own __clock_t,
+        #   which is steady_clock ONLY when _GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT is defined
+        #   (GCC 10+ with glibc 2.30+). Below that -- Ubuntu 20.04 / GCC 9, which is what the
+        #   jetson-20.04 devices and CI runners have -- steady_clock is a FOREIGN clock and
+        #   the deadline goes through
+        #       system_clock::now() + ceil(deadline - steady_clock::now())
+        #   which overflows for a deadline ~292 years out. The underlying wait then returns
+        #   immediately, the re-check against the caller's clock says the deadline has not
+        #   passed, and the predicate loop goes round again at once. Measured by driving that
+        #   same conversion deliberately (a clock libstdc++ must convert, so the arithmetic is
+        #   identical on any version): 93 million predicate evaluations in 5 seconds, and the
+        #   callback thread it waits for never acquired the mutex in 4.7 of them -- so it does
+        #   not merely spin, it withholds the very thing that would end the wait.
+        #
+        # provizio_dds' C++ side avoids this by passing an explicit finite timeout
+        # (domain_participant::detach_participant_listener). Python could not, because no
+        # overload taking one was wrapped. This adds the missing one, so the Python
+        # participant can detach its listener the same way before delete_participant.
+        #
+        # Added rather than changing the existing overloads' behaviour: a caller who wants
+        # Fast-DDS' documented default still gets it, and the two upstream forms are wrapped
+        # byte-for-byte as before. The director INCREF/DECREF bookkeeping is copied exactly
+        # from the (listener, mask) form -- it is what keeps the Python listener object alive
+        # for as long as C++ holds a pointer to it, and omitting it would trade a hang for a
+        # use-after-free.
+        set(_fastdds_python_participant_i
+            "${fast_dds_python_SOURCE_DIR}/fastdds_python/src/swig/fastdds/dds/domain/DomainParticipant.i")
+        file(READ "${_fastdds_python_participant_i}" _fastdds_python_participant_i_content)
+        # Anchored on the (listener, mask) signature, which occurs exactly once: the
+        # sibling overload takes no mask, and the one added below writes "mask," rather than
+        # "mask)" because a third parameter follows it. The obvious anchor -- the doc comment
+        # of the next method -- appears twice (create_publisher and its _with_profile twin),
+        # and string(REPLACE) would then insert the overload twice and fail the wrapper
+        # compile on a redefinition.
+        set(_fastdds_python_set_listener_anchor
+            [==[    ReturnCode_t set_listener(
+            DomainParticipantListener* listener,
+            const StatusMask& mask)]==])
+        set(_fastdds_python_set_listener_timeout
+            [==[    /**
+     * Modifies the DomainParticipantListener, waiting at most @c timeout_seconds for any
+     * listener callback still executing.
+     *
+     * The overload Python needs: the wrapped forms above leave the timeout at
+     * std::chrono::seconds::max(), which busy-loops instead of waiting on standard
+     * libraries whose condition_variable has to convert a steady_clock deadline (see the
+     * note in provizio_dds' CMakeLists.txt).
+     *
+     * @param listener new value for the DomainParticipantListener
+     * @param mask StatusMask that holds statuses the listener responds to
+     * @param timeout_seconds how long to wait for in-flight callbacks, in seconds
+     * @return RETCODE_OK, or RETCODE_ERROR if the wait timed out
+     */
+    ReturnCode_t set_listener(
+            DomainParticipantListener* listener,
+            const StatusMask& mask,
+            unsigned int timeout_seconds)
+    {
+        eprosima::fastdds::dds::DomainParticipantListener* old_listener =
+            const_cast<eprosima::fastdds::dds::DomainParticipantListener*>(self->get_listener());
+
+        eprosima::fastdds::dds::ReturnCode_t ret =
+            self->set_listener(listener, mask, std::chrono::seconds(timeout_seconds));
+
+        if ( (eprosima::fastdds::dds::RETCODE_OK == ret) && (listener != old_listener) )
+        {
+
+            SWIG_PYTHON_THREAD_BEGIN_BLOCK;
+            if (nullptr != listener)
+            {
+                Swig::Director* director = SWIG_DIRECTOR_CAST(listener);
+
+                if (nullptr != director)
+                {
+                    Py_INCREF(director->swig_get_self());
+                }
+            }
+            if (nullptr != old_listener)
+            {
+                Swig::Director* director = SWIG_DIRECTOR_CAST(old_listener);
+
+                if (nullptr != director)
+                {
+                    Py_DECREF(director->swig_get_self());
+                }
+            }
+            SWIG_PYTHON_THREAD_END_BLOCK;
+
+        }
+
+        return ret;
+    }
+
+    ReturnCode_t set_listener(
+            DomainParticipantListener* listener,
+            const StatusMask& mask)]==])
+        # Keyed on std::chrono::seconds rather than on our own parameter name, so this skips
+        # for EITHER reason: the file is already patched (a re-configure), or a future
+        # Fast-DDS-python wraps the timeout overload itself. Upstream's DomainParticipant.i
+        # mentions chrono nowhere else today, so its appearance means one of those two. This
+        # matters: were the guard specific to our wording, an upstream fix would leave the
+        # anchor still matching and this would insert a SECOND three-argument overload,
+        # failing the wrapper compile on a redefinition -- turning a fixed dependency into a
+        # broken build.
+        string(FIND "${_fastdds_python_participant_i_content}" "std::chrono::seconds"
+            _fastdds_python_set_listener_timeout_pos)
+        if(_fastdds_python_set_listener_timeout_pos EQUAL -1)
+            string(FIND "${_fastdds_python_participant_i_content}"
+                "${_fastdds_python_set_listener_anchor}" _fastdds_python_set_listener_anchor_pos)
+            # Fail closed, as the CMakeLists patches above do: a silent no-op here would put
+            # the livelock back on every jetson-class host with nothing to say it had.
+            if(_fastdds_python_set_listener_anchor_pos EQUAL -1)
+                message(FATAL_ERROR
+                    "Fast-DDS-python ${FAST_DDS_PYTHON_VERSION}: could not find where to add "
+                    "DomainParticipant::set_listener's timeout overload in DomainParticipant.i -- "
+                    "upstream text has likely changed. Without it the Python participant cannot "
+                    "bound its listener detach, and teardown busy-loops on any standard library "
+                    "whose condition_variable converts a steady_clock deadline (Ubuntu 20.04 / GCC 9).")
+            endif()
+            string(REPLACE
+                "${_fastdds_python_set_listener_anchor}"
+                "${_fastdds_python_set_listener_timeout}"
+                _fastdds_python_participant_i_content "${_fastdds_python_participant_i_content}")
+            file(WRITE "${_fastdds_python_participant_i}" "${_fastdds_python_participant_i_content}")
+        endif()
+
         set(FASTDDS_PYTHON_CMAKE_DIR "${fast_dds_python_SOURCE_DIR}/fastdds_python")
         set(FASTDDS_PYTHON_CMAKE_FILE "${FASTDDS_PYTHON_CMAKE_DIR}/CMakeLists.txt")
         set(FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER "${CMAKE_CURRENT_BINARY_DIR}/FASTDDS_PYTHON_MISSING_DEFINITIONS_FIX_HEADER.h")

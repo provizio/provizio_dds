@@ -28,6 +28,7 @@ import time
 import traceback
 import weakref
 
+import provizio_test_deadline
 import provizio_dds
 
 
@@ -52,9 +53,17 @@ def _arm_watchdog():
 
 
 def _disarm_watchdog():
-    """Cancel the watchdog so a case that finished cannot dump stacks while the process
-    tears its participants down."""
+    """Replace the repeating per-case watchdog with the one-shot deadline dump, so a case
+    that finished cannot dump stacks repeatedly while the process tears its participants
+    down -- but a teardown that never finishes still says so.
+
+    Cancelling outright, which this used to do, left the whole of interpreter shutdown
+    unwatched. That is not a quiet stretch: a participant destroyed there reaches Fast-DDS'
+    listener detach, and a hang in it is invisible because CTest's SIGKILL takes the
+    buffered stdout with it. The deadline dump fires only if the process is still alive a
+    few seconds short of the ctest TIMEOUT, so a healthy teardown stays silent."""
     faulthandler.cancel_dump_traceback_later()
+    provizio_test_deadline.arm()
 
 
 def _log(message):

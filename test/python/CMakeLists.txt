@@ -337,7 +337,7 @@ endforeach()
 # Discovered-endpoints / type-registry suite — Python mirror of the C++
 # test/discovered_endpoints/ subcommands.
 set(_PYTHON_DISCOVERED_ENDPOINTS_TEST_NAMES)
-foreach(_de_case type_registry discovers_writer kind_filter constructor_callback callback_receives_participant survives_reset unregister)
+foreach(_de_case type_registry discovers_writer kind_filter constructor_callback callback_receives_participant survives_reset unregister teardown_does_not_spin)
     add_test(NAME python_discovered_endpoints_${_de_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler
         ./python_discovered_endpoints_test.py ${_de_case}

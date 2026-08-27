@@ -920,6 +920,110 @@ def _create_participant_with_listener(factory, domain_id, participant_qos, liste
     return participant
 
 
+# How long a listener detach waits for an in-flight callback. ANY finite value is the
+# point: see _detach_participant_listener. Generous enough that a discovery dispatch of
+# ours always finishes inside it, so the bound is never what ends the wait in practice.
+# Mirrors domain_participant::listener_swap_timeout() in src/domain_participant.cpp.
+_LISTENER_SWAP_TIMEOUT_SEC = 30
+
+# Whether this build's fastdds bindings wrap set_listener's timeout overload. Resolved once,
+# on first use, because the answer is a property of the extension module rather than of any
+# participant -- and because probing it per teardown would put a TypeError on the path that
+# runs while the interpreter is shutting down.
+_listener_detach_supported = None
+
+
+def _detach_participant_listener(participant, domain_id):
+    """Detach ``participant``'s listener with a FINITE timeout, before Fast-DDS detaches it
+    with an infinite one.
+
+    ``domain_id`` is only ever used to identify the participant in the timeout warning, and it
+    is passed in rather than read back off ``participant`` because this runs on the teardown
+    path, where a call into a participant mid-destruction is worth avoiding for a log field.
+
+    "Infinite" here is not a blocking wait -- on some standard libraries it is a busy loop
+    that starves the thread it waits for. ``DomainParticipantImpl::set_listener`` waits on a
+    condition variable until no listener callback is executing, and its default timeout of
+    ``std::chrono::seconds::max()`` becomes a deadline of ``steady_clock::time_point::max()``.
+    libstdc++ has a conversion-free ``wait_until`` only for its own ``__clock_t``, which is
+    ``steady_clock`` only when ``_GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT`` is defined (GCC 10+
+    with glibc 2.30+). Below that -- Ubuntu 20.04 / GCC 9, i.e. the jetson-20.04 devices and
+    CI runners -- ``steady_clock`` is a foreign clock and the deadline is converted as
+    ``system_clock::now() + ceil(deadline - steady_clock::now())``, which overflows that far
+    out. The underlying wait returns at once, the re-check against the caller's clock says the
+    deadline has not passed, and the predicate loop goes round again immediately: a spin that
+    also monopolises the mutex the callback needs in order to finish, so it withholds the very
+    thing that would end it. Measured by driving that same conversion path deliberately (a
+    clock libstdc++ must convert, so the arithmetic is identical on any version): 93 million
+    predicate evaluations in 5 seconds, and the callback thread never acquired the mutex in
+    4.7 of them, where a finite deadline needed 2 evaluations and 300 ms.
+
+    ``DomainParticipantFactory::delete_participant`` reaches that default through
+    ``DomainParticipantImpl::disable()``, which calls the one-argument ``set_listener(nullptr)``.
+    Detaching here first, with a finite timeout, takes libstdc++'s ordinary blocking path --
+    and once it returns, no new callback can start, so ``disable()``'s own infinite wait finds
+    its predicate already true and never enters the loop.
+
+    Mirrors ``domain_participant::detach_participant_listener`` in src/domain_participant.cpp.
+
+    Temporary, and not alone: this, that, and the SWIG patch in CMakeLists.txt that makes the
+    timeout overload callable at all exist only to keep Fast-DDS' unbounded deadline from
+    being reached. The defect is reported to eProsima; when a Fast-DDS release stops building
+    that deadline, all three retire together -- see the note on the patch in CMakeLists.txt
+    for how to tell, and why a green CI run is not the way.
+
+    Safe with respect to the listener's own lifetime, and in fact tidier than not doing it.
+    The wrapped ``set_listener`` INCREFs the incoming listener and DECREFs the outgoing one,
+    so detaching here releases the reference C++ took when the listener was attached --
+    which nothing released before, because the detach inside Fast-DDS' ``disable()`` is an
+    internal C++ call that never passes through the binding. The participant holds
+    ``self._discovery_listener`` throughout either way, so the object cannot be freed early;
+    on a network-recovery reset the same listener is then re-attached to the new participant,
+    INCREFing it again, so the two now balance instead of accumulating one reference per
+    reset.
+
+    Best-effort by design: a participant that cannot be quiesced must still be deleted, so
+    every failure here falls through to the deletion the caller is about to do. That is what
+    the code did before this existed."""
+    global _listener_detach_supported
+    if participant is None or _listener_detach_supported is False:
+        return
+    try:
+        detached = participant.set_listener(None, StatusMask.none(), _LISTENER_SWAP_TIMEOUT_SEC)
+        # The overload answered, so these bindings carry it, whatever the outcome was.
+        _listener_detach_supported = True
+        if detached != RETCODE_OK:
+            # The bounded wait expired: a listener callback is still running after the whole
+            # timeout. What happens next is the thing this function exists to prevent --
+            # delete_participant reaches Fast-DDS' own detach with its infinite deadline and
+            # busy-loops on it -- and without this line an operator watching a core pegged
+            # inside participant destruction has nothing whatever to go on. Mirrors the
+            # warning domain_participant::detach_participant_listener emits for the same
+            # return, in the same words including the domain, because it is the same event on
+            # the same topic seen from the other binding -- and the domain is the only field
+            # that says WHICH participant is about to peg a core, which matters because a
+            # network-recovery reset recreates participants and a process can hold several.
+            _network_recovery._emit_log(
+                _network_recovery.LogLevel.WARNING,
+                f"a participant listener callback on domain {domain_id} has not returned "
+                f"within {_LISTENER_SWAP_TIMEOUT_SEC} s; participant destruction will block "
+                f"until it does. Discovery callbacks must not block and must not create "
+                f"publishers / subscribers / services.",
+            )
+    except TypeError:
+        # Bindings without the timeout overload -- an externally built fastdds module, since
+        # provizio_dds patches its own to carry it (see CMakeLists.txt). Deliberately NOT
+        # retried through the two-argument form: that one carries the infinite default, so it
+        # would move the spin from Fast-DDS' teardown to ours rather than remove it, and
+        # skipping leaves exactly the behaviour these bindings had before.
+        _listener_detach_supported = False
+    except Exception:
+        # Anything else (a participant already being torn down, a Fast-DDS error) is not worth
+        # failing a teardown over, and says nothing about the binding, so the answer above is
+        # left unresolved rather than latched to False.
+        pass
+
+
 # Fast-DDS' DomainParticipantFactory.load_profiles() auto-loads this file from the
 # working directory, in addition to whatever FASTDDS_DEFAULT_PROFILES_FILE names —
 # unless SKIP_DEFAULT_XML_FILE is "1", which switches that auto-load off
@@ -2282,6 +2386,11 @@ def make_domain_participant(domain_id: int = 0,
                 self._cleaned_up = True
                 factory = DomainParticipantFactory.get_instance()
                 if self._participant is not None:
+                    # Before anything is deleted: delete_participant reaches Fast-DDS'
+                    # own listener detach, whose infinite default busy-loops rather
+                    # than waits on some standard libraries. See
+                    # _detach_participant_listener.
+                    _detach_participant_listener(self._participant, self._domain_id)
                     self._participant.delete_contained_entities()
                     factory.delete_participant(self._participant)
                     self._participant = None
@@ -2738,6 +2847,10 @@ def make_domain_participant(domain_id: int = 0,
                 # Destroy the old participant.
                 factory = DomainParticipantFactory.get_instance()
                 if self._participant is not None:
+                    # Same reason as in _cleanup, and it matters more here: a reset runs
+                    # on a network event, which is exactly when discovery callbacks are in
+                    # flight -- the condition Fast-DDS' infinite listener detach spins on.
+                    _detach_participant_listener(self._participant, self._domain_id)
                     self._participant.delete_contained_entities()
                     factory.delete_participant(self._participant)
                     self._participant = None

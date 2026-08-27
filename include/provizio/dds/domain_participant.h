@@ -16,6 +16,7 @@
 #define DDS_DOMAIN_PARTICIPANT
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -592,6 +593,24 @@ namespace provizio::dds
         /// appended; it needs no per-rebuild repeat because those descriptors are cached
         /// and reused for the lifetime of the participant.
         void confine_own_socket_transports_to_loopback();
+
+        /// @brief How long a participant-listener swap waits for an in-flight callback.
+        /// Finite by necessity rather than by policy -- see @c detach_participant_listener.
+        static std::chrono::seconds listener_swap_timeout() noexcept;
+
+        /// @brief Detach the participant listener, bounded, before Fast-DDS detaches it
+        /// unbounded. @c noexcept because it runs from the destructor.
+        ///
+        /// @param defer_diagnostic Whether the timeout warning must be stashed rather than
+        /// emitted here. The destructor holds no lock and passes @c false; the network-recovery
+        /// reset path holds @c registration_mutex and @c reset_mutex EXCLUSIVELY and passes
+        /// @c true, because @c logging.h promises a callback may publish onto a DDS topic --
+        /// and @c publisher_handle::publish takes @c reset_mutex shared, which on the same
+        /// thread that already holds it exclusively is a recursive shared acquire: undefined for
+        /// @c std::shared_mutex and an @c EDEADLK abort on glibc. Deferring is sound here in a
+        /// way it is not for the listener-drain warning, because this stall is bounded by
+        /// @c listener_swap_timeout() rather than unbounded, so the message is late but never lost.
+        void detach_participant_listener(bool defer_diagnostic) noexcept;
 
         /// @brief Stash @p message, to be emitted at @p level by
         /// @c flush_pending_vpn_blocklist_log, under @c pending_vpn_blocklist_log_mutex.

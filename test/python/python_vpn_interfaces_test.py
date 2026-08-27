@@ -29,6 +29,7 @@ import threading
 import traceback
 from typing import Iterator, Tuple
 
+import provizio_test_deadline
 import provizio_dds
 from provizio_dds import network_recovery as _network_recovery
 
@@ -807,7 +808,11 @@ def test_interface_kind_lookup_failure_reported() -> int:
         lambda level, message: captured.append(message)
     )
     try:
-        provizio_dds.make_domain_participant(DOMAIN)
+        # Bound, not discarded: an unbound participant is destroyed by refcount the instant
+        # the statement ends, which runs a full Fast-DDS teardown in the middle of the case
+        # and at the moment discovery is busiest. Holding it for the rest of the case -- it is
+        # a function local, released at the return below -- is what every other case here does.
+        held_participant = provizio_dds.make_domain_participant(DOMAIN)
     finally:
         provizio_dds.set_log_callback(previous_callback)
 
@@ -1360,7 +1365,13 @@ def test_caller_builtin_transports_matching_ours() -> int:
     os.environ.pop("FASTDDS_BUILTIN_TRANSPORTS", None)
     _network_recovery.vpn_interface_blocklist_entries = lambda: frozenset()
 
-    provizio_dds.make_domain_participant(DOMAIN)
+    # Bound, not discarded. Only its side effect on the environment matters here, but an
+    # unbound participant is destroyed by refcount the instant the statement ends -- a full
+    # Fast-DDS teardown in the middle of the case, at the moment discovery is busiest, and
+    # exactly the shape that hung this case on a jetson runner (see
+    # _detach_participant_listener in python/provizio_dds.py). Held for the rest of the case,
+    # like the two below it: these are function locals, released at the return, not globals.
+    held_first_participant = provizio_dds.make_domain_participant(DOMAIN)
     ours = os.environ.get("FASTDDS_BUILTIN_TRANSPORTS")
     passed = ours is not None
     if not passed:
@@ -1640,6 +1651,10 @@ def main() -> int:
     if name not in _TESTS:
         print(f"Unknown subcommand: {name}", file=sys.stderr)
         return 1
+    # Armed before the case runs and left armed through interpreter shutdown, because a
+    # participant teardown that hangs does so after the last line of the case. Without it a
+    # hang here is a bare ***Timeout with an empty output block -- see the module docstring.
+    provizio_test_deadline.arm()
     # Hermetic: an ambient FASTDDS_DEFAULT_PROFILES_FILE makes the library defer to
     # that profile, transports included, so the path under test would never run.
     os.environ.pop("FASTDDS_DEFAULT_PROFILES_FILE", None)

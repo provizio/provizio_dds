@@ -15,9 +15,12 @@
 # Subcommand-driven test exe for domain_participant's discovery callback /
 # type-registry / visit_known_type additions. Each subcommand is its own ctest
 # entry so per-case failure stays isolated.
-add_executable(discovered_endpoints_test discovered_endpoints_test.cpp)
+add_executable(discovered_endpoints_test discovered_endpoints_test.cpp "${CMAKE_SOURCE_DIR}/test/detail/test_cpu_time.cpp")
 find_package(Threads REQUIRED)
 target_link_libraries(discovered_endpoints_test PUBLIC provizio_dds provizio_dds_types Threads::Threads)
+# test/ on the include path for detail/test_cpu_time.h, whose process_cpu_seconds() is what
+# the spin detection measures: std::clock() means elapsed WALL time in the Microsoft CRT.
+target_include_directories(discovered_endpoints_test PRIVATE "${CMAKE_SOURCE_DIR}/test")
 # /bigobj for the dispatcher header on MSVC comes in transitively as an
 # INTERFACE compile option on provizio_dds_types (which provizio_dds links
 # PUBLIC, so consumers of either target inherit it) — see the comment in the
@@ -48,7 +51,7 @@ else()
     set(_DE_ENV "")
 endif()
 
-foreach(_case type_registry visit_known_type discovers_writer kind_filter constructor_callback callback_receives_participant survives_reset unregister)
+foreach(_case type_registry visit_known_type discovers_writer teardown_does_not_spin reset_does_not_spin kind_filter constructor_callback callback_receives_participant survives_reset unregister)
     add_test(NAME discovered_endpoints_${_case}
              COMMAND "$<TARGET_FILE:discovered_endpoints_test>" ${_case}
              WORKING_DIRECTORY "$<TARGET_FILE_DIR:discovered_endpoints_test>")
