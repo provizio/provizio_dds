@@ -273,6 +273,7 @@ add_test(NAME accumulation_test COMMAND
 set(_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV)
 foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         reset_refreshes_fastdds_interface_cache teardown_deferred
+        discovery_event_owner_release_is_scoped
         coalescer_resets_on_transient_flap no_rebuild_on_address_loss
         unreadable_interfaces_are_not_a_change no_baseline_rebuilds_for_first_readable_list
         rebuild_on_address_change snapshot_prefix_length
@@ -337,7 +338,7 @@ endforeach()
 # Discovered-endpoints / type-registry suite — Python mirror of the C++
 # test/discovered_endpoints/ subcommands.
 set(_PYTHON_DISCOVERED_ENDPOINTS_TEST_NAMES)
-foreach(_de_case type_registry discovers_writer kind_filter constructor_callback callback_receives_participant survives_reset unregister)
+foreach(_de_case type_registry discovers_writer kind_filter constructor_callback callback_receives_participant survives_reset unregister teardown_does_not_spin)
     add_test(NAME python_discovered_endpoints_${_de_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler
         ./python_discovered_endpoints_test.py ${_de_case}

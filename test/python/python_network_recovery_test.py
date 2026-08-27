@@ -28,6 +28,7 @@ import time
 import traceback
 import weakref
 
+import provizio_test_deadline
 import provizio_dds
 
 
@@ -52,9 +53,17 @@ def _arm_watchdog():
 
 
 def _disarm_watchdog():
-    """Cancel the watchdog so a case that finished cannot dump stacks while the process
-    tears its participants down."""
+    """Replace the repeating per-case watchdog with the one-shot deadline dump, so a case
+    that finished cannot dump stacks repeatedly while the process tears its participants
+    down -- but a teardown that never finishes still says so.
+
+    Cancelling outright, which this used to do, left the whole of interpreter shutdown
+    unwatched. That is not a quiet stretch: a participant destroyed there reaches Fast-DDS'
+    listener detach, and a hang in it is invisible because CTest's SIGKILL takes the
+    buffered stdout with it. The deadline dump fires only if the process is still alive a
+    few seconds short of the ctest TIMEOUT, so a healthy teardown stays silent."""
     faulthandler.cancel_dump_traceback_later()
+    provizio_test_deadline.arm()
 
 
 def _log(message):
@@ -399,6 +408,98 @@ def test_reset_refreshes_fastdds_interface_cache():
         "reset_refreshes_fastdds_interface_cache: PASS "
         f"(refresh called {after - before} time(s) during reset)"
     )
+    return 0
+
+
+def test_discovery_event_owner_release_is_scoped():
+    """The participant reference _DiscoveryListener._invoke resolves for every SEDP
+    event must be released INSIDE the callback scope.
+
+    The listener is installed eagerly, so _invoke dereferences its weakref to the
+    _DomainParticipant on every discovery event. An application whose only remaining
+    handle is the participant drops it while an event is in flight, and that transient
+    reference is then the last one -- the participant is destroyed on the Fast-DDS
+    reception thread. _DomainParticipant.__del__ has to see it is on a callback thread
+    and hand the cleanup to the reaper; cleaning up inline detaches the participant
+    listener while we ARE the executing callback (the bounded wait burns its whole
+    timeout) and then has delete_participant join this very thread.
+
+    Discriminating, and deliberately so: a plain `owner = owner_ref()` function local
+    ALREADY sits lexically inside the `with`, and still fails this test. CPython runs
+    the with-statement's __exit__ before tearing down the frame, so the refcount
+    reaches zero after the depth is back to 0 and __del__ takes the inline branch. That
+    exact shape shipped in this file's history and looked correct on inspection; only
+    the explicit release the `finally` performs makes the assertion below hold.
+
+    Both paths out of the scope are covered -- the early return taken when no user
+    callback is registered, and the fall-through when one is."""
+
+    class _FakeText:
+        def __init__(self, text, on_read=None):
+            self._text = text
+            self._on_read = on_read
+
+        def to_string(self):
+            if self._on_read is not None:
+                self._on_read()
+            return self._text
+
+    class _FakeKind:
+        kind = 0
+
+    class _FakeInfo:
+        def __init__(self, on_topic_name_read):
+            self.topic_name = _FakeText("rt/discovery_scope_probe", on_topic_name_read)
+            self.type_name = _FakeText("std_msgs::msg::dds_::String_")
+            self.reliability = _FakeKind()
+            self.durability = _FakeKind()
+
+    observed = {}
+
+    class _FakeOwner:
+        """Stands in for _DomainParticipant: only __del__ and the two internal
+        entry points _invoke reaches before the user callback."""
+
+        def _resolve_deferred_for_writer(self, _topic_name, _reliability):
+            pass
+
+        def _on_writer_removed(self, _topic_name, _reliability):
+            pass
+
+        def __del__(self):
+            observed["on_callback_thread"] = provizio_dds._on_fastdds_callback_thread()
+
+    for case, user_callback in (("early return", None), ("fall through", lambda *_a: None)):
+        observed.clear()
+        listener = provizio_dds._DiscoveryListener()
+        owner = _FakeOwner()
+        listener.set_owner(owner)
+        listener.set_callback(user_callback, provizio_dds.EndpointKind.DATA_WRITER)
+
+        # The application's last handle, dropped mid-event. topic_name.to_string() is
+        # read inside the scope after the weakref is dereferenced, which is where a
+        # real application's concurrent drop lands.
+        holder = [owner]
+        del owner
+
+        info = _FakeInfo(holder.clear)
+        # NOT wrapped in a _fastdds_callback_scope() of our own -- that is what SWIG's
+        # director does not do either, and an outer scope would hold the depth at 1 for
+        # the whole call and make the assertion below unfailable. The scope _invoke opens
+        # internally must be the only one.
+        assert not provizio_dds._on_fastdds_callback_thread()
+        listener._invoke(info, provizio_dds.EndpointKind.DATA_WRITER, True)
+        gc.collect()
+        assert "on_callback_thread" in observed, (
+            f"{case}: the participant outlived _invoke -- something else still holds a "
+            f"reference, so this test would pass vacuously"
+        )
+        assert observed["on_callback_thread"] is True, (
+            f"{case}: the participant was destroyed with the callback depth already back to "
+            f"0, so _DomainParticipant.__del__ would clean up inline on the Fast-DDS thread"
+        )
+
+    _log("discovery_event_owner_release_is_scoped: released inside the scope on both paths OK")
     return 0
 
 
@@ -1445,6 +1546,7 @@ _TESTS = {
     "reset_disabled": test_reset_disabled,
     "reset_refreshes_fastdds_interface_cache": test_reset_refreshes_fastdds_interface_cache,
     "teardown_deferred": test_teardown_deferred,
+    "discovery_event_owner_release_is_scoped": test_discovery_event_owner_release_is_scoped,
     "coalescer_resets_on_transient_flap": test_coalescer_resets_on_transient_flap,
     "no_rebuild_on_address_loss": test_no_rebuild_on_address_loss,
     "unreadable_interfaces_are_not_a_change": test_unreadable_interfaces_are_not_a_change,

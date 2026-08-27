@@ -466,11 +466,12 @@ class _DiscoveryListener(DomainParticipantListener):
 
     def _invoke(self, info, kind, discovered):
         # Snapshot under the lock so a concurrent set_callback can't swap
-        # the function out mid-call.
+        # the function out mid-call. The weakref itself is taken here; it is
+        # DEREFERENCED below, inside the callback scope -- see there.
         with self._lock:
             cb = self._callback
             kinds = self._kinds
-            owner = self._owner_ref() if self._owner_ref is not None else None
+            owner_ref = self._owner_ref
 
         # Convert the topic name at most once per call: it's needed by the internal deferred
         # resolution (writers) and again by the user callback, and to_string() allocates on the
@@ -484,81 +485,109 @@ class _DiscoveryListener(DomainParticipantListener):
                 _topic_name = info.topic_name.to_string()
             return _topic_name
 
-        # Internal match-publisher resolution runs FIRST and UNCONDITIONALLY of the
-        # user callback: a discovered DataWriter must resolve any subscriber parked
-        # on its topic regardless of whether the user opted into on_discovered_endpoint
-        # (the listener is now installed eagerly precisely so no SEDP writer event is
-        # missed). resolve_for_writer only records the reliability and submits the build
-        # to the process-wide reaper — it never builds an endpoint on this discovery
-        # thread. Mirrors the C++ invoke(): owner.resolve_deferred_for_writer
-        # before the user callback. Wrapped so a (defensive) failure can't escape the
-        # Fast-DDS director.
-        if owner is not None and (kind & EndpointKind.DATA_WRITER):
-            try:
-                with _fastdds_callback_scope():
-                    if discovered:
-                        owner._resolve_deferred_for_writer(
-                            topic_name(), info.reliability.kind
-                        )
-                    else:
-                        # REMOVED writer: maintain the per-reliability live-writer count so the
-                        # adopted reliability is re-derived / dropped as writers leave. The removed
-                        # writer's offered reliability is carried on the same discovery info.
-                        owner._on_writer_removed(topic_name(), info.reliability.kind)
-            except Exception as ex:  # noqa: BLE001
-                _network_recovery._emit_log(
-                    _network_recovery.LogLevel.ERROR,
-                    f"deferred-subscriber writer resolution threw: {ex}",
-                )
-
-        if cb is None or not (kinds & kind) or owner is None:
-            # owner is None either because set_owner hasn't run yet (extremely
-            # tight window between listener construction and the wrapper
-            # assigning self as owner) or because the wrapper has been garbage-
-            # collected. Drop the event — there's nothing meaningful the user
-            # callback could do with a dead participant.
-            return
-        # Mark this thread as running a Fast-DDS listener callback so any
-        # endpoint __del__ fired from inside the user callback (e.g. via a
-        # dropped strong reference) defers its Fast-DDS-side teardown to the
-        # reaper thread instead of self-joining the discovery thread. Matches
-        # the convention used by the publisher / subscriber listener
-        # callbacks elsewhere in this module.
+        # ONE scope around everything that holds a strong reference to the participant,
+        # entered before the weakref is dereferenced and left only after the last name
+        # bound to it has gone out of scope.
+        #
+        # The listener is installed eagerly now, so this resolves `owner` on EVERY SEDP
+        # event -- and that transient reference can be the last one: an application whose
+        # only remaining handle is the participant itself drops it while a discovery event
+        # is in flight, and the refcount then reaches zero HERE, on the Fast-DDS reception
+        # thread. _DomainParticipant.__del__ -> _cleanup() would run on that thread, where
+        # the bounded listener detach cannot succeed (we ARE the executing callback, so it
+        # burns its whole 30 s and returns non-OK) and delete_participant then joins the
+        # very thread running it. The scope is what lets __del__ see it is on a callback
+        # thread and defer to the reaper, exactly as Publisher/Subscriber already do -- and
+        # it has to span the early return below, which is where the reference was being
+        # dropped OUTSIDE any scope. The `finally` at the bottom is what makes "inside"
+        # true: see the note there.
         with _fastdds_callback_scope():
+            owner = owner_ref() if owner_ref is not None else None
             try:
-                # Convert type_name only now that the callback is known to fire (topic_name()
-                # reuses the at-most-once conversion above), inside the guard: info.*.to_string()
-                # can raise (MemoryError, or a SWIG-translated C++ exception), and that must not
-                # escape the Fast-DDS director callback either.
-                #
-                # The reliability / durability kinds are plain enum reads off
-                # the discovery info — Publication/SubscriptionBuiltinTopicData
-                # expose them as the public ``reliability`` / ``durability`` QoS
-                # policy members (offered for a discovered DataWriter, requested
-                # for a discovered DataReader). They are SWIG attributes (not
-                # methods — no parentheses), each carrying a ``.kind`` directly
-                # comparable to the module-level ``*_RELIABILITY_QOS`` /
-                # ``*_DURABILITY_QOS`` constants. Forwarded as the two trailing
-                # callback arguments so a recording bridge can match QoS per
-                # topic. Mirrors the C++ on_discovered_endpoint invoke().
-                cb(
-                    owner,
-                    topic_name(),
-                    info.type_name.to_string(),
-                    kind,
-                    discovered,
-                    info.reliability.kind,
-                    info.durability.kind,
-                )
-            except Exception as ex:
-                # A throwing user callback (or a failed name conversion) must
-                # not propagate out of the Fast-DDS discovery thread (mirrors
-                # the C++ logging convention). Log so it's debuggable rather
-                # than silently dropped.
-                _network_recovery._emit_log(
-                    _network_recovery.LogLevel.ERROR,
-                    f"on_discovered_endpoint dispatch threw: {ex}",
-                )
+                # Internal match-publisher resolution runs FIRST and UNCONDITIONALLY of the
+                # user callback: a discovered DataWriter must resolve any subscriber parked
+                # on its topic regardless of whether the user opted into on_discovered_endpoint
+                # (the listener is now installed eagerly precisely so no SEDP writer event is
+                # missed). resolve_for_writer only records the reliability and submits the build
+                # to the process-wide reaper — it never builds an endpoint on this discovery
+                # thread. Mirrors the C++ invoke(): owner.resolve_deferred_for_writer
+                # before the user callback. Wrapped so a (defensive) failure can't escape the
+                # Fast-DDS director.
+                if owner is not None and (kind & EndpointKind.DATA_WRITER):
+                    try:
+                        if discovered:
+                            owner._resolve_deferred_for_writer(
+                                topic_name(), info.reliability.kind
+                            )
+                        else:
+                            # REMOVED writer: maintain the per-reliability live-writer count so the
+                            # adopted reliability is re-derived / dropped as writers leave. The removed
+                            # writer's offered reliability is carried on the same discovery info.
+                            owner._on_writer_removed(topic_name(), info.reliability.kind)
+                    except Exception as ex:  # noqa: BLE001
+                        _network_recovery._emit_log(
+                            _network_recovery.LogLevel.ERROR,
+                            f"deferred-subscriber writer resolution threw: {ex}",
+                        )
+
+                if cb is None or not (kinds & kind) or owner is None:
+                    # owner is None either because set_owner hasn't run yet (extremely
+                    # tight window between listener construction and the wrapper
+                    # assigning self as owner) or because the wrapper has been garbage-
+                    # collected. Drop the event — there's nothing meaningful the user
+                    # callback could do with a dead participant.
+                    return
+
+                # Still inside the one callback scope opened above. It marks this thread as
+                # running a Fast-DDS listener callback, so any endpoint __del__ fired from
+                # inside the user callback (a dropped strong reference) defers its Fast-DDS
+                # teardown to the reaper rather than self-joining the discovery thread --
+                # the convention the publisher / subscriber listeners follow too.
+                try:
+                    # Convert type_name only now that the callback is known to fire (topic_name()
+                    # reuses the at-most-once conversion above), inside the guard: info.*.to_string()
+                    # can raise (MemoryError, or a SWIG-translated C++ exception), and that must not
+                    # escape the Fast-DDS director callback either.
+                    #
+                    # The reliability / durability kinds are plain enum reads off
+                    # the discovery info — Publication/SubscriptionBuiltinTopicData
+                    # expose them as the public ``reliability`` / ``durability`` QoS
+                    # policy members (offered for a discovered DataWriter, requested
+                    # for a discovered DataReader). They are SWIG attributes (not
+                    # methods — no parentheses), each carrying a ``.kind`` directly
+                    # comparable to the module-level ``*_RELIABILITY_QOS`` /
+                    # ``*_DURABILITY_QOS`` constants. Forwarded as the two trailing
+                    # callback arguments so a recording bridge can match QoS per
+                    # topic. Mirrors the C++ on_discovered_endpoint invoke().
+                    cb(
+                        owner,
+                        topic_name(),
+                        info.type_name.to_string(),
+                        kind,
+                        discovered,
+                        info.reliability.kind,
+                        info.durability.kind,
+                    )
+                except Exception as ex:
+                    # A throwing user callback (or a failed name conversion) must
+                    # not propagate out of the Fast-DDS discovery thread (mirrors
+                    # the C++ logging convention). Log so it's debuggable rather
+                    # than silently dropped.
+                    _network_recovery._emit_log(
+                        _network_recovery.LogLevel.ERROR,
+                        f"on_discovered_endpoint dispatch threw: {ex}",
+                    )
+            finally:
+                # Release the strong reference INSIDE the scope, explicitly. A
+                # plain function local would not do: on `return` (and on falling
+                # off the end) CPython runs the with-statement's __exit__ first
+                # and only then tears down the frame, so `owner`'s refcount would
+                # reach zero AFTER the depth is back to 0 and __del__ would take
+                # the inline branch on this very thread -- the exact deadlock the
+                # scope exists to prevent. `finally` runs before __exit__, so
+                # dropping the name here keeps the destruction inside the scope on
+                # every path out, including the early return and an exception.
+                owner = None
 
     def on_data_writer_discovery(self, participant, reason, info, should_be_ignored):
         # should_be_ignored is intentionally not assigned: SWIG passes it as an
@@ -940,6 +969,110 @@ def _create_participant_with_listener(factory, domain_id, participant_qos, liste
     participant.set_listener(listener, StatusMask.none())
     participant.enable()
     return participant
+
+
+# How long a listener detach waits for an in-flight callback. ANY finite value is the
+# point: see _detach_participant_listener. Generous enough that a discovery dispatch of
+# ours always finishes inside it, so the bound is never what ends the wait in practice.
+# Mirrors domain_participant::listener_swap_timeout() in src/domain_participant.cpp.
+_LISTENER_SWAP_TIMEOUT_SEC = 30
+
+# Whether this build's fastdds bindings wrap set_listener's timeout overload. Resolved once,
+# on first use, because the answer is a property of the extension module rather than of any
+# participant -- and because probing it per teardown would put a TypeError on the path that
+# runs while the interpreter is shutting down.
+_listener_detach_supported = None
+
+
+def _detach_participant_listener(participant, domain_id):
+    """Detach ``participant``'s listener with a FINITE timeout, before Fast-DDS detaches it
+    with an infinite one.
+
+    ``domain_id`` is only ever used to identify the participant in the timeout warning, and it
+    is passed in rather than read back off ``participant`` because this runs on the teardown
+    path, where a call into a participant mid-destruction is worth avoiding for a log field.
+
+    "Infinite" here is not a blocking wait -- on some standard libraries it is a busy loop
+    that starves the thread it waits for. ``DomainParticipantImpl::set_listener`` waits on a
+    condition variable until no listener callback is executing, and its default timeout of
+    ``std::chrono::seconds::max()`` becomes a deadline of ``steady_clock::time_point::max()``.
+    libstdc++ has a conversion-free ``wait_until`` only for its own ``__clock_t``, which is
+    ``steady_clock`` only when ``_GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT`` is defined (GCC 10+
+    with glibc 2.30+). Below that -- Ubuntu 20.04 / GCC 9, i.e. the jetson-20.04 devices and
+    CI runners -- ``steady_clock`` is a foreign clock and the deadline is converted as
+    ``system_clock::now() + ceil(deadline - steady_clock::now())``, which overflows that far
+    out. The underlying wait returns at once, the re-check against the caller's clock says the
+    deadline has not passed, and the predicate loop goes round again immediately: a spin that
+    also monopolises the mutex the callback needs in order to finish, so it withholds the very
+    thing that would end it. Measured by driving that same conversion path deliberately (a
+    clock libstdc++ must convert, so the arithmetic is identical on any version): 93 million
+    predicate evaluations in 5 seconds, and the callback thread never acquired the mutex in
+    4.7 of them, where a finite deadline needed 2 evaluations and 300 ms.
+
+    ``DomainParticipantFactory::delete_participant`` reaches that default through
+    ``DomainParticipantImpl::disable()``, which calls the one-argument ``set_listener(nullptr)``.
+    Detaching here first, with a finite timeout, takes libstdc++'s ordinary blocking path --
+    and once it returns, no new callback can start, so ``disable()``'s own infinite wait finds
+    its predicate already true and never enters the loop.
+
+    Mirrors ``domain_participant::detach_participant_listener`` in src/domain_participant.cpp.
+
+    Temporary, and not alone: this, that, and the SWIG patch in CMakeLists.txt that makes the
+    timeout overload callable at all exist only to keep Fast-DDS' unbounded deadline from
+    being reached. The defect is reported to eProsima; when a Fast-DDS release stops building
+    that deadline, all three retire together -- see the note on the patch in CMakeLists.txt
+    for how to tell, and why a green CI run is not the way.
+
+    Safe with respect to the listener's own lifetime, and in fact tidier than not doing it.
+    The wrapped ``set_listener`` INCREFs the incoming listener and DECREFs the outgoing one,
+    so detaching here releases the reference C++ took when the listener was attached --
+    which nothing released before, because the detach inside Fast-DDS' ``disable()`` is an
+    internal C++ call that never passes through the binding. The participant holds
+    ``self._discovery_listener`` throughout either way, so the object cannot be freed early;
+    on a network-recovery reset the same listener is then re-attached to the new participant,
+    INCREFing it again, so the two now balance instead of accumulating one reference per
+    reset.
+
+    Best-effort by design: a participant that cannot be quiesced must still be deleted, so
+    every failure here falls through to the deletion the caller is about to do. That is what
+    the code did before this existed."""
+    global _listener_detach_supported
+    if participant is None or _listener_detach_supported is False:
+        return
+    try:
+        detached = participant.set_listener(None, StatusMask.none(), _LISTENER_SWAP_TIMEOUT_SEC)
+        # The overload answered, so these bindings carry it, whatever the outcome was.
+        _listener_detach_supported = True
+        if detached != RETCODE_OK:
+            # The bounded wait expired: a listener callback is still running after the whole
+            # timeout. What happens next is the thing this function exists to prevent --
+            # delete_participant reaches Fast-DDS' own detach with its infinite deadline and
+            # busy-loops on it -- and without this line an operator watching a core pegged
+            # inside participant destruction has nothing whatever to go on. Mirrors the
+            # warning domain_participant::detach_participant_listener emits for the same
+            # return, in the same words including the domain, because it is the same event on
+            # the same topic seen from the other binding -- and the domain is the only field
+            # that says WHICH participant is about to peg a core, which matters because a
+            # network-recovery reset recreates participants and a process can hold several.
+            _network_recovery._emit_log(
+                _network_recovery.LogLevel.WARNING,
+                f"a participant listener callback on domain {domain_id} has not returned "
+                f"within {_LISTENER_SWAP_TIMEOUT_SEC} s; participant destruction will block "
+                f"until it does. Discovery callbacks must not block and must not create "
+                f"publishers / subscribers / services.",
+            )
+    except TypeError:
+        # Bindings without the timeout overload -- an externally built fastdds module, since
+        # provizio_dds patches its own to carry it (see CMakeLists.txt). Deliberately NOT
+        # retried through the two-argument form: that one carries the infinite default, so it
+        # would move the spin from Fast-DDS' teardown to ours rather than remove it, and
+        # skipping leaves exactly the behaviour these bindings had before.
+        _listener_detach_supported = False
+    except Exception:
+        # Anything else (a participant already being torn down, a Fast-DDS error) is not worth
+        # failing a teardown over, and says nothing about the binding, so the answer above is
+        # left unresolved rather than latched to False.
+        pass
 
 
 # Fast-DDS' DomainParticipantFactory.load_profiles() auto-loads this file from the
@@ -2329,6 +2462,11 @@ def make_domain_participant(domain_id: int = 0,
                 self._cleaned_up = True
                 factory = DomainParticipantFactory.get_instance()
                 if self._participant is not None:
+                    # Before anything is deleted: delete_participant reaches Fast-DDS'
+                    # own listener detach, whose infinite default busy-loops rather
+                    # than waits on some standard libraries. See
+                    # _detach_participant_listener.
+                    _detach_participant_listener(self._participant, self._domain_id)
                     self._participant.delete_contained_entities()
                     factory.delete_participant(self._participant)
                     self._participant = None
@@ -2344,6 +2482,33 @@ def make_domain_participant(domain_id: int = 0,
                     self._generation += 1
 
         def __del__(self):
+            if _on_fastdds_callback_thread():
+                # Our last reference was dropped ON a Fast-DDS listener thread -- the discovery
+                # listener resolves a strong reference to us for every SEDP event, so an
+                # application holding nothing but the participant reaches zero here. Cleaning up
+                # inline would detach the participant listener while WE are the executing
+                # callback (the bounded wait cannot succeed, so it burns its whole timeout) and
+                # then have delete_participant join this very thread. Hand it to the reaper,
+                # exactly as Publisher/Subscriber.__del__ do.
+                #
+                # This RESURRECTS the object, deliberately. A bound method holds its receiver
+                # in __self__, so handing self._cleanup to the reaper keeps `self` alive past
+                # the end of __del__ -- there is no way to defer an instance method's work
+                # without doing so, and a plain closure over it would keep it alive just the
+                # same. Safe since PEP 442 (Python 3.4): the finalizer runs at most once, so
+                # the object is not finalized again when the reaper drops the last reference,
+                # and CPython frees it there instead -- on the reaper thread, which is the
+                # whole point of the hand-off.
+                cleanup = self._cleanup
+                try:
+                    _network_recovery.submit_off_thread(cleanup)
+                    return
+                except Exception:  # noqa: BLE001
+                    # The reaper could not take it (its thread failed to start). Falling through
+                    # to the inline path risks the self-join described above, but leaking the
+                    # participant silently is worse: it keeps its Fast-DDS entities, its sockets
+                    # and its discovery traffic for the life of the process.
+                    pass
             self._cleanup()
 
         def fastdds_participant(self):
@@ -2785,6 +2950,10 @@ def make_domain_participant(domain_id: int = 0,
                 # Destroy the old participant.
                 factory = DomainParticipantFactory.get_instance()
                 if self._participant is not None:
+                    # Same reason as in _cleanup, and it matters more here: a reset runs
+                    # on a network event, which is exactly when discovery callbacks are in
+                    # flight -- the condition Fast-DDS' infinite listener detach spins on.
+                    _detach_participant_listener(self._participant, self._domain_id)
                     self._participant.delete_contained_entities()
                     factory.delete_participant(self._participant)
                     self._participant = None
