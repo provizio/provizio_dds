@@ -29,6 +29,7 @@
 #include <unordered_set>
 
 #include "provizio/dds/common.h"
+#include "provizio/dds/detail/bounded_wait.h"
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/request_response_details.h"
@@ -879,7 +880,10 @@ namespace provizio::dds
     std::future_status future_response<request_pub_sub_type, response_pub_sub_type>::wait_for(
         const std::chrono::duration<rep, period> &timeout_duration) const
     {
-        return wait_until(std::chrono::system_clock::now() + timeout_duration);
+        // Saturating rather than a plain add: system_clock::now() + a near-max duration
+        // overflows into the PAST, which would report an instant timeout to a caller who
+        // asked to wait essentially forever (see detail/bounded_wait.h).
+        return wait_until(detail::saturating_deadline<std::chrono::system_clock>(timeout_duration));
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
@@ -894,7 +898,11 @@ namespace provizio::dds
 
         std::unique_lock<std::mutex> lock{data->mutex()};
         std::exception_ptr error{};
-        if (data->cv().wait_until(lock, timeout_time, [&]() {
+        // Sliced rather than handed straight to the condition variable: this is a public
+        // API taking a time_point of ANY clock, so a caller may pass
+        // steady_clock::time_point::max() to mean "no deadline" -- which makes libstdc++
+        // spin at 100% of a core instead of waiting (see detail/bounded_wait.h).
+        if (detail::wait_until_bounded(data->cv(), lock, timeout_time, [&]() {
                 return (error = data->get_error_mutex_prelocked()) != nullptr || data->is_set_mutex_prelocked();
             }))
         {
