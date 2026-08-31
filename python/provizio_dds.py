@@ -200,7 +200,101 @@ if MATCH_PUBLISHER_RELIABILITY_QOS in (
     )
 
 
-class QosDefaults:
+# The KEEP_LAST depth every DataWriter gets unless its type asks for something else. Fast-DDS's own
+# writer default is KEEP_LAST(1), which turns a RELIABLE writer into stop-and-wait: the single slot
+# is overwritten by the next sample, so a sample a reader has not yet acknowledged can no longer be
+# retransmitted, and rather than lose it the writer blocks the publishing thread until the
+# acknowledgement arrives or max_blocking_time (Fast-DDS's inherited 100 ms — deliberately left
+# alone) runs out. Eight slots let the emitter keep publishing across a NACK/repair round trip.
+# Mirrors detail::default_datawriter_keep_last_history_depth in include/provizio/dds/qos_defaults.h.
+_DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH = 8
+
+# The KEEP_LAST depth given to the DataReader of a topic several emitters share. KEEP_LAST depth is
+# a PER INSTANCE budget and a keyless topic has exactly one instance, so on a Provizio fleet topic —
+# every radar publishing point clouds to rt/provizio_radar_point_cloud, freespace polygons to
+# rt/provizio_freespace_poly, told apart only by frame_id — a reader's depth covers the whole fleet
+# rather than each emitter: at 6 radars publishing 15 Hz a depth of 4 is about 44 ms of traffic for
+# all of them together. 32 is roughly two frames from each of a 16-emitter fleet, and since these
+# types are all KB-scale (one history slot costs one serialized sample) the whole reader history
+# stays single-digit MB. Mirrors detail::fleet_shared_datareader_keep_last_history_depth.
+_FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH = 32
+
+# Reader and writer depth for a large sample type that no Provizio fleet topic shares. Deliberately
+# shallow: one history slot costs one serialized sample (measured on a KEEP_LAST writer, RSS grew by
+# 200 KB per slot for a 200 KB sample and 500 KB per slot for a 500 KB one, linear in depth), and
+# these are the types whose samples run to megabytes. Mirrors detail::large_sample_qos_defaults.
+_LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH = 4
+
+# CompressedImage reader depth: two frames from each of at most three cameras sharing one keyless
+# camera topic. The fleet-shared 32 is unaffordable for a frame one to two orders of magnitude
+# larger than a point cloud — measured, depth 6 costs 1.2 MB per endpoint at 200 KB frames and
+# 3.0 MB at 500 KB, against 6.4/16.0 MB at depth 32. Mirrors the C++ CompressedImage
+# specialization.
+_COMPRESSED_IMAGE_DATAREADER_KEEP_LAST_HISTORY_DEPTH = 6
+
+
+# Attributes removed from QosDefaults, and what to do instead. QosDefaults is public API whose
+# per-type dicts consumers are meant to write into, so an entry left in a dict that is no longer
+# read would be a silent misconfiguration — exactly the failure mode the split exists to prevent.
+# The metaclass below turns both reading and assigning such an attribute into a loud error, which
+# is what the C++ side gets from a static_assert.
+_REMOVED_QOS_DEFAULTS_ATTRIBUTES = {
+    "keep_last_history_depth_per_type": (
+        "QosDefaults.keep_last_history_depth_per_type no longer exists. It was split into "
+        "QosDefaults.datareader_keep_last_history_depth_per_type (the reader's jitter buffer, "
+        "shared by every writer on the topic) and "
+        "QosDefaults.datawriter_keep_last_history_depth_per_type (the writer's retransmission "
+        "buffer for its own samples), which are read independently -- so an entry left in the "
+        "old dict would have no effect at all. Register your per-type depth in whichever of the "
+        "two you meant, or in both."
+    ),
+    "keep_last_history_depth": (
+        "QosDefaults.keep_last_history_depth no longer exists. It was split into "
+        "QosDefaults.datareader_keep_last_history_depth (the reader's jitter buffer, shared by "
+        "every writer on the topic) and QosDefaults.datawriter_keep_last_history_depth (the "
+        "writer's retransmission buffer for its own samples). Read whichever of the two applies "
+        "to the endpoint you are configuring."
+    ),
+}
+
+
+class _QosDefaultsMeta(type):
+    """Metaclass that rejects the QosDefaults attributes removed by the reader/writer history
+    split, instead of letting a stale override be created and silently ignored.
+
+    Both halves are needed. Reading is the common case: ``QosDefaults.keep_last_history_depth_per_type[T] = 4``
+    is a *get* of the dict followed by a setitem on it, so it goes through ``__getattr__``.
+    Assigning the whole attribute is the dangerous case: without ``__setattr__`` it would simply
+    create a new class attribute that nothing ever reads.
+    """
+
+    def __getattr__(cls, name):
+        """Raises AttributeError, with removal guidance for a removed attribute.
+
+        :param str name: The attribute that ordinary lookup did not find.
+        :raises AttributeError: Always -- with the migration message for a removed attribute.
+        """
+        removed = _REMOVED_QOS_DEFAULTS_ATTRIBUTES.get(name)
+        if removed is not None:
+            raise AttributeError(removed)
+        raise AttributeError(
+            f"type object '{cls.__name__}' has no attribute '{name}'"
+        )
+
+    def __setattr__(cls, name, value):
+        """Sets a class attribute, refusing the ones removed by the history-depth split.
+
+        :param str name: The attribute being assigned.
+        :param value: The value being assigned.
+        :raises AttributeError: If the attribute was removed by the split.
+        """
+        removed = _REMOVED_QOS_DEFAULTS_ATTRIBUTES.get(name)
+        if removed is not None:
+            raise AttributeError(removed)
+        super().__setattr__(name, value)
+
+
+class QosDefaults(metaclass=_QosDefaultsMeta):
     """Defines default QOS policies. They can be overriden for specific types"""
 
     """Per type defaults for datawriter_reliability_kind. RELIABLE_RELIABILITY_QOS by default in Fast DDS"""
@@ -219,15 +313,47 @@ class QosDefaults:
     large sample types (images, point clouds) override this to ASYNCHRONOUS_PUBLISH_MODE so a multi-MB write
     hands off to the participant's async sender thread instead of blocking the publishing thread. Writer-local —
     NOT an RxO QoS, so it never affects reader/writer matching or ROS 2 interop. Registered lazily for the large
-    sample types by _register_large_sample_qos_defaults() below."""
+    sample types by _register_per_type_qos_defaults() below."""
     datawriter_publish_mode_per_type = {None: SYNCHRONOUS_PUBLISH_MODE}
 
-    """Per type default KEEP_LAST history depth, applied to both datawriter and datareader only when the caller
-    doesn't request an explicit positive history_depth / max_history_depth. 0 means "no per-type override" (keep
-    the Fast-DDS default). Large sample types override this to a small depth (4) so a momentarily slow consumer
-    doesn't drop big frames. Sets history depth only — durability is controlled separately, so it is NOT an RxO
-    QoS and doesn't affect matching or ROS 2 interop. Registered lazily by _register_large_sample_qos_defaults()."""
-    keep_last_history_depth_per_type = {None: 0}
+    """Per type default KEEP_LAST history depth for a DATAREADER, applied only when the caller doesn't request an
+    explicit positive max_history_depth. 0 means "no per-type override": Fast-DDS's own reader default,
+    KEEP_LAST(1), stands.
+
+    Reader and writer depth are separate dicts because the two endpoints do unrelated jobs, usually on different
+    machines. A writer's history is a retransmission buffer holding one emitter's own recent samples, paid for on
+    a frequently memory-constrained sensor. A reader's history is a jitter buffer shared by every writer on the
+    topic, paid for on the consuming host, and it has to absorb the combined rate of the whole fleet. One dict for
+    both forced a single value to be simultaneously too deep for the sensor and far too shallow for the consumer.
+
+    KEEP_LAST depth is a PER INSTANCE budget and a keyless topic has exactly one instance, so on a topic several
+    emitters share — every Provizio fleet topic, distinguished only by frame_id — a reader's depth is divided
+    across the whole fleet rather than granted per emitter. Types published that way are registered with
+    _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH below. Overrunning a reader history is silent: the sample
+    arrived and was acknowledged, and then the reader's own history discarded it, so no RTPS loss is recorded and
+    nothing is counted or logged — the callback simply never fires.
+
+    Sets history depth only — durability is controlled separately, so it is NOT an RxO QoS and doesn't affect
+    matching or ROS 2 interop. Registered lazily by _register_per_type_qos_defaults()."""
+    datareader_keep_last_history_depth_per_type = {None: 0}
+
+    """Per type default KEEP_LAST history depth for a DATAWRITER, applied only when the caller doesn't request an
+    explicit positive history_depth.
+
+    _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH (8) rather than 0 ("keep the Fast-DDS default"), because
+    Fast-DDS's writer default of KEEP_LAST(1) makes a RELIABLE writer stop-and-wait: the single history slot is
+    overwritten by the next sample, so a sample a reader has not yet acknowledged can no longer be retransmitted,
+    and rather than lose it the writer blocks the publishing thread until the acknowledgement arrives or
+    max_blocking_time (Fast-DDS's inherited 100 ms, deliberately left untouched) runs out. A writer's history
+    holds only that one emitter's own samples, so the cost doesn't scale with the number of peers — but types
+    whose samples are megabyte-scale are still registered back down below, trading retransmission head-room for
+    memory on the emitting device.
+
+    Sets history depth only — durability is controlled separately, so it is NOT an RxO QoS and doesn't affect
+    matching or ROS 2 interop. Registered lazily by _register_per_type_qos_defaults()."""
+    datawriter_keep_last_history_depth_per_type = {
+        None: _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH
+    }
 
     """Default count of the INITIAL discovery-announcement burst sent once at participant creation.
     De-escalated from a former 200 to a modest burst that still beats best-effort multicast loss on
@@ -287,26 +413,73 @@ class QosDefaults:
                 QosDefaults.datawriter_publish_mode_per_type[None]
             )
         try:
-            self.keep_last_history_depth = (
-                QosDefaults.keep_last_history_depth_per_type[pub_sub_type]
+            self.datareader_keep_last_history_depth = (
+                QosDefaults.datareader_keep_last_history_depth_per_type[pub_sub_type]
             )
         except KeyError:
-            self.keep_last_history_depth = (
-                QosDefaults.keep_last_history_depth_per_type[None]
+            self.datareader_keep_last_history_depth = (
+                QosDefaults.datareader_keep_last_history_depth_per_type[None]
+            )
+        try:
+            self.datawriter_keep_last_history_depth = (
+                QosDefaults.datawriter_keep_last_history_depth_per_type[pub_sub_type]
+            )
+        except KeyError:
+            self.datawriter_keep_last_history_depth = (
+                QosDefaults.datawriter_keep_last_history_depth_per_type[None]
             )
 
+    def __getattr__(self, name):
+        """Raises AttributeError, with migration guidance for an attribute the history-depth
+        split removed.
 
-def _register_large_sample_qos_defaults():
-    """Register per-type QoS defaults for the "large sample" message types
-    (camera frames, point clouds, occupancy grids): ASYNCHRONOUS datawriter
-    publish mode + a modest KEEP_LAST(4) history so a multi-MB write hands off
-    to the participant's async sender thread and a momentarily slow consumer
-    doesn't drop big frames. Mirrors the C++ ``qos_defaults<T>`` specializations
-    (``detail::large_sample_qos_defaults`` in include/provizio/dds/qos_defaults.h).
+        Only reached for attributes ordinary lookup did not find, so it costs nothing on the
+        normal path. It exists so code that still reads the pre-split ``keep_last_history_depth``
+        is told what to read instead, rather than getting a bare "no attribute" from Python.
 
-    The publish mode is writer-local and the history depth is set without
-    touching durability, so neither is an RxO QoS — reader/writer matching and
-    ROS 2 interop are unaffected.
+        :param str name: The attribute that ordinary lookup did not find.
+        :raises AttributeError: Always -- with the migration message for a removed attribute.
+        """
+        removed = _REMOVED_QOS_DEFAULTS_ATTRIBUTES.get(name)
+        if removed is not None:
+            raise AttributeError(removed)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
+
+def _register_per_type_qos_defaults():
+    """Register the per-type QoS defaults that differ from the primary (None) ones.
+
+    Mirrors the ``qos_defaults<T>`` specializations in include/provizio/dds/qos_defaults.h,
+    tier for tier and value for value:
+
+    * **Fleet-shared types** — the ones every sensor publishes to one keyless topic, told
+      apart only by ``frame_id``: point clouds, freespace polygons, odometry, transforms,
+      radar info, camera intrinsics, GNSS fixes and the open-schema per-frame metadata on
+      rt/provizio_metadata. Their reader history is raised to
+      ``_FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH`` because a reader's depth covers
+      the whole fleet rather than each emitter. Point clouds and polygons additionally
+      publish asynchronously, being large enough to fragment over UDP; the small types stay
+      synchronous, since handing a few hundred bytes to the async sender thread would only
+      add latency.
+    * **Large samples nothing shares** (multi-echo laser scans, occupancy grids): the
+      asynchronous publish mode, plus a deliberately shallow history — one history slot
+      costs one serialized sample, and these run to megabytes.
+    * **Raw ``Image``**: the same shallow large-sample history, and the one type whose
+      writer defaults to BEST_EFFORT. The product is migrating off it — raw camera frames
+      are superseded by ``CompressedImage`` and raw-image freespace by the polygonal
+      freespace on rt/provizio_freespace_poly — so a raw frame is at once the heaviest
+      sample on the wire and the right one to drop first. A consumer that needs lossless
+      raw images passes an explicit RELIABLE_RELIABILITY_QOS; a ROS 2 subscriber must ask
+      for SensorDataQoS or it will not match at all (see DETAILS.md).
+    * **``CompressedImage``**: reliable, with a reader history sized for up to three
+      cameras sharing the topic rather than for a whole fleet.
+
+    Publish mode is writer-local and the history depths are set without touching
+    durability, so none of this is an RxO QoS — reader/writer matching and ROS 2 interop
+    are unaffected. Reliability IS an RxO policy, which is why raw ``Image`` is the only
+    type whose reliability is changed here and why that change is documented as breaking.
 
     Registration is lazy and defensive: the generated message bindings come from
     ``provizio_dds_python_types`` (wildcard-imported above), but not every build
@@ -316,37 +489,140 @@ def _register_large_sample_qos_defaults():
     # Bare names resolve against this module's globals, populated by the
     # `from provizio_dds_python_types import *` at the top of the file (the same
     # mechanism by which user code reaches e.g. provizio_dds.PointCloud2PubSubType).
-    large_sample_pub_sub_type_names = (
-        "ImagePubSubType",            # sensor_msgs/msg/Image
-        "CompressedImagePubSubType",  # sensor_msgs/msg/CompressedImage
-        "MultiEchoLaserScanPubSubType",  # sensor_msgs/msg/MultiEchoLaserScan
-        "PointCloud2PubSubType",      # sensor_msgs/msg/PointCloud2
-        "OccupancyGridPubSubType",    # nav_msgs/msg/OccupancyGrid
-        # A freespace polygon is a sequence of vertices, so a dense one runs to several
-        # KB and fragments over UDP; without the async + KEEP_LAST(4) override a
-        # reliable writer's single history slot is overwritten before a momentarily
-        # slow reader has acknowledged the previous sample's fragments.
-        "PolygonStampedPubSubType",   # geometry_msgs/msg/PolygonStamped
-        "PolygonInstanceStampedPubSubType",  # geometry_msgs/msg/PolygonInstanceStamped
+    # Each entry is (pub/sub type name, publish mode, datawriter reliability,
+    # datareader history depth, datawriter history depth).
+    per_type_qos_defaults = (
+        # Fleet-shared and large enough to fragment over UDP.
+        # sensor_msgs/msg/PointCloud2: rt/provizio_radar_point_cloud and the entity clouds.
+        (
+            "PointCloud2PubSubType",
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # geometry_msgs/msg/PolygonInstanceStamped: rt/provizio_freespace_poly and the
+        # camera variant. A polygon is a sequence of vertices, so a dense one runs to
+        # several KB, and several polygons can share one frame.
+        (
+            "PolygonInstanceStampedPubSubType",
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "PolygonStampedPubSubType",  # geometry_msgs/msg/PolygonStamped
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # Fleet-shared but small: a few hundred bytes never fragments, so synchronous.
+        (
+            "OdometryPubSubType",  # nav_msgs/msg/Odometry
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "TransformStampedPubSubType",  # geometry_msgs/msg/TransformStamped
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "NavSatFixPubSubType",  # sensor_msgs/msg/NavSatFix
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "radar_infoPubSubType",  # provizio/msg/radar_info
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "camera_intrinsicsPubSubType",  # provizio/msg/camera_intrinsics
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "metadataPubSubType",  # provizio/msg/metadata, on rt/provizio_metadata
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # Large samples that no Provizio fleet topic shares.
+        (
+            "MultiEchoLaserScanPubSubType",  # sensor_msgs/msg/MultiEchoLaserScan
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "OccupancyGridPubSubType",  # nav_msgs/msg/OccupancyGrid
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # Raw camera frames (rt/provizio_camera) and raw-image freespace
+        # (rt/provizio_freespace): the one best-effort writer in the library.
+        (
+            "ImagePubSubType",  # sensor_msgs/msg/Image
+            ASYNCHRONOUS_PUBLISH_MODE,
+            BEST_EFFORT_RELIABILITY_QOS,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # The successor to raw Image, so it keeps a reliable writer and a reader history
+        # worth having. The writer keeps the shallow large-sample depth: it buffers only
+        # its own camera's stream, so it needs no per-camera multiplier.
+        (
+            "CompressedImagePubSubType",  # sensor_msgs/msg/CompressedImage
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _COMPRESSED_IMAGE_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+        ),
     )
-    for type_name in large_sample_pub_sub_type_names:
+    for (
+        type_name,
+        publish_mode,
+        datawriter_reliability_kind,
+        datareader_history_depth,
+        datawriter_history_depth,
+    ) in per_type_qos_defaults:
         try:
             cls = globals()[type_name]
         except KeyError:
             # The generated binding for this type isn't available in this build;
-            # leave it on the (synchronous, no-override) primary defaults.
+            # leave it on the primary (None) defaults.
             continue
-        QosDefaults.datawriter_publish_mode_per_type[cls] = ASYNCHRONOUS_PUBLISH_MODE
-        QosDefaults.keep_last_history_depth_per_type[cls] = 4
-        # Reader reliability default = match-publisher, same as the primary
-        # (None) default. The large-sample types inherit it via the None
-        # fallback anyway, but the C++ large_sample_qos_defaults sets it
-        # explicitly, so mirror that here so a future change to the primary
-        # default can't silently flip these types to a different reliability.
+        QosDefaults.datawriter_publish_mode_per_type[cls] = publish_mode
+        QosDefaults.datawriter_reliability_kind_per_type[cls] = datawriter_reliability_kind
+        QosDefaults.datareader_keep_last_history_depth_per_type[cls] = datareader_history_depth
+        QosDefaults.datawriter_keep_last_history_depth_per_type[cls] = datawriter_history_depth
+        # Reader reliability default = match-publisher, same as the primary (None) default.
+        # These types inherit it via the None fallback anyway, but the C++ tiers set it
+        # explicitly, so mirror that here: a future change to the primary default must not
+        # silently flip these types to a different reliability. It matters most for Image,
+        # whose writer is best-effort — a match-publisher subscriber adopts that and keeps
+        # matching, which is exactly why only the writer side of that decision is stated.
         QosDefaults.datareader_reliability_kind_per_type[cls] = MATCH_PUBLISHER_RELIABILITY_QOS
 
 
-_register_large_sample_qos_defaults()
+_register_per_type_qos_defaults()
 
 
 USE_DEFAULT_HISTORY_DEPTH = -1
@@ -3135,7 +3411,7 @@ class Publisher(_TopicHandle):
         :param pub_sub_type: The DDS PubSub Type to be published, f.e. provizio_dds.StringPubSubType
         :param on_has_subscriber_changed_function: Optional, a function to be invoked on matching first / unmatching last subscriber, takes two arguments: a Publisher and a bool: True when the first subscriber is matched, False when the last subscriber is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data writer reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
-        :param int history_depth: Controls the KEEP_LAST history depth only (no longer tied to durability): USE_DEFAULT_HISTORY_DEPTH (-1) or any non-positive value uses the default depth (the per-type QosDefaults.keep_last_history_depth if specialized for pub_sub_type, otherwise the Fast-DDS default); a positive value sets KEEP_LAST history with that depth. Configure durability separately via durability_kind.
+        :param int history_depth: Controls the KEEP_LAST history depth only (no longer tied to durability): USE_DEFAULT_HISTORY_DEPTH (-1) or any non-positive value uses the default depth (the per-type QosDefaults.datawriter_keep_last_history_depth_per_type entry if one is registered for pub_sub_type, otherwise the primary default); a positive value sets KEEP_LAST history with that depth. The writer's history is its retransmission buffer for its own samples, sized against the emitting device's memory -- a reader's is a separate, deeper knob. Configure durability separately via durability_kind.
         :param durability_kind: Optional, a DDS durability kind to be used (e.g. VOLATILE_DURABILITY_QOS or TRANSIENT_LOCAL_DURABILITY_QOS); if not specified, the Fast-DDS / XML default durability is kept. Mirrors reliability_kind — independent of history_depth.
         """
 
@@ -3195,7 +3471,7 @@ class Publisher(_TopicHandle):
         effective_history_depth = (
             self._captured_history_depth
             if self._captured_history_depth > 0
-            else self._captured_qos_defaults.keep_last_history_depth
+            else self._captured_qos_defaults.datawriter_keep_last_history_depth
         )
         if effective_history_depth > 0:
             writer_qos.history().kind = KEEP_LAST_HISTORY_QOS
@@ -3541,7 +3817,7 @@ class Subscriber(_TopicHandle):
         :param on_data_function: A function to be invoked on receiving published data. It can take one argument (the data) or two arguments (data and a SampleInfo object). Note: called from a background Thread
         :param on_has_publisher_changed_function: Optional, a function to be invoked on matching first / unmatching last publisher, takes a single bool argument: True when the first publisher is matched, False when the last publisher is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data reader reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
-        :param int max_history_depth: Controls the KEEP_LAST history depth only (no longer tied to durability): USE_DEFAULT_HISTORY_DEPTH (-1) or any non-positive value uses the default depth (the per-type QosDefaults.keep_last_history_depth if specialized for pub_sub_type, otherwise the Fast-DDS default); a positive value sets KEEP_LAST history with that depth. Configure durability separately via durability_kind.
+        :param int max_history_depth: Controls the KEEP_LAST history depth only (no longer tied to durability): USE_DEFAULT_HISTORY_DEPTH (-1) or any non-positive value uses the default depth (the per-type QosDefaults.datareader_keep_last_history_depth_per_type entry if one is registered for pub_sub_type, otherwise the Fast-DDS default); a positive value sets KEEP_LAST history with that depth. The reader's history is a jitter buffer shared by every writer on the topic -- on a keyless fleet-shared topic the depth is divided across all of them, which is why the fleet types default deep. A latency-sensitive consumer (a live display) should pass a small explicit depth instead: a deep history makes a momentarily-behind reader work through the backlog rather than skip to the newest sample. Configure durability separately via durability_kind.
         :param durability_kind: Optional, a DDS durability kind to be used (e.g. VOLATILE_DURABILITY_QOS or TRANSIENT_LOCAL_DURABILITY_QOS); if not specified, the Fast-DDS / XML default durability is kept. Mirrors reliability_kind — independent of max_history_depth.
         """
         super().__init__(domain_participant, topic_name, pub_sub_type)
@@ -3631,7 +3907,7 @@ class Subscriber(_TopicHandle):
         effective_max_history_depth = (
             self._captured_max_history_depth
             if self._captured_max_history_depth > 0
-            else self._captured_qos_defaults.keep_last_history_depth
+            else self._captured_qos_defaults.datareader_keep_last_history_depth
         )
         if effective_max_history_depth > 0:
             reader_qos.history().kind = KEEP_LAST_HISTORY_QOS

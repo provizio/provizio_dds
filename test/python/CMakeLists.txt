@@ -494,20 +494,24 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                          RESOURCE_LOCK provizio_dds_shm_cleanup)
 endif()
 
-# Cross-language parity of the large-sample QoS default overrides: the Python
-# registration must cover the C++ qos_defaults<T> specialization list exactly (the
-# header, passed from the source tree, is the source of truth). Import-only — no
-# DDS participants — so it returns in milliseconds.
-add_test(NAME python_large_sample_qos_parity COMMAND
+# Cross-language parity of the per-type QoS default overrides: the Python registration
+# must cover the C++ qos_defaults<T> specialization list exactly AND register the same
+# values for every type. Both source files are passed from the source tree: the header
+# for the list of specializations, and qos_defaults_checks.cpp for the values it already
+# pins in static_asserts — so the C++ compiler, not a regex, is what keeps those values
+# in step with the header. Import-only — no DDS participants — so it returns in
+# milliseconds.
+add_test(NAME python_per_type_qos_parity COMMAND
     "${PYTHON_EXECUTABLE}" -q -X faulthandler
     ./python_qos_parity_test.py "${CMAKE_SOURCE_DIR}/include/provizio/dds/qos_defaults.h"
+    "${CMAKE_SOURCE_DIR}/src/qos_defaults_checks.cpp"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 if(WIN32)
-    set_tests_properties(python_large_sample_qos_parity PROPERTIES TIMEOUT 30
+    set_tests_properties(python_per_type_qos_parity PROPERTIES TIMEOUT 30
         ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
 else()
-    set_tests_properties(python_large_sample_qos_parity PROPERTIES TIMEOUT 30)
+    set_tests_properties(python_per_type_qos_parity PROPERTIES TIMEOUT 30)
 endif()
 
 # Cross-language parity of the VPN / tunnel classifier: the same table of interface
