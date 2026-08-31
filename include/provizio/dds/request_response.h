@@ -531,7 +531,21 @@ namespace provizio::dds
           subscriber(make_subscriber<request_pub_sub_type>(
               participant, request_topic_name,
               [this](const typename request_pub_sub_type::type &data, const SampleInfo &info) { on_data(data, info); },
-              RELIABLE_RELIABILITY_QOS, endpoint_history_depth, durability_kind)),
+              RELIABLE_RELIABILITY_QOS,
+              // Defaulted the same way the response writer above is, and for the mirror-image
+              // reason. Passing endpoint_history_depth straight through meant that with no
+              // explicit depth the request READER fell to qos_defaults<request type>::
+              // datareader_keep_last_history_depth -- zero for any type a service uses, i.e.
+              // Fast-DDS' own KEEP_LAST(1) -- while service_client sizes its request WRITER at
+              // service_client_default_history_depth (10) and documents that as how many
+              // requests may be in flight. A burst of 10 into a history of 1 evicts unread
+              // requests, and silently: eviction happens after the reliability contract is
+              // satisfied, so there is no NACK, no log and no counter, only clients whose
+              // future_response times out.
+              (endpoint_history_depth == use_default_history_depth)
+                  ? static_cast<std::int32_t>(detail::to_max_queue_size(use_default_history_depth))
+                  : endpoint_history_depth,
+              durability_kind)),
           dispatch_responses_thread(&service::dispatch_responses, this)
     {
     }

@@ -169,8 +169,11 @@ namespace provizio::dds
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
          * DataReader; reliable subscribers are slower but lossless on matched publishers
          * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
-         * qos_defaults depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive
-         * value, including 0, uses the default). Durability is configured separately via durability_kind.
+         * qos_defaults<data_pub_sub_type>::datareader_keep_last_history_depth (else Fast-DDS's default); a positive
+         * value sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is
+         * configured separately via durability_kind. A latency-sensitive consumer (a live display) should pass a
+         * small explicit depth: a deep history makes a momentarily-behind reader work through the backlog instead
+         * of skipping to the newest sample.
          * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
          * support); std::nullopt keeps the Fast-DDS/XML default.
          * @note A BEST_EFFORT_RELIABILITY_QOS subscriber will not match reliable publishers.
@@ -278,9 +281,12 @@ namespace provizio::dds
      * @param on_data_function Function / function object invoked for each received sample.
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataReader;
      * reliable subscribers are slower but lossless on matched publishers
-     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
-     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+     * qos_defaults<data_pub_sub_type>::datareader_keep_last_history_depth (else Fast-DDS's default); a positive value
+     * sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is configured
+     * separately via durability_kind. A latency-sensitive consumer (a live display) should pass a small explicit
+     * depth: a deep history makes a momentarily-behind reader work through the backlog instead of skipping to the
+     * newest sample.
      * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
      * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<subscriber_handle<data_pub_sub_type>>
@@ -315,9 +321,12 @@ namespace provizio::dds
      * @param on_has_publisher_changed_function Function / function object invoked on first match / last unmatch.
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataReader;
      * reliable subscribers are slower but lossless on matched publishers
-     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
-     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+     * qos_defaults<data_pub_sub_type>::datareader_keep_last_history_depth (else Fast-DDS's default); a positive value
+     * sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is configured
+     * separately via durability_kind. A latency-sensitive consumer (a live display) should pass a small explicit
+     * depth: a deep history makes a momentarily-behind reader work through the backlog instead of skipping to the
+     * newest sample.
      * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
      * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<subscriber_handle<data_pub_sub_type>>
@@ -399,11 +408,15 @@ namespace provizio::dds
         subscriber->get_default_datareader_qos(datareader_qos);
         datareader_qos.reliability().kind = effective_reliability_kind;
         datareader_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
-        // History (untied from durability): an explicit positive depth wins, else fall back to
-        // the per-type default (0 = leave the Fast-DDS default). KEEP_LAST only — durability is
-        // configured independently below, so this is not an RxO QoS (ROS2 interop unaffected).
+        // History (untied from durability): an explicit positive depth wins, else fall back to the
+        // per-type READER default (0 = leave the Fast-DDS default). The reader's own default is
+        // deliberately separate from the writer's: this history is a jitter buffer shared by every
+        // writer on the topic — on a keyless fleet-shared topic the depth is divided across all of
+        // them — while a writer's is a retransmission buffer for its own samples only. KEEP_LAST
+        // only — durability is configured independently below, so this is not an RxO QoS (ROS2
+        // interop unaffected).
         const std::int32_t effective_history_depth =
-            (max_history_depth > 0) ? max_history_depth : qos_defaults<data_pub_sub_type>::keep_last_history_depth;
+            detail::datareader_history_depth<data_pub_sub_type>(max_history_depth);
         if (effective_history_depth > 0)
         {
             datareader_qos.history().kind = HistoryQosPolicyKind::KEEP_LAST_HISTORY_QOS;

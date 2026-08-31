@@ -196,9 +196,11 @@ namespace provizio::dds
          * @param topic_name A DDS Topic Name
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
          * DataWriter, which makes publishing slower but more reliable
-         * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-         * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value,
-         * including 0, uses the default). Durability is configured separately via durability_kind.
+         * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+         * qos_defaults<data_pub_sub_type>::datawriter_keep_last_history_depth, a positive 8 on the primary
+         * template -- so unless the type specializes it to 0 this REPLACES any history an XML profile set; a positive
+         * value sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is
+         * configured separately via durability_kind.
          * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
          * support); std::nullopt keeps the Fast-DDS/XML default.
          * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
@@ -224,9 +226,11 @@ namespace provizio::dds
          * (un)matched subscriber's GUID; the bool indicates whether the change is a match (true) or unmatch (false).
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
          * DataWriter, which makes publishing slower but more reliable
-         * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-         * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value,
-         * including 0, uses the default). Durability is configured separately via durability_kind.
+         * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+         * qos_defaults<data_pub_sub_type>::datawriter_keep_last_history_depth, a positive 8 on the primary
+         * template -- so unless the type specializes it to 0 this REPLACES any history an XML profile set; a positive
+         * value sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is
+         * configured separately via durability_kind.
          * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
          * support); std::nullopt keeps the Fast-DDS/XML default.
          * @note Using BEST_EFFORT_RELIABILITY_QOS reliability_kind makes it incompatible with reliable subscribers
@@ -318,9 +322,11 @@ namespace provizio::dds
      * @param topic_name A DDS Topic Name
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataWriter,
      * which makes publishing slower but more reliable
-     * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
-     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+     * qos_defaults<data_pub_sub_type>::datawriter_keep_last_history_depth, a positive 8 on the primary
+     * template -- so unless the type specializes it to 0 this REPLACES any history an XML profile set; a positive value
+     * sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is configured
+     * separately via durability_kind.
      * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
      * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<publisher_handle<data_pub_sub_type>>
@@ -365,9 +371,11 @@ namespace provizio::dds
      * @c on_matched_function_type description.
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataWriter,
      * which makes publishing slower but more reliable
-     * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
-     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+     * qos_defaults<data_pub_sub_type>::datawriter_keep_last_history_depth, a positive 8 on the primary
+     * template -- so unless the type specializes it to 0 this REPLACES any history an XML profile set; a positive value
+     * sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is configured
+     * separately via durability_kind.
      * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
      * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<publisher_handle<data_pub_sub_type, on_matched_function_type>>
@@ -553,11 +561,18 @@ namespace provizio::dds
 
         DataWriterQos datawriter_qos;
         publisher->get_default_datawriter_qos(datawriter_qos);
-        // History (untied from durability): an explicit positive depth wins, else fall back to
-        // the per-type default (0 = leave the Fast-DDS default). KEEP_LAST only — durability is
-        // configured independently below, so this is not an RxO QoS (ROS2 interop unaffected).
-        const std::int32_t effective_history_depth =
-            (history_depth > 0) ? history_depth : qos_defaults<data_pub_sub_type>::keep_last_history_depth;
+        // History (untied from durability): an explicit positive depth wins, else fall back to the
+        // per-type WRITER default. Note the primary template's writer default is a POSITIVE 8, so
+        // unlike the reader side this branch is taken for every type that does not specialize the
+        // member down to 0 -- which means it OVERRIDES a history the caller declared in an XML
+        // profile, KEEP_ALL included. That is deliberate (Fast-DDS' KEEP_LAST(1) makes a RELIABLE
+        // writer stop-and-wait), and an explicit history_depth is the way back for a caller who
+        // wants their own depth. The writer's own default is deliberately separate from the
+        // reader's: this history is the retransmission buffer for this one emitter's samples,
+        // sized against the emitting device's memory, while a reader's is a jitter buffer shared
+        // by every writer on the topic. KEEP_LAST only — durability is configured independently
+        // below, so this is not an RxO QoS (ROS2 interop unaffected).
+        const std::int32_t effective_history_depth = detail::datawriter_history_depth<data_pub_sub_type>(history_depth);
         if (effective_history_depth > 0)
         {
             datawriter_qos.history().kind = KEEP_LAST_HISTORY_QOS;
