@@ -17,10 +17,12 @@
 // per-case environment overrides (PROVIZIO_DDS_NETWORK_RECOVERY) and
 // success/failure isolation are handled by ctest itself.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -1543,6 +1545,176 @@ namespace
                   << coordinator.skipped_reset_count_for_test() << " burst(s) judged no-change)" << '\n';
         return 1;
     }
+    // One of the two peers cold_start_hosts_test.sh drives. Each runs in its own network
+    // namespace with its own machine id and its own shared-memory directory, so together
+    // they stand in for two hosts. Both are started while their only interface is down --
+    // the shape of a service that starts before the network switch has powered on -- and
+    // then rebuilt by network recovery once the script brings the interfaces up. The
+    // reliable, transient-local exchange between the two rebuilt participants must work.
+    //
+    // It did not, for as long as Fast-DDS derived its process-wide host id from the
+    // interfaces that had carrier at first use and fell back to one fixed value when there
+    // were none: every such process on every host then carried the same id, each took the
+    // other's shared-memory locators for its own host's, and sent into its own segment.
+    // A rebuild cannot change that id, so the participants stayed deaf to each other for
+    // the life of both processes. The host id is printed for the script, which asserts the
+    // two hosts do not share one -- the direct symptom, independent of the timing of the
+    // exchange.
+    //
+    // usage: cold_start_peer <pub|sub> <topic> <timeout_sec> <cold|warm>
+    // cold: wait for a network-recovery rebuild before exchanging; warm: exchange at once
+    // (the script's control run, proving the two namespaces can talk at all).
+    int test_cold_start_peer(const std::vector<std::string_view> &args)
+    {
+        using provizio::dds::detail::network_recovery_coordinator;
+
+        constexpr std::size_t expected_arg_count = 6;
+        if (args.size() < expected_arg_count)
+        {
+            std::cerr << "usage: " << args[0] << " cold_start_peer <pub|sub> <topic> <timeout_sec> <cold|warm>" << '\n';
+            return 2;
+        }
+        const std::string role{args[2]};
+        const std::string topic_name{args[3]};
+        const std::string mode{args[5]};
+        int timeout_sec = 0;
+        try
+        {
+            timeout_sec = std::stoi(std::string{args[4]});
+        }
+        catch (const std::exception &)
+        {
+            std::cerr << "cold_start_peer: bad timeout '" << args[4] << "'" << '\n';
+            return 2;
+        }
+        if ((role != "pub" && role != "sub") || (mode != "cold" && mode != "warm"))
+        {
+            std::cerr << "cold_start_peer: role must be pub|sub and mode cold|warm" << '\n';
+            return 2;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{timeout_sec};
+
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+
+        // The two host-id bytes of the participant's GUID prefix, in wire order. Fast-DDS
+        // stores the 16-bit id little-endian in bytes 2 and 3, so its no-interface fallback
+        // of 0x017F prints as "7f01".
+        {
+            const auto fdds = participant->fastdds_participant();
+            // Null when a reset destroyed the participant and re-creating it failed (see
+            // locked_participant); report it rather than dereference, so the shell side sees
+            // a missing host id and not a dead peer.
+            if (fdds.get() == nullptr)
+            {
+                std::cerr << "cold_start_peer: no participant to report a host id for" << '\n';
+                return 1;
+            }
+            const auto &prefix = fdds->guid().guidPrefix;
+            constexpr int hex_width = 2;
+            std::cout << "cold_start_peer: host id " << std::hex << std::setw(hex_width) << std::setfill('0')
+                      << static_cast<int>(prefix.value[2]) << std::setw(hex_width) << std::setfill('0')
+                      << static_cast<int>(prefix.value[3]) << std::dec << '\n'
+                      << std::flush;
+        }
+
+        std::atomic<int> received{0};
+        std::shared_ptr<provizio::dds::publisher_handle<std_msgs::msg::StringPubSubType>> publisher;
+        std::shared_ptr<provizio::dds::subscriber_handle<std_msgs::msg::StringPubSubType>> subscriber;
+        constexpr std::int32_t history_depth = 1;
+        if (role == "pub")
+        {
+            publisher = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(
+                participant, topic_name, eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS, history_depth,
+                eprosima::fastdds::dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+        }
+        else
+        {
+            subscriber = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
+                participant, topic_name, [&received](const std_msgs::msg::String &) { ++received; },
+                eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS, history_depth,
+                eprosima::fastdds::dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+        }
+
+        // Flushed: the driving script waits for this line before it touches the interfaces.
+        std::cout << "cold_start_peer: armed (" << role << ", " << mode << ", "
+                  << provizio::dds::detail::capture_address_snapshot().size() << " interface address(es) visible)"
+                  << '\n'
+                  << std::flush;
+
+        constexpr std::chrono::milliseconds poll_interval{100};
+        auto &coordinator = network_recovery_coordinator::instance();
+        if (mode == "cold")
+        {
+            while (coordinator.reset_count_for_test() == 0)
+            {
+                if (std::chrono::steady_clock::now() >= deadline)
+                {
+                    std::cout << "cold_start_peer: FAIL (no network-recovery rebuild within " << timeout_sec << "s)"
+                              << '\n';
+                    return 1;
+                }
+                std::this_thread::sleep_for(poll_interval);
+            }
+            std::cout << "cold_start_peer: rebuilt (" << coordinator.reset_count_for_test() << " reset(s), "
+                      << provizio::dds::detail::capture_address_snapshot().size() << " interface address(es) visible)"
+                      << '\n'
+                      << std::flush;
+        }
+
+        constexpr std::chrono::milliseconds no_wait{0};
+        if (role == "pub")
+        {
+            // Keep publishing until the deadline, or until the subscriber has come and gone
+            // (it exits on its first sample): the subscriber's verdict is what the script
+            // reads. A transient-local writer with a depth of one keeps only the newest
+            // sample for late joiners anyway.
+            constexpr std::chrono::milliseconds publish_period{200};
+            int sequence = 0;
+            int max_matched = 0;
+            auto next_publish = std::chrono::steady_clock::now();
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                if (std::chrono::steady_clock::now() >= next_publish)
+                {
+                    std_msgs::msg::String message;
+                    message.data("cold_start_peer " + std::to_string(++sequence));
+                    publisher->publish(message);
+                    next_publish += publish_period;
+                }
+                // Polled more often than samples are published, so the subscriber's brief
+                // presence (see its grace period below) is observed.
+                const int matched = publisher->get_num_matched_subscribers(no_wait, no_wait);
+                max_matched = std::max(max_matched, matched);
+                if (matched == 0 && max_matched > 0)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(poll_interval / 2);
+            }
+            std::cout << "cold_start_peer: publisher done (" << sequence << " sample(s) published, at most "
+                      << max_matched << " matched subscriber(s))" << '\n';
+            return max_matched > 0 ? 0 : 1;
+        }
+
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (received.load() > 0)
+            {
+                std::cout << "cold_start_peer: PASS (" << received.load() << " sample(s) received, "
+                          << subscriber->get_num_matched_publishers(no_wait, no_wait) << " matched publisher(s))"
+                          << '\n'
+                          << std::flush;
+                // A grace period before the participant goes away, long enough for the
+                // publisher to observe the match and then its end, on which it exits too.
+                std::this_thread::sleep_for(std::chrono::seconds{1});
+                return 0;
+            }
+            std::this_thread::sleep_for(poll_interval);
+        }
+        std::cout << "cold_start_peer: FAIL (no sample within " << timeout_sec << "s; "
+                  << subscriber->get_num_matched_publishers(no_wait, no_wait) << " matched publisher(s))" << '\n';
+        return 1;
+    }
 }  // namespace
 
 int main(int argc, char **argv)
@@ -1687,6 +1859,10 @@ int main(int argc, char **argv)
     if (subcommand == "await_reset")
     {
         return test_await_reset(args.size() > 2 ? std::string{args[2]} : std::string{"30"});
+    }
+    if (subcommand == "cold_start_peer")
+    {
+        return test_cold_start_peer(args);
     }
 
     std::cerr << "unknown subcommand: " << subcommand << '\n';

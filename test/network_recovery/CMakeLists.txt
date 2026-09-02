@@ -161,6 +161,20 @@ if(UNIX AND NOT APPLE)
     set_tests_properties(network_recovery_carrier PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
 endif()
 
+# Two hosts that both start DDS before their network has carrier, emulated with a network
+# namespace each (joined by a veth pair) plus, per peer, a mount namespace giving it its own
+# /dev/shm and /etc/machine-id. Once the links come up and network recovery rebuilds both
+# participants, a sample must cross between them. It never did while Fast-DDS gave every
+# process started without an interface the same fixed host id, so each host mistook the
+# other's shared-memory locators for its own (fixed by
+# cmake/fast_dds/host_id_without_interfaces.cmake). Needs root or passwordless sudo plus
+# iproute2 and util-linux, and reports ctest SKIP otherwise.
+if(UNIX AND NOT APPLE)
+    add_test(NAME network_recovery_cold_start_hosts
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/cold_start_hosts_test.sh" "$<TARGET_FILE:network_recovery_test>")
+    set_tests_properties(network_recovery_cold_start_hosts PROPERTIES TIMEOUT 240 SKIP_RETURN_CODE 77)
+endif()
+
 # Scale this directory's test timeouts under a sanitizer, and let a stuck test report
 # itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
 provizio_dds_finalize_tests()
