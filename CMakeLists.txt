@@ -639,6 +639,16 @@ else(HAS_BIN_CACHE)
             PATCH_COMMAND ${CMAKE_COMMAND}
                 "-DSYSTEMINFO_HPP=<SOURCE_DIR>/src/cpp/utils/SystemInfo.hpp"
                 -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
+            # Give a process that creates its first participant before any interface has
+            # carrier a host id derived from the machine id, instead of the one fixed value
+            # Fast-DDS otherwise hands every such process on every host (APT-12250: two
+            # radars booted together took each other's shared-memory locators for their
+            # own and never heard each other, and a network-recovery rebuild cannot change
+            # the id). Idempotent and self-checking like the script above; see
+            # host_id_without_interfaces.cmake for the full story.
+            COMMAND ${CMAKE_COMMAND}
+                "-DHOST_HPP=<SOURCE_DIR>/src/cpp/utils/Host.hpp"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
