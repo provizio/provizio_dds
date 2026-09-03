@@ -109,7 +109,16 @@ namespace provizio::dds::detail
 
             if (self->callback)
             {
-                self->callback();
+                // See the same guard in network_monitor_linux.cpp, and one reason more here: this
+                // runs on a thread the OS owns, called back through NotifyIpInterfaceChange, so an
+                // escaping exception unwinds through a foreign frame rather than merely terminating.
+                try
+                {
+                    self->callback();
+                }
+                catch (...)
+                {
+                }
             }
         }
 

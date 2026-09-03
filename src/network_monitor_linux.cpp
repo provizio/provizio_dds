@@ -240,12 +240,22 @@ namespace provizio::dds::detail
                 // Unsigned to avoid the signed/unsigned comparison inside
                 // NLMSG_OK on newer kernel headers; got > 0 was already
                 // verified above so the cast is safe.
+                //
+                // Unsigned costs NLMSG_OK its termination guard, though: NLMSG_NEXT subtracts
+                // the ALIGNED message length while NLMSG_OK only bounds the unaligned one, so a
+                // final message whose aligned length overshoots what was received would leave a
+                // wrapped-around counter that NLMSG_OK's `len >= sizeof(nlmsghdr)` clause, an
+                // unsigned compare here, no longer stops -- and the walk would read past the
+                // datagram into the uninitialised tail of the buffer. No mainline kernel emits
+                // such a message (nlmsg_end always aligns), but the second clause below is what
+                // makes the loop safe against one. Same bound as the interface-kind dump's walk
+                // in src/address_snapshot_linux.cpp.
                 auto remaining = static_cast<unsigned int>(got);
                 // Raw byte buffer -> nlmsghdr* is the canonical netlink idiom;
                 // NLMSG_OK / NLMSG_NEXT require a non-const nlmsghdr*.
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-                for (auto *nh = reinterpret_cast<nlmsghdr *>(buffer.data()); NLMSG_OK(nh, remaining);
-                     nh = NLMSG_NEXT(nh, remaining))
+                for (auto *nh = reinterpret_cast<nlmsghdr *>(buffer.data());
+                     NLMSG_OK(nh, remaining) && NLMSG_ALIGN(nh->nlmsg_len) <= remaining; nh = NLMSG_NEXT(nh, remaining))
                 {
                     if (nh->nlmsg_type == NLMSG_DONE)
                     {
@@ -265,7 +275,20 @@ namespace provizio::dds::detail
 
                 if (any_event && callback)
                 {
-                    callback();
+                    // The callback reads the host's interfaces and allocates as it goes, so it can throw --
+                    // bad_alloc under the memory pressure a network change is quite capable of
+                    // coinciding with. There is no exception boundary between here and this
+                    // thread's entry point, so an escape is std::terminate. The coalescer thread
+                    // guards its own loop body for the same reason, and every Python mirror of this
+                    // path wraps its equivalent; a dropped event costs one missed wake-up, which the
+                    // periodic safety-net tick then catches.
+                    try
+                    {
+                        callback();
+                    }
+                    catch (...)
+                    {
+                    }
                 }
             }
         }
