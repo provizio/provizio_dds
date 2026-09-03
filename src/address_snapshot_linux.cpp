@@ -296,11 +296,20 @@ namespace provizio::dds::detail
                 // must be a non-const lvalue. We use `unsigned int` to avoid the
                 // signed/unsigned comparison inside NLMSG_OK on newer kernel
                 // headers; `got > 0` was verified above so the cast is safe.
+                //
+                // Unsigned costs NLMSG_OK its termination guard, though: NLMSG_NEXT subtracts
+                // the ALIGNED message length while NLMSG_OK only bounds the unaligned one, so a
+                // final message whose aligned length overshoots what was received would leave a
+                // wrapped-around counter that NLMSG_OK's `len >= sizeof(nlmsghdr)` clause, an
+                // unsigned compare here, no longer stops -- and the walk would read past the
+                // datagram. No mainline kernel emits such a message (nlmsg_end always aligns),
+                // but the second clause below is what makes the loop safe against one.
                 auto remaining_bytes = static_cast<unsigned int>(got);
                 // reinterpret_cast is unavoidable here: NLMSG_OK / NLMSG_NEXT
                 // require an `nlmsghdr *` pointing into a raw byte buffer.
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-                for (auto *nh = reinterpret_cast<nlmsghdr *>(buffer.data()); NLMSG_OK(nh, remaining_bytes);
+                for (auto *nh = reinterpret_cast<nlmsghdr *>(buffer.data());
+                     NLMSG_OK(nh, remaining_bytes) && NLMSG_ALIGN(nh->nlmsg_len) <= remaining_bytes;
                      nh = NLMSG_NEXT(nh, remaining_bytes))
                 {
                     // Belongs to THIS request from THIS socket. With the source-port
