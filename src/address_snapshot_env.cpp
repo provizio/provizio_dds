@@ -20,6 +20,7 @@
 #include <utility>
 
 #include "detail/env_utils.h"
+#include "detail/immortal.h"
 
 namespace provizio::dds::detail
 {
@@ -62,10 +63,15 @@ namespace provizio::dds::detail
 
     const std::unordered_set<std::string> &force_included_interfaces()
     {
-        // Meyers' singleton: parsed on first use, then immutable — so the snapshot
-        // filters stay consistent for the process' lifetime and repeated captures
-        // (one per coalesced burst and one per safety-net tick) cost no getenv().
-        static const std::unordered_set<std::string> names = parse_extra_interfaces_once();
-        return names;
+        // Parsed on first use, then immutable — so the snapshot filters stay consistent
+        // for the process' lifetime and repeated captures (one per coalesced burst and one
+        // per safety-net tick) cost no getenv().
+        //
+        // Immortal, not a plain static: the network-recovery threads read this set until
+        // the coordinator singleton is destroyed at process exit, and a plain static first
+        // constructed by the first snapshot -- after that singleton -- would be destroyed
+        // before it. See detail/immortal.h for the full account.
+        static const immortal<std::unordered_set<std::string>> names{parse_extra_interfaces_once()};
+        return *names;
     }
 }  // namespace provizio::dds::detail

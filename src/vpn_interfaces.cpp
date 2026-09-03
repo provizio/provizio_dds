@@ -31,6 +31,7 @@
 #include <fastdds/utils/IPFinder.hpp>
 
 #include "detail/env_utils.h"
+#include "detail/immortal.h"
 
 namespace provizio::dds::detail
 {
@@ -171,16 +172,22 @@ namespace provizio::dds::detail
         // other piece of state in this file is: the classifier is reachable from a static
         // initializer in another translation unit, and an unordered_set that has not been
         // constructed yet would be read as one that has.
+        //
+        // And immortal -- constructed once, never destroyed -- rather than plain statics, for
+        // the reason detail/immortal.h gives: the network-recovery threads read the classifier
+        // until the coordinator singleton is destroyed at process exit, and a static first
+        // constructed after that singleton would be destroyed before it. Only the trivially
+        // destructible flags below stay plain.
         std::mutex &matched_override_names_mutex()
         {
-            static std::mutex mutex;
-            return mutex;
+            static immortal<std::mutex> mutex;
+            return *mutex;
         }
 
         std::unordered_set<std::string> &matched_override_names()
         {
-            static std::unordered_set<std::string> names;
-            return names;
+            static immortal<std::unordered_set<std::string>> names;
+            return *names;
         }
 
         std::atomic<bool> &unmatched_override_reported()
@@ -194,8 +201,8 @@ namespace provizio::dds::detail
             // Meyers' singleton: parsed on first use, then immutable, so the transports
             // of every participant (including ones rebuilt on a network change) and the
             // change-detection snapshot all agree for the process' lifetime.
-            static const allow_override values = parse_allow_override_once();
-            return values;
+            static const immortal<allow_override> values{parse_allow_override_once()};
+            return *values;
         }
 
         // Substitution installed by force_vpn_blocklist_entries_for_test. Unset in every
@@ -203,14 +210,14 @@ namespace provizio::dds::detail
         // installs it from its own thread while participants read it from theirs.
         std::mutex &forced_blocklist_mutex()
         {
-            static std::mutex mutex;
-            return mutex;
+            static immortal<std::mutex> mutex;
+            return *mutex;
         }
 
         std::optional<std::unordered_set<std::string>> &forced_blocklist_entries()
         {
-            static std::optional<std::unordered_set<std::string>> entries;
-            return entries;
+            static immortal<std::optional<std::unordered_set<std::string>>> entries;
+            return *entries;
         }
 
         /// Whether a test has made the enumeration behind vpn_interface_blocklist_entries
@@ -230,8 +237,8 @@ namespace provizio::dds::detail
         // participants read it from theirs.
         std::mutex &forced_interface_count_mutex()
         {
-            static std::mutex mutex;
-            return mutex;
+            static immortal<std::mutex> mutex;
+            return *mutex;
         }
 
         /// Whether a test has made the interface enumeration behind vpn_allowed_interfaces
@@ -248,8 +255,8 @@ namespace provizio::dds::detail
 
         std::optional<std::vector<allowed_interface>> &forced_interfaces()
         {
-            static std::optional<std::vector<allowed_interface>> interfaces;
-            return interfaces;
+            static immortal<std::optional<std::vector<allowed_interface>>> interfaces;
+            return *interfaces;
         }
 
         // Per-thread enumeration cache, active only inside a scoped_vpn_blocklist_cache.
@@ -391,10 +398,11 @@ namespace provizio::dds::detail
         // IFLA_INFO_KIND values that denote an overlay or tunnel device. "tun" also
         // covers libvirt's per-VM vnetN devices, which hold no address of their own and
         // so never reach a locator or a snapshot either way.
-        static const std::unordered_set<std::string_view> vpn_kinds{
-            "tun", "wireguard", "xfrm", "vti", "vti6", "ipip", "ip6tnl", "gre", "gretap", "ip6gre", "sit",
-        };
-        return vpn_kinds.find(kind) != vpn_kinds.end();
+        // Immortal rather than a plain static: read by the recovery threads until process
+        // exit -- see detail/immortal.h.
+        static const immortal<std::unordered_set<std::string_view>> vpn_kinds{
+            {"tun", "wireguard", "xfrm", "vti", "vti6", "ipip", "ip6tnl", "gre", "gretap", "ip6gre", "sit"}};
+        return (*vpn_kinds).find(kind) != (*vpn_kinds).end();
     }
 #endif
 

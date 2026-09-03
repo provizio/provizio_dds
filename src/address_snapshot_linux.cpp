@@ -18,6 +18,7 @@
 
 #if defined(__linux__)
 
+#include "detail/immortal.h"
 #include "detail/posix_interface_walk.h"
 
 #include <arpa/inet.h>
@@ -79,10 +80,12 @@ namespace provizio::dds::detail
             // VPN filter (excluded_as_vpn_interface), which the
             // PROVIZIO_DDS_ALLOW_VPN_INTERFACES override flows through, so that one variable
             // governs both change detection and the transports.
-            static const std::unordered_set<std::string_view> excluded_kinds{
-                "bridge", "veth", "dummy", "vxlan", "macvlan", "ipvlan",
-            };
-            return excluded_kinds.find(kind) != excluded_kinds.end();
+            //
+            // Immortal rather than a plain static: read by the recovery threads until process
+            // exit -- see detail/immortal.h.
+            static const immortal<std::unordered_set<std::string_view>> excluded_kinds{
+                {"bridge", "veth", "dummy", "vxlan", "macvlan", "ipvlan"}};
+            return (*excluded_kinds).find(kind) != (*excluded_kinds).end();
         }
 
         /// Closes a file descriptor however the scope it was opened in ends. Only the
