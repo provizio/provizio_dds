@@ -21,7 +21,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
 
 # Configuration
-set(PROVIZIO_DDS_IDLS_VERSION "2.1.0" CACHE STRING "provizio_dds_idls version")
+set(PROVIZIO_DDS_IDLS_VERSION "2.1.1" CACHE STRING "provizio_dds_idls version")
 set(FAST_DDS_VERSION "v3.6.2.0" CACHE STRING "Fast-DDS git ref (upstream tag, mirrored by the provizio fork)")
 set(FAST_DDS_NUMERIC_VERSION "3.6.2.0" CACHE STRING "Fast-DDS numeric version (used for library naming on Windows); must match the upstream CMake project() VERSION at the FAST_DDS_VERSION ref (which may have fewer components than the git tag)")
 set(FAST_CDR_VERSION "2.3" CACHE STRING "Fast-CDR major.minor version (for Windows versioned library naming). Must match the Fast-CDR bundled with FAST_DDS_VERSION")
