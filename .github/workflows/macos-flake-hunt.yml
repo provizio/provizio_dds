@@ -119,7 +119,8 @@ jobs:
           cat "${HUNT_ARTIFACTS}/host_state_before.txt"
 
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS} -DPROVIZIO_DDS_TEST_ISOLATE_DOMAINS=${{matrix.isolate_domains || 'OFF'}}
+      - id: build
+        run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS} -DPROVIZIO_DDS_TEST_ISOLATE_DOMAINS=${{matrix.isolate_domains || 'OFF'}}
 
       - name: Prove the sampler can attach on this runner
         # A watchdog that cannot take a backtrace here would leave the whole hunt with
@@ -161,7 +162,10 @@ jobs:
           retention-days: 7
 
       - name: Hunt (chunk 2)
-        if: always()
+        # always() minus the case that matters: a build that never produced a build. Without
+        # the outcome check, a shard whose Fast-DDS clone timed out ran its later chunks
+        # against an empty build directory and reported 697 instant "failures".
+        if: always() && steps.build.outcome == 'success'
         run: .github/workflows/macos_flake_loop.sh 2
       - uses: actions/upload-artifact@v4
         if: always()
@@ -172,7 +176,7 @@ jobs:
           retention-days: 7
 
       - name: Hunt (chunk 3)
-        if: always()
+        if: always() && steps.build.outcome == 'success'
         run: .github/workflows/macos_flake_loop.sh 3
 
       - name: Summarise
