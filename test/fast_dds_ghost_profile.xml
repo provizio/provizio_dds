@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+    INVESTIGATION-ONLY profile, used by test/ci_ghost_participants.sh for the ghost
+    participants it cycles - never by a test.
+
+    Same loopback confinement as test/fast_dds_localhost_profile.xml, plus a three-second
+    participant lease. A lease duration is announced BY the participant and honoured by its
+    peers, so putting it here shortens only how long a test process keeps a dead ghost
+    before reaping it; every test keeps the timing of the real profile.
+
+    That reaping is the point. It runs on the peer's ResourceEvent thread, and a thread
+    deleting an endpoint at that moment ends up inside ResourceEvent::unregister_timer
+    waiting for exactly the callback that is blocked on the mutex it holds -- the deadlock
+    this investigation caught on a macos-15-intel runner (eProsima/Fast-DDS#6502). With
+    Fast-DDS' default 20 s lease, a ghost killed now is reaped 20 s later, by which time
+    almost every test in this suite has already finished; three seconds puts the reaping
+    inside the lifetime of an ordinary test.
+-->
+<profiles xmlns="http://www.eprosima.com">
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>ghost_loopback_udpv4</transport_id>
+            <type>UDPv4</type>
+            <interfaceWhiteList>
+                <address>127.0.0.1</address>
+            </interfaceWhiteList>
+            <maxInitialPeersRange>50</maxInitialPeersRange>
+        </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="provizio_ghost_loopback" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>ghost_loopback_udpv4</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+            <builtin>
+                <initialPeersList>
+                    <locator>
+                        <udpv4>
+                            <address>127.0.0.1</address>
+                        </udpv4>
+                    </locator>
+                </initialPeersList>
+                <discovery_config>
+                    <leaseDuration>
+                        <sec>3</sec>
+                        <nanosec>0</nanosec>
+                    </leaseDuration>
+                    <leaseAnnouncement>
+                        <sec>1</sec>
+                        <nanosec>0</nanosec>
+                    </leaseAnnouncement>
+                </discovery_config>
+            </builtin>
+        </rtps>
+    </participant>
+</profiles>

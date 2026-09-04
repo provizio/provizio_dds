@@ -12,6 +12,11 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
+# Investigation-only: see the PROVIZIO_DDS_TEST_ISOLATE_DOMAINS block in
+# provizio_dds_finalize_tests below.
+set(PROVIZIO_DDS_TEST_ISOLATE_DOMAINS OFF CACHE BOOL
+    "Give every ctest test its own DDS domain, so test processes cannot discover each other")
+
 # Find Python interpreter for cross-platform test scripts (run_parallel.py, run_times.py)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
@@ -82,6 +87,26 @@ function(provizio_dds_finalize_tests)
         # below: the five tests registered with no TIMEOUT read no deadline today, but a
         # deadline added to one of them tomorrow would inherit that same silent 1.
         list(APPEND _provizio_dds_env "PROVIZIO_DDS_TEST_TIMEOUT_SCALE=${PROVIZIO_DDS_TEST_TIMEOUT_SCALE}")
+        # Investigation-only domain isolation (PROVIZIO_DDS_TEST_ISOLATE_DOMAINS). Every test
+        # here otherwise runs on domain 0, so every test process discovers the participants of
+        # every other test process on the host -- including those a SIGKILLed or crashed
+        # process left behind, whose lease the next process then has to reap on its
+        # ResourceEvent thread. That reaping is the trigger for the Fast-DDS deadlock this
+        # investigation caught (eProsima/Fast-DDS#6502), reproduced locally: with peers to
+        # reap, a teardown deadlocked after 53 cycles; with none, 438 cycles ran with a 454 ms
+        # worst case. The domain is derived from the TEST NAME, not the pid, because a test's
+        # publisher and subscriber are separate processes that must still find each other.
+        # ros_interop_* is exempt: it talks to native ROS 2 nodes, which use ROS_DOMAIN_ID
+        # (0 unless the environment says otherwise), so moving only our side off that domain
+        # makes the two sides invisible to each other. Verified: with the exemption missing,
+        # exactly those four tests fail and nothing else does.
+        if(PROVIZIO_DDS_TEST_ISOLATE_DOMAINS AND NOT "${_provizio_dds_test}" MATCHES "^ros_interop")
+            string(MD5 _provizio_dds_name_hash "${_provizio_dds_test}")
+            string(SUBSTRING "${_provizio_dds_name_hash}" 0 4 _provizio_dds_name_hash)
+            math(EXPR _provizio_dds_domain "0x${_provizio_dds_name_hash} % 200 + 1")
+            list(APPEND _provizio_dds_env "PROVIZIO_DDS_FORCE_DOMAIN_ID=${_provizio_dds_domain}")
+        endif()
+
         # A deadline, on the other hand, only means something as a fraction of a TIMEOUT:
         # with no TIMEOUT there is nothing for a test to report itself ahead of.
         if(_provizio_dds_to)

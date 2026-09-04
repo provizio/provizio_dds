@@ -24,6 +24,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -2559,6 +2560,44 @@ namespace provizio::dds
         // exit path, once both locks are released.
     }
 
+    namespace
+    {
+        // INVESTIGATION-ONLY (see .github/workflows/macos-flake-hunt.yml). Forces every
+        // participant in this process onto one domain, whatever the caller asked for.
+        //
+        // It exists to test one hypothesis about the CI flakes: every test in this suite runs
+        // on domain 0 (make_domain_participant's default, and an explicit 0 in the rest), so
+        // every test process discovers the participants of every other test process on the
+        // host -- including those left behind by a process CTest SIGKILLed or that crashed,
+        // whose lease the next process must then reap on its ResourceEvent thread. That
+        // reaping is what closes the Fast-DDS deadlock this investigation caught
+        // (eProsima/Fast-DDS#6502). Giving each ctest test its own domain removes the peers,
+        // and with them the trigger.
+        //
+        // Read once; unset (the normal case) means "honour the caller", and this is then one
+        // static bool test on a path that already does far more work.
+        DomainId_t apply_forced_domain_override(const DomainId_t requested)
+        {
+            static const std::optional<DomainId_t> forced = [] {
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): startup-only probe.
+                const auto *raw = std::getenv("PROVIZIO_DDS_FORCE_DOMAIN_ID");
+                if (raw == nullptr || *raw == '\0')
+                {
+                    return std::optional<DomainId_t>{};
+                }
+                const std::uint32_t parsed = detail::parse_positive_u32(raw);
+                if (parsed == 0U || parsed > 232U)
+                {
+                    log_warning() << "ignoring PROVIZIO_DDS_FORCE_DOMAIN_ID='"
+                                  << detail::sanitise_env_value_for_log(raw) << "' (expected 1..232)";
+                    return std::optional<DomainId_t>{};
+                }
+                return std::optional<DomainId_t>{static_cast<DomainId_t>(parsed)};
+            }();
+            return forced ? *forced : requested;
+        }
+    }  // namespace
+
     std::shared_ptr<domain_participant> make_domain_participant(
         const DomainId_t domain_id, const network_recovery_mode recovery_mode,
         domain_participant::on_discovered_endpoint_callback initial_discovery_callback,
@@ -2570,8 +2609,10 @@ namespace provizio::dds
         // two-control-block ownership trick. The participant outlives its endpoints because
         // every publisher / subscriber holds a strong shared_ptr to it, so ~domain_participant
         // runs only after they are all gone.
-        auto participant = std::make_shared<domain_participant>(
-            domain_id, recovery_mode, std::move(initial_discovery_callback), initial_discovery_kinds, transport);
+        auto participant =
+            std::make_shared<domain_participant>(apply_forced_domain_override(domain_id), recovery_mode,
+                                                 std::move(initial_discovery_callback), initial_discovery_kinds,
+                                                 transport);
         if (network_recovery_applies(recovery_mode, transport))
         {
             detail::network_recovery_coordinator::instance().register_participant(participant);

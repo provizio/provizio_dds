@@ -32,6 +32,8 @@
 #   PROVIZIO_DDS_CTEST_EXCLUDE  ctest -E regex (optional)
 #   HUNT_FLAP_UP_SECONDS        when set, inject an interface flap on that cycle (optional)
 #   HUNT_FLAP_DOWN_SECONDS      how long the injected address stays away (default 2)
+#   HUNT_GHOST_PERIOD_MS        when set, cycle SIGKILLed participants on domain 0 (optional)
+#   HUNT_GHOST_PROCESSES        how many at a time (default 2)
 
 set -uo pipefail
 
@@ -89,13 +91,23 @@ if [[ -n "${HUNT_FLAP_UP_SECONDS:-}" ]]; then
     FLAP_PID=$!
 fi
 
+# Optional ghost participants: the accelerator for the Fast-DDS lease-reaping deadlock.
+GHOST_PID=""
+if [[ -n "${HUNT_GHOST_PERIOD_MS:-}" ]]; then
+    "${REPO_DIR}/test/ci_ghost_participants.sh" "${HUNT_GHOST_PERIOD_MS}" "${HUNT_GHOST_PROCESSES:-2}" \
+        "${BUILD_DIR}/test/simplest_pub_sub/simplest_subscriber/simplest_subscriber" \
+        "${ARTIFACTS}/ghost_participants.c${CHUNK}.txt" &
+    GHOST_PID=$!
+fi
+
 python3 -u "${REPO_DIR}/test/ci_stall_watchdog.py" --build-dir "${BUILD_DIR}" --out "${ARTIFACTS}" \
     --margin 8 --poll 1 > "${ARTIFACTS}/stall_watchdog.c${CHUNK}.stdout.txt" 2>&1 &
 WATCHDOG_PID=$!
 
 cleanup() {
-    kill "${NET_WATCH_PID}" "${WATCHDOG_PID}" ${CONFIGD_LOG_PID} ${FLAP_PID} 2>/dev/null
-    wait "${NET_WATCH_PID}" "${WATCHDOG_PID}" ${CONFIGD_LOG_PID} ${FLAP_PID} 2>/dev/null
+    kill "${NET_WATCH_PID}" "${WATCHDOG_PID}" ${CONFIGD_LOG_PID} ${FLAP_PID} ${GHOST_PID} 2>/dev/null
+    wait "${NET_WATCH_PID}" "${WATCHDOG_PID}" ${CONFIGD_LOG_PID} ${FLAP_PID} ${GHOST_PID} 2>/dev/null
+    pkill -9 -f "simplest_subscriber" 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -144,6 +156,14 @@ while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
             echo "--- surviving processes ---"
             ps -axww -o pid=,ppid=,etime=,state=,command= | grep -E "provizio|/build/test/" | grep -v grep
         } >> "${ARTIFACTS}/after_failure.txt" 2>&1
+        # macOS writes a full backtrace for a crashed process here. The stall watchdog cannot
+        # help with a crash -- there is nothing left to sample -- so this is the only way a
+        # SegFault like the one seen in network_recovery_concurrent_make_publisher_during_reset
+        # gets explained.
+        mkdir -p "${ARTIFACTS}/crash_reports"
+        find "${HOME}/Library/Logs/DiagnosticReports" -name "*.ips" -newermt "-20 minutes" \
+            -exec cp {} "${ARTIFACTS}/crash_reports/" \; 2>/dev/null
+        echo "--- crash reports collected so far: $(ls -1 "${ARTIFACTS}/crash_reports" 2>/dev/null | wc -l | tr -d ' ') ---"
         echo "--- last 40 net-watch lines ---"
         tail -40 "${ARTIFACTS}/net_watch.c${CHUNK}.txt" 2>/dev/null
     fi
