@@ -202,6 +202,69 @@ def _emit(handle, text):
     handle.flush()
 
 
+# Routing-message types, macOS/BSD (net/route.h). Only the ones an interface change can
+# produce are named; anything else is reported by number.
+_RTM_NAMES = {
+    1: "RTM_ADD", 2: "RTM_DELETE", 3: "RTM_CHANGE", 4: "RTM_GET", 5: "RTM_LOSING",
+    6: "RTM_REDIRECT", 7: "RTM_MISS", 8: "RTM_LOCK", 11: "RTM_RESOLVE",
+    12: "RTM_NEWADDR", 13: "RTM_DELADDR", 14: "RTM_IFINFO", 15: "RTM_NEWMADDR",
+    16: "RTM_DELMADDR", 17: "RTM_IFINFO2", 18: "RTM_NEWMADDR2", 19: "RTM_GET2",
+}
+
+# What src/network_monitor_macos.cpp compares every routing message against before it will
+# look at the message at all: it requires more than sizeof(struct rt_msghdr) bytes. That
+# struct is the ROUTE-entry header (92 bytes on macOS: 36 bytes of header plus a 56-byte
+# rt_metrics); an address message uses struct ifa_msghdr, which is 20 bytes plus its
+# sockaddrs and is routinely shorter than 92 in total. If that is right, every RTM_NEWADDR
+# and RTM_DELADDR is silently discarded there -- so this records the size of each message
+# as the kernel actually delivers it, which settles it on the real runner.
+_CPP_MONITOR_MIN_ACCEPTED_BYTES = 92
+
+
+def _raw_route_socket_monitor(handle, stop):
+    """Log every routing message's type and LENGTH, straight off a PF_ROUTE socket."""
+    if not _IS_MACOS:
+        return
+    try:
+        route_socket = socket.socket(socket.AF_ROUTE, socket.SOCK_RAW, 0)
+    except (AttributeError, OSError) as ex:
+        _emit(handle, f"raw PF_ROUTE socket unavailable: {ex!r}")
+        return
+    _emit(handle, "raw PF_ROUTE socket open; logging every message's type and length")
+    dropped_by_cpp_rule = 0
+    try:
+        route_socket.settimeout(1.0)
+        while not stop.is_set():
+            try:
+                message = route_socket.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError as ex:
+                _emit(handle, f"raw PF_ROUTE recv failed: {ex!r}")
+                return
+            if len(message) < 4:
+                continue
+            msglen = int.from_bytes(message[0:2], "little")
+            version = message[2]
+            rtm_type = message[3]
+            name = _RTM_NAMES.get(rtm_type, f"type {rtm_type}")
+            would_drop = len(message) <= _CPP_MONITOR_MIN_ACCEPTED_BYTES
+            if would_drop:
+                dropped_by_cpp_rule += 1
+            _emit(
+                handle,
+                f"RTM {name} recv={len(message)}B rtm_msglen={msglen} version={version}"
+                + (
+                    f" -- SHORTER THAN sizeof(rt_msghdr)={_CPP_MONITOR_MIN_ACCEPTED_BYTES}, so"
+                    f" network_monitor_macos.cpp would DISCARD it (#{dropped_by_cpp_rule})"
+                    if would_drop
+                    else ""
+                ),
+            )
+    finally:
+        route_socket.close()
+
+
 def _route_monitor(handle, stop):
     """Timestamp and record the kernel's own interface / route event stream."""
     argv = ["route", "-n", "monitor"] if _IS_MACOS else ["ip", "monitor", "address", "link", "route"]
@@ -230,38 +293,72 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default=None)
     parser.add_argument("--poll", type=float, default=0.1)
+    parser.add_argument("--raw-poll", type=float, default=0.02,
+                        help="interval for the unfiltered getifaddrs reading")
+    parser.add_argument("--tag", default="", help="suffix for the output file, so consecutive runs do not overwrite")
     args = parser.parse_args()
 
     if args.out:
         os.makedirs(args.out, exist_ok=True)
-        handle = open(os.path.join(args.out, "net_watch.txt"), "w", encoding="utf-8")
+        suffix = f".{args.tag}" if args.tag else ""
+        handle = open(os.path.join(args.out, f"net_watch{suffix}.txt"), "w", encoding="utf-8")
     else:
         handle = sys.stderr
 
+    raw_poll = args.raw_poll
     stop = threading.Event()
-    monitor = threading.Thread(target=_route_monitor, args=(handle, stop), daemon=True)
-    monitor.start()
+    threading.Thread(target=_route_monitor, args=(handle, stop), daemon=True).start()
+    threading.Thread(target=_raw_route_socket_monitor, args=(handle, stop), daemon=True).start()
+    _emit(handle, f"started (snapshot poll {args.poll:g}s, raw poll {raw_poll:g}s, platform {sys.platform})")
 
     previous_raw = None
     previous_snapshot = None
-    changes = 0
-    _emit(handle, f"started (poll {args.poll:g}s, platform {sys.platform})")
-    try:
-        while True:
-            current_raw = raw_reading()
-            current_snapshot = library_snapshot()
-            if current_raw != previous_raw:
-                changes += 1
-                _emit(handle, f"RAW CHANGE #{changes} ({len(current_raw)} entries)")
+    changes = [0]
+    zero_address_readings = [0]
+
+    def watch_raw():
+        """The kernel's own reading, as fast as it can be taken.
+
+        Faster than the library's own poller on purpose: the flap this is looking for is
+        reported by a 3-second poller as a state change, which means the true event may be
+        far shorter than the interval that noticed it. A reading is timed, so a getifaddrs
+        call that itself takes an unusual time is visible too.
+        """
+        nonlocal previous_raw
+        while not stop.is_set():
+            started = time.monotonic()
+            current = raw_reading()
+            took_ms = (time.monotonic() - started) * 1000.0
+            if took_ms > 50.0:
+                _emit(handle, f"SLOW getifaddrs: {took_ms:.0f} ms")
+            if current != previous_raw:
+                changes[0] += 1
+                _emit(handle, f"RAW CHANGE #{changes[0]} ({len(current)} entries, read in {took_ms:.1f} ms)")
                 if previous_raw is not None:
-                    for gone in sorted(set(previous_raw) - set(current_raw)):
+                    for gone in sorted(set(previous_raw) - set(current)):
                         _emit(handle, f"  - {gone}")
-                    for added in sorted(set(current_raw) - set(previous_raw)):
+                    for added in sorted(set(current) - set(previous_raw)):
                         _emit(handle, f"  + {added}")
                 else:
-                    for item in current_raw:
+                    for item in current:
                         _emit(handle, f"  = {item}")
-                previous_raw = current_raw
+                previous_raw = current
+            # The condition the library turns into a participant rebuild: no non-loopback
+            # interface with a usable address. Counted separately because it is the whole
+            # question, and it can be brief enough that a change line alone understates it.
+            usable = [e for e in current if "LOOPBACK" not in e and e.rsplit(" ", 1)[-1] not in ("-",)
+                      and not e.rsplit(" ", 1)[-1].startswith("<")]
+            if not usable:
+                zero_address_readings[0] += 1
+                if zero_address_readings[0] <= 200 or zero_address_readings[0] % 100 == 0:
+                    _emit(handle, f"ZERO-USABLE-ADDRESS READING #{zero_address_readings[0]}: {current}")
+            time.sleep(raw_poll)
+
+    threading.Thread(target=watch_raw, daemon=True).start()
+
+    try:
+        while True:
+            current_snapshot = library_snapshot()
             if current_snapshot != previous_snapshot:
                 _emit(handle, f"LIBRARY SNAPSHOT CHANGE ({len(current_snapshot)} entries)")
                 if previous_snapshot is not None:
@@ -278,7 +375,8 @@ def main():
         pass
     finally:
         stop.set()
-        _emit(handle, f"stopped after {changes} raw change(s)")
+        _emit(handle, f"stopped after {changes[0]} raw change(s), "
+                      f"{zero_address_readings[0]} reading(s) with no usable address")
         if handle is not sys.stderr:
             handle.close()
     return 0

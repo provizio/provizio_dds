@@ -21,9 +21,17 @@
 # as the time budget allows.
 #
 # Environment:
+# Argument 1 is the chunk number, so consecutive chunks of one job do not overwrite each
+# other's iteration logs. The job runs several chunks with an artifact upload between them:
+# a macos-15-intel runner that dies mid-job uploads nothing and its log cannot be fetched
+# afterwards either, so everything since the last upload is simply lost.
+#
+# Environment:
 #   HUNT_ARTIFACTS              directory for all output (required)
-#   HUNT_LOOP_SECONDS           how long to keep looping (default 14400)
+#   HUNT_LOOP_SECONDS           how long to keep looping, per chunk (default 4200)
 #   PROVIZIO_DDS_CTEST_EXCLUDE  ctest -E regex (optional)
+#   HUNT_FLAP_UP_SECONDS        when set, inject an interface flap on that cycle (optional)
+#   HUNT_FLAP_DOWN_SECONDS      how long the injected address stays away (default 2)
 
 set -uo pipefail
 
@@ -31,7 +39,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 BUILD_DIR="${REPO_DIR}/build"
 ARTIFACTS="${HUNT_ARTIFACTS:?HUNT_ARTIFACTS must be set}"
-LOOP_SECONDS="${HUNT_LOOP_SECONDS:-14400}"
+LOOP_SECONDS="${HUNT_LOOP_SECONDS:-4200}"
+CHUNK="${1:-1}"
 
 mkdir -p "${ARTIFACTS}"
 
@@ -57,16 +66,36 @@ fi
 # network_recovery module (the snapshot policy under test), while the test suite must keep
 # resolving whatever the venv installed.
 PYTHONPATH="${REPO_DIR}/python${PYTHONPATH:+:${PYTHONPATH}}" \
-python3 -u "${REPO_DIR}/test/ci_net_watch.py" --out "${ARTIFACTS}" --poll 0.1 \
-    > "${ARTIFACTS}/net_watch.stdout.txt" 2>&1 &
+python3 -u "${REPO_DIR}/test/ci_net_watch.py" --out "${ARTIFACTS}" --poll 0.1 --tag "c${CHUNK}" \
+    > "${ARTIFACTS}/net_watch.c${CHUNK}.stdout.txt" 2>&1 &
 NET_WATCH_PID=$!
+
+# macOS's own account of why an interface changed. configd runs DHCP and applies every
+# interface reconfiguration, and mDNSResponder reacts to them, so this is what turns "the
+# address vanished" into "the DHCP lease was renewed at 01:23:45".
+CONFIGD_LOG_PID=""
+if command -v log > /dev/null 2>&1; then
+    log stream --style compact \
+        --predicate 'process == "configd" OR process == "mDNSResponder" OR process == "networkd"' \
+        > "${ARTIFACTS}/system_network_log.c${CHUNK}.txt" 2>&1 &
+    CONFIGD_LOG_PID=$!
+fi
+# Optional injected interface flap (see the shard matrix). Nothing else in this script
+# depends on it: without it the shard simply waits for the host's own churn.
+FLAP_PID=""
+if [[ -n "${HUNT_FLAP_UP_SECONDS:-}" ]]; then
+    "${REPO_DIR}/test/ci_interface_flap.sh" "${HUNT_FLAP_UP_SECONDS}" "${HUNT_FLAP_DOWN_SECONDS:-2}" \
+        "${ARTIFACTS}/interface_flap.c${CHUNK}.txt" &
+    FLAP_PID=$!
+fi
+
 python3 -u "${REPO_DIR}/test/ci_stall_watchdog.py" --build-dir "${BUILD_DIR}" --out "${ARTIFACTS}" \
-    --margin 8 --poll 1 > "${ARTIFACTS}/stall_watchdog.stdout.txt" 2>&1 &
+    --margin 8 --poll 1 > "${ARTIFACTS}/stall_watchdog.c${CHUNK}.stdout.txt" 2>&1 &
 WATCHDOG_PID=$!
 
 cleanup() {
-    kill "${NET_WATCH_PID}" "${WATCHDOG_PID}" 2>/dev/null
-    wait "${NET_WATCH_PID}" "${WATCHDOG_PID}" 2>/dev/null
+    kill "${NET_WATCH_PID}" "${WATCHDOG_PID}" ${CONFIGD_LOG_PID} ${FLAP_PID} 2>/dev/null
+    wait "${NET_WATCH_PID}" "${WATCHDOG_PID}" ${CONFIGD_LOG_PID} ${FLAP_PID} 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -83,21 +112,30 @@ cd "${BUILD_DIR}" || exit 1
 DEADLINE=$(( $(date +%s) + LOOP_SECONDS ))
 ITERATION=0
 FAILURES=0
-echo "hunt: looping for ${LOOP_SECONDS}s, excluding '${PROVIZIO_DDS_CTEST_EXCLUDE:-<nothing>}'"
+echo "hunt: chunk ${CHUNK}, looping for ${LOOP_SECONDS}s, excluding '${PROVIZIO_DDS_CTEST_EXCLUDE:-<nothing>}'"
 
 while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
     ITERATION=$(( ITERATION + 1 ))
-    LOG="${ARTIFACTS}/ctest.$(printf '%03d' "${ITERATION}").log"
-    echo "::group::iteration ${ITERATION} (started $(date -u +%H:%M:%S)Z)"
-    ctest --output-on-failure "${CTEST_EXTRA_ARGS[@]}" 2>&1 | stamp | tee "${LOG}"
+    LOG="${ARTIFACTS}/ctest.c${CHUNK}.$(printf '%03d' "${ITERATION}").log"
+    echo "chunk ${CHUNK} iteration ${ITERATION} started $(date -u +%H:%M:%S)Z"
+    # -V, not --output-on-failure: the library logs a network change (and therefore a
+    # participant rebuild) into the output of whatever test was running, and
+    # --output-on-failure throws that away for every test that passed -- which is most of
+    # them, and exactly the ones needed to tell how often a rebuild happens at all. The
+    # full output goes to the artifact; only the summary lines reach the job log, which
+    # could not hold the rest.
+    ctest -V "${CTEST_EXTRA_ARGS[@]}" 2>&1 | stamp > "${LOG}"
     STATUS=${PIPESTATUS[0]}
-    echo "::endgroup::"
+    grep -E "Test +#[0-9]+:|tests passed|The following tests FAILED|\*\*\*|network change detected|network snapshot diff" "${LOG}" \
+        | grep -vE "Test +#[0-9]+: .* Passed" | head -60
     if [ "${STATUS}" -eq 0 ]; then
         echo "hunt: iteration ${ITERATION} PASS"
     else
         FAILURES=$(( FAILURES + 1 ))
         echo "::error::hunt: iteration ${ITERATION} FAILED (ctest exit ${STATUS})"
         grep -E '\*\*\*|The following tests FAILED|tests passed' "${LOG}" | tail -20
+        echo "--- output of the failing test(s) ---"
+        grep -E "^[0-9:]+ [0-9]+: " "${LOG}" | tail -120
         {
             echo "=== after failing iteration ${ITERATION} at $(date -u +%H:%M:%SZ) ==="
             ifconfig -a
@@ -107,8 +145,10 @@ while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
             ps -axww -o pid=,ppid=,etime=,state=,command= | grep -E "provizio|/build/test/" | grep -v grep
         } >> "${ARTIFACTS}/after_failure.txt" 2>&1
         echo "--- last 40 net-watch lines ---"
-        tail -40 "${ARTIFACTS}/net_watch.txt" 2>/dev/null
+        tail -40 "${ARTIFACTS}/net_watch.c${CHUNK}.txt" 2>/dev/null
     fi
+    # -V output is large; every iteration is kept, but compressed.
+    gzip -f "${LOG}"
     # Anything the suite left behind changes what the next iteration sees, so it is
     # recorded (never killed: a leak is itself a finding, and killing it would hide it).
     LEFTOVER=$(ps -axww -o pid=,etime=,command= | grep -E "/build/test/" | grep -v grep | wc -l | tr -d ' ')
@@ -120,8 +160,8 @@ while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
     fi
 done
 
-echo "hunt: ${ITERATION} iteration(s), ${FAILURES} failing"
-echo "${ITERATION} iterations, ${FAILURES} failures" > "${ARTIFACTS}/summary.txt"
+echo "hunt: chunk ${CHUNK}: ${ITERATION} iteration(s), ${FAILURES} failing"
+echo "chunk ${CHUNK}: ${ITERATION} iterations, ${FAILURES} failures" >> "${ARTIFACTS}/summary.txt"
 # The loop's own exit status is deliberately 0: a failing iteration is the RESULT of this
 # job, recorded in the artifacts and in the summary step, not a reason to abandon the run
 # and lose the iterations that would have followed.

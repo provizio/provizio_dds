@@ -341,6 +341,17 @@ def main():
         default=8.0,
         help="seconds before a test's TIMEOUT at which to capture its state",
     )
+    parser.add_argument(
+        "--min-fraction",
+        type=float,
+        default=0.8,
+        help=(
+            "never capture before this fraction of a test's TIMEOUT has elapsed. A fixed margin "
+            "alone fires far too early on a test with a short TIMEOUT that legitimately uses most "
+            "of it (simplest_pub_sub: 13 s of 20), and every one of those captures costs a "
+            "2-second sample on the machine the real stall would be on."
+        ),
+    )
     parser.add_argument("--poll", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -353,7 +364,7 @@ def main():
     tests, by_executable = read_ctest_tests(args.build_dir)
     log(
         f"armed for {len(tests)} tests with a TIMEOUT and {len(by_executable)} executables "
-        f"(margin {args.margin:g}s)",
+        f"(margin {args.margin:g}s, never before {args.min_fraction:g} of a TIMEOUT)",
         out_file,
     )
     if not tests:
@@ -379,7 +390,8 @@ def main():
             test = match_test(cmdline, tests, by_executable)
             if test is None:
                 continue
-            if elapsed < test["timeout"] - args.margin:
+            threshold = max(test["timeout"] - args.margin, test["timeout"] * args.min_fraction)
+            if elapsed < threshold:
                 continue
             now = time.monotonic()
             if state is None:

@@ -1,19 +1,25 @@
 name: macOS flake hunt
 
 # TEMPORARY investigation workflow (branch investigation/**). It exists to reproduce, with
-# enough diagnostics attached to explain it, the random test timeouts seen only on
+# enough diagnostics attached to explain it, the random test failures seen only on
 # macos-15-intel: a test that normally finishes in under a second occasionally consumes its
-# whole 45 s ctest TIMEOUT and is SIGKILLed with no output at all, and a request/response
-# test occasionally loses a response right after the library reports a spurious interface
-# address change.
+# whole 45 s ctest TIMEOUT and is SIGKILLed with no output at all, and request/response
+# tests occasionally lose a response right after the library reports an interface address
+# disappearing and returning.
 #
-# Each job builds once and then runs the suite in a loop until a deadline, with:
-#   - test/ci_net_watch.py recording, at 100 ms resolution, every interface/address/flag the
-#     kernel reports plus the routing-event stream, so an address flap can be confirmed or
-#     ruled out independently of the library;
-#   - test/ci_stall_watchdog.py sampling any test process that gets within a few seconds of
-#     its own ctest TIMEOUT, capturing full thread backtraces before CTest's SIGKILL.
-# Every iteration's ctest output and both recordings are uploaded as artifacts.
+# Each job builds once and then runs the suite in a loop, in chunks with an artifact upload
+# between them (a macos-15-intel runner that dies mid-job uploads nothing AND its log cannot
+# be fetched afterwards, which already cost one shard three and a half hours of evidence).
+# Running alongside every chunk:
+#   - test/ci_net_watch.py: the complete, unfiltered getifaddrs reading every 20 ms, the
+#     library's own filtered snapshot, the routing-event stream, and every raw PF_ROUTE
+#     message with its LENGTH -- which is what proves or kills the theory that
+#     network_monitor_macos.cpp discards address events as too short;
+#   - test/ci_stall_watchdog.py: full thread backtraces of any test process that gets within
+#     a few seconds of its own ctest TIMEOUT, captured before CTest's SIGKILL;
+#   - macOS's own configd / mDNSResponder log, which says WHY an interface changed;
+#   - on the two "flap" shards, test/ci_interface_flap.sh, which makes the suspected host
+#     event happen on demand instead of waiting hours for it.
 
 on:
   push:
@@ -33,28 +39,43 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Two identical broad shards: independent samples of the same configuration, which
-          # is what turns "it failed once" into a rate.
-          - {label: broad-release-gcc-py-a, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'ON'}
-          - {label: broad-release-gcc-py-b, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'ON'}
-          # The configuration failure (1) was seen in: Debug enables ASan/UBSan through
-          # coding_standards, and every TIMEOUT is multiplied by 5.
-          - {label: broad-debug-clang-py, exclude_re: 'reliability|cross_version_compat', build_type: Debug, cc: clang, with_python: 'ON'}
+          # Two un-accelerated shards, which is where the natural failure RATE comes from.
+          # (Debug is not worth a shard: PYTHON_BINDINGS=ON disables the sanitizers -- see
+          # CMakeLists.txt:379-390 -- so a Debug/ON job differs from Release/ON only in
+          # optimisation, and its ctest TIMEOUTs are not scaled either.)
+          - {label: broad-release-gcc-py, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'ON'}
           # C++ only: a ~5 min pass, so this shard trades breadth for many more iterations.
           - {label: cpp-release-gcc-py, exclude_re: 'reliability|cross_version_compat|python', build_type: Release, cc: gcc, with_python: 'ON'}
-          # Control: does the flake need the Python bindings present at all?
-          - {label: broad-release-gcc-nopy, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'OFF'}
+          # The two accelerators. test/ci_interface_flap.sh adds and removes an address on a
+          # fake-ethernet pair the snapshot accepts, reproducing on demand the host event
+          # that three separate macOS failures logged just before they failed. If the
+          # failures follow the injected flap, the causal chain is closed.
+          # flap_down is 3 s, matching what the runner's own hourly DHCP renewal actually
+          # does (measured: the address is gone for 0.4 s to 3 s) and long enough for the
+          # Python side's 3 s poller to sample inside the window.
+          - {label: broad-release-gcc-py-flap, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'ON', flap_up: '45', flap_down: '3'}
+          - {label: cpp-release-gcc-py-flap, exclude_re: 'reliability|cross_version_compat|python', build_type: Release, cc: gcc, with_python: 'ON', flap_up: '20', flap_down: '2'}
+          # The discriminator. Network auto-recovery is ON by default, so any host interface
+          # churn rebuilds every participant mid-test. This shard turns it off for the whole
+          # process (the network_recovery suite, which needs it, is excluded), so if the
+          # flakes stop here and not in the shards above, the cause is settled.
+          - {label: broad-release-gcc-py-recovery-off, exclude_re: 'reliability|cross_version_compat|network_recovery', build_type: Release, cc: gcc, with_python: 'ON', recovery: 'off'}
     env:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: OFF
       PROVIZIO_DDS_CTEST_EXCLUDE: ${{matrix.exclude_re}}
+      # Empty on every shard but the discriminator, where it is 'off'. An empty value reads
+      # as unset to the library, i.e. the default (on) -- see src/network_recovery.cpp:36.
+      PROVIZIO_DDS_NETWORK_RECOVERY: ${{matrix.recovery}}
+      # Empty on every shard but the two accelerators.
+      HUNT_FLAP_UP_SECONDS: ${{matrix.flap_up}}
+      HUNT_FLAP_DOWN_SECONDS: ${{matrix.flap_down}}
       # Name every address the snapshot gained or lost, not just how many.
       PROVIZIO_DDS_DEBUG_SNAPSHOT_DIFF: '1'
       HUNT_ARTIFACTS: ${{github.workspace}}/hunt-artifacts
-      # Leaves room inside timeout-minutes for the build, the artifact upload and the
-      # last iteration to finish.
-      HUNT_LOOP_SECONDS: '14400'
+      # Per CHUNK, not for the whole job.
+      HUNT_LOOP_SECONDS: '4200'
     steps:
       - uses: actions/checkout@v4
       - run: rm -rf /tmp/provizio_dds.venv
@@ -63,20 +84,29 @@ jobs:
       - name: Record the host's starting state
         run: |
           {
-            echo "=== sw_vers ==="; sw_vers
-            echo "=== uname ==="; uname -a
-            echo "=== cpu ==="; sysctl -n hw.ncpu hw.physicalcpu hw.memsize
-            echo "=== ulimit ==="; ulimit -a
-            echo "=== ifconfig -a ==="; ifconfig -a
-            echo "=== netstat -rn ==="; netstat -rn
+            echo "=== sw_vers ==="; sw_vers || true
+            echo "=== uname ==="; uname -a || true
+            echo "=== cpu ==="; sysctl -n hw.ncpu hw.physicalcpu hw.memsize || true
+            echo "=== ulimit ==="; ulimit -a || true
+            echo "=== ifconfig -a ==="; ifconfig -a || true
+            echo "=== netstat -rn ==="; netstat -rn || true
             echo "=== net sysctls ==="
             sysctl net.inet.udp.recvspace net.inet.udp.maxdgram net.inet.udp.sendspace \
-                   kern.ipc.maxsockbuf net.inet.tcp.recvspace net.inet.ip.maxfragpackets \
-                   kern.maxfiles kern.maxfilesperproc 2>&1 || true
+                   kern.ipc.maxsockbuf net.inet.tcp.recvspace kern.maxfiles kern.maxfilesperproc 2>&1 || true
+            echo "=== IPv6 temporary-address sysctls ==="
+            sysctl net.inet6.ip6.use_tempaddr net.inet6.ip6.temppltime net.inet6.ip6.tempvltime 2>&1 || true
             echo "=== scutil DNS/network ==="; scutil --nwi 2>&1 || true
-            echo "=== sudo -n check ==="; sudo -n true && echo "passwordless sudo: yes" || echo "passwordless sudo: no"
+            echo "=== DHCP lease per interface ==="
+            for i in $(ifconfig -l); do echo "-- ${i}"; ipconfig getpacket "${i}" 2>&1 | head -25; done
+            echo "=== application firewall ==="
+            /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>&1 || true
+            /usr/libexec/ApplicationFirewall/socketfilterfw --getblockall 2>&1 || true
+            echo "=== sudo -n check ==="
+            sudo -n true && echo "passwordless sudo: yes" || echo "passwordless sudo: no"
             echo "=== sample/spindump/lldb availability ==="
             command -v sample lldb spindump lsof || true
+            echo "=== routing-message header sizes ==="
+            (cc -o /tmp/rt_msghdr_sizes test/ci_rt_msghdr_sizes.c 2>&1 && /tmp/rt_msghdr_sizes) || true
           } > "${HUNT_ARTIFACTS}/host_state_before.txt" 2>&1
           cat "${HUNT_ARTIFACTS}/host_state_before.txt"
 
@@ -85,8 +115,8 @@ jobs:
 
       - name: Prove the sampler can attach on this runner
         # A watchdog that cannot take a backtrace here would leave the whole hunt with
-        # nothing to show, and the run is four hours long — so it is verified up front,
-        # against a process whose stack is known, and the result is recorded either way.
+        # nothing to show, and the run is hours long -- so it is verified up front, against
+        # a process whose stack is known, and the result is recorded either way.
         run: |
           set +e
           /bin/sleep 120 &
@@ -112,24 +142,65 @@ jobs:
           done
           exit 0
 
-      - name: Hunt
-        run: .github/workflows/macos_flake_loop.sh
+      - name: Hunt (chunk 1)
+        run: .github/workflows/macos_flake_loop.sh 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hunt-${{matrix.label}}-after-chunk1
+          path: ${{github.workspace}}/hunt-artifacts
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Hunt (chunk 2)
+        if: always()
+        run: .github/workflows/macos_flake_loop.sh 2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hunt-${{matrix.label}}-after-chunk2
+          path: ${{github.workspace}}/hunt-artifacts
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Hunt (chunk 3)
+        if: always()
+        run: .github/workflows/macos_flake_loop.sh 3
 
       - name: Summarise
         if: always()
         run: |
+          cd "${HUNT_ARTIFACTS}"
           echo "=== iterations ==="
-          ls -1 "${HUNT_ARTIFACTS}"/ctest.*.log 2>/dev/null | wc -l
+          ls -1 ctest.*.log.gz 2>/dev/null | wc -l
+          cat summary.txt 2>/dev/null || true
           echo "=== failing iterations ==="
-          grep -l "tests failed" "${HUNT_ARTIFACTS}"/ctest.*.log 2>/dev/null || echo "(none)"
+          for f in ctest.*.log.gz; do
+            [ -e "$f" ] || continue
+            if gzcat "$f" | grep -q "tests failed"; then echo "$f"; fi
+          done
           echo "=== every non-Passed test across all iterations ==="
-          grep -hE '\*\*\*(Failed|Timeout|Exception)' "${HUNT_ARTIFACTS}"/ctest.*.log 2>/dev/null | sort | uniq -c | sort -rn || echo "(none)"
+          gzcat ctest.*.log.gz 2>/dev/null | grep -oE '[a-z0-9_]+ \.+ *\*\*\*[A-Za-z]+' | sort | uniq -c | sort -rn || echo "(none)"
           echo "=== stall watchdog captures ==="
-          grep -hc "STALL " "${HUNT_ARTIFACTS}"/stall_report.*.txt 2>/dev/null || echo 0
-          echo "=== library-visible network changes ==="
-          grep -h "network change detected" "${HUNT_ARTIFACTS}"/ctest.*.log 2>/dev/null | sort | uniq -c | sort -rn | head -20 || echo "(none)"
+          grep -h "STALL " stall_report.*.txt 2>/dev/null | head -40 || echo "(none)"
+          echo "=== library-visible network changes, per iteration ==="
+          for f in ctest.*.log.gz; do
+            [ -e "$f" ] || continue
+            n=$(gzcat "$f" | grep -c "network change detected")
+            [ "$n" != "0" ] && echo "$f: $n"
+          done
+          echo "=== a sample of them ==="
+          gzcat ctest.*.log.gz 2>/dev/null | grep -E "network change detected|network snapshot diff" | head -40 || echo "(none)"
           echo "=== kernel-visible interface changes (net watcher) ==="
-          grep -hcE "RAW CHANGE|LIBRARY SNAPSHOT CHANGE" "${HUNT_ARTIFACTS}"/net_watch.txt 2>/dev/null || echo 0
+          cat net_watch.c*.txt 2>/dev/null | grep -cE "RAW CHANGE|LIBRARY SNAPSHOT CHANGE" || echo 0
+          cat net_watch.c*.txt 2>/dev/null | grep -E "RAW CHANGE|ZERO-USABLE|SLOW getifaddrs" | head -60 || true
+          echo "=== routing messages the C++ macOS monitor would discard ==="
+          cat net_watch.c*.txt 2>/dev/null | grep -c "would DISCARD it" || echo 0
+          cat net_watch.c*.txt 2>/dev/null | grep "RTM " | head -30 || true
+          echo "=== injected interface flap ==="
+          grep -hE "cycle|WARNING|could not|not macOS|no passwordless" interface_flap.c*.txt 2>/dev/null | tail -20 || echo "(not injected)"
+          echo "=== leftover processes ==="
+          head -40 leftover_processes.txt 2>/dev/null || echo "(none)"
 
       - uses: actions/upload-artifact@v4
         if: always()
