@@ -39,37 +39,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Two un-accelerated shards, which is where the natural failure RATE comes from.
-          # (Debug is not worth a shard: PYTHON_BINDINGS=ON disables the sanitizers -- see
-          # CMakeLists.txt:379-390 -- so a Debug/ON job differs from Release/ON only in
-          # optimisation, and its ctest TIMEOUTs are not scaled either.)
-          - {label: broad-release-gcc-py, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'ON'}
-          # The deadlock pair. test/ci_ghost_participants.sh cycles SIGKILLed participants on
-          # domain 0, which every test in this suite shares, so every test process constantly
-          # has a lease to reap on its ResourceEvent thread -- the trigger for
-          # eProsima/Fast-DDS#6502. The second shard is identical except that every test gets
-          # its own domain, so the ghosts are invisible to it. If the timeouts appear in the
-          # first and not the second, both the cause and its mitigation are settled.
-          - {label: cpp-ghosts, exclude_re: 'reliability|cross_version_compat|python', build_type: Release, cc: gcc, with_python: 'ON', ghost_ms: '4000'}
-          - {label: cpp-ghosts-isolated-domains, exclude_re: 'reliability|cross_version_compat|python', build_type: Release, cc: gcc, with_python: 'ON', ghost_ms: '4000', isolate_domains: 'ON'}
-          # The network-flap accelerator. test/ci_interface_flap.sh adds and removes an
-          # address on a fake-ethernet pair the snapshot accepts, reproducing on demand the
-          # hourly DHCP renewal the net watcher measured on this runner, which three separate
-          # macOS failures logged just before they failed.
-          # flap_down is 3 s, matching what the runner's own hourly DHCP renewal actually
-          # does (measured: the address is gone for 0.4 s to 3 s) and long enough for the
-          # Python side's 3 s poller to sample inside the window.
-          - {label: broad-release-gcc-py-flap, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'ON', flap_up: '45', flap_down: '3'}
-          # The discriminator. Network auto-recovery is ON by default, so any host interface
-          # churn rebuilds every participant mid-test. This shard turns it off for the whole
-          # process (the network_recovery suite, which needs it, is excluded), so if the
-          # flakes stop here and not in the shards above, the cause is settled.
-          - {label: broad-release-gcc-py-recovery-off, exclude_re: 'reliability|cross_version_compat|network_recovery', build_type: Release, cc: gcc, with_python: 'ON', recovery: 'off'}
+          # THE OPEN QUESTION, four shards of it. The deadlock needs an endpoint deletion to
+          # coincide with a remote participant's lease expiry, so these run only the
+          # endpoint-churning tests -- a pass takes about a minute instead of five, which is
+          # what turns a 1-in-44 event into something a three-hour shard can measure -- with
+          # ghost participants cycling on domain 0 to supply the expiries. The two isolated
+          # shards differ in exactly one thing: every test gets its own DDS domain, so the
+          # ghosts (and every other test process) are invisible to them. Two of each, because
+          # one shard of a rare event is an anecdote.
+          - {label: deadlock-control-a, include_re: 'accumulation_dds|match_publisher_default|discovered_endpoints|keyless_topic_history|listener_drain', build_type: Release, cc: gcc, with_python: 'OFF', ghost_ms: '1500', ghosts: '4'}
+          - {label: deadlock-control-b, include_re: 'accumulation_dds|match_publisher_default|discovered_endpoints|keyless_topic_history|listener_drain', build_type: Release, cc: gcc, with_python: 'OFF', ghost_ms: '1500', ghosts: '4'}
+          - {label: deadlock-isolated-a, include_re: 'accumulation_dds|match_publisher_default|discovered_endpoints|keyless_topic_history|listener_drain', build_type: Release, cc: gcc, with_python: 'OFF', ghost_ms: '1500', ghosts: '4', isolate_domains: 'ON'}
+          - {label: deadlock-isolated-b, include_re: 'accumulation_dds|match_publisher_default|discovered_endpoints|keyless_topic_history|listener_drain', build_type: Release, cc: gcc, with_python: 'OFF', ghost_ms: '1500', ghosts: '4', isolate_domains: 'ON'}
+          # One shard still reproducing the network cause, kept only to catch the SegFault in
+          # network_recovery_concurrent_make_publisher_during_reset with a crash report
+          # attached -- it has appeared twice, both times with rebuilds in flight, and the
+          # crash-report collection was added after the last one.
+          - {label: broad-flap, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'ON', flap_up: '45', flap_down: '3'}
     env:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: OFF
       PROVIZIO_DDS_CTEST_EXCLUDE: ${{matrix.exclude_re}}
+      PROVIZIO_DDS_CTEST_INCLUDE: ${{matrix.include_re}}
       # Empty on every shard but the discriminator, where it is 'off'. An empty value reads
       # as unset to the library, i.e. the default (on) -- see src/network_recovery.cpp:36.
       PROVIZIO_DDS_NETWORK_RECOVERY: ${{matrix.recovery}}
@@ -78,7 +70,7 @@ jobs:
       HUNT_FLAP_DOWN_SECONDS: ${{matrix.flap_down}}
       # Empty on every shard but the deadlock pair.
       HUNT_GHOST_PERIOD_MS: ${{matrix.ghost_ms}}
-      HUNT_GHOST_PROCESSES: '2'
+      HUNT_GHOST_PROCESSES: ${{matrix.ghosts}}
       # Name every address the snapshot gained or lost, not just how many.
       PROVIZIO_DDS_DEBUG_SNAPSHOT_DIFF: '1'
       HUNT_ARTIFACTS: ${{github.workspace}}/hunt-artifacts

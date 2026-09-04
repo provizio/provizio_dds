@@ -30,6 +30,7 @@
 #   HUNT_ARTIFACTS              directory for all output (required)
 #   HUNT_LOOP_SECONDS           how long to keep looping, per chunk (default 4200)
 #   PROVIZIO_DDS_CTEST_EXCLUDE  ctest -E regex (optional)
+#   PROVIZIO_DDS_CTEST_INCLUDE  ctest -R regex (optional)
 #   HUNT_FLAP_UP_SECONDS        when set, inject an interface flap on that cycle (optional)
 #   HUNT_FLAP_DOWN_SECONDS      how long the injected address stays away (default 2)
 #   HUNT_GHOST_PERIOD_MS        when set, cycle SIGKILLed participants on domain 0 (optional)
@@ -61,6 +62,12 @@ export UBSAN_OPTIONS="halt_on_error=0:print_stacktrace=1:suppressions=${_SAN_DIR
 CTEST_EXTRA_ARGS=()
 if [[ -n "${PROVIZIO_DDS_CTEST_EXCLUDE:-}" ]]; then
     CTEST_EXTRA_ARGS+=(-E "${PROVIZIO_DDS_CTEST_EXCLUDE}")
+fi
+# Narrowing the suite is how a rare race becomes measurable: the deadlock needs an endpoint
+# deletion to coincide with a lease expiry, so a shard that runs only the endpoint-churning
+# tests gets an order of magnitude more attempts per hour than one running everything.
+if [[ -n "${PROVIZIO_DDS_CTEST_INCLUDE:-}" ]]; then
+    CTEST_EXTRA_ARGS+=(-R "${PROVIZIO_DDS_CTEST_INCLUDE}")
 fi
 
 # The two recorders. Both are read-only observers; neither can change a verdict.
