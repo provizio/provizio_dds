@@ -41,6 +41,20 @@ namespace provizio::dds::detail
             return flag;
         }
 
+        // Whether to name every address a snapshot gained or lost, rather than only counting
+        // them. Read once: the value is fixed for the life of the process, and the check sits
+        // on the change-detection path.
+        bool debug_snapshot_diff_enabled()
+        {
+            static const bool enabled = [] {
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): startup-only probe, same as every other
+                // PROVIZIO_DDS_* read in this file.
+                const auto *raw = std::getenv("PROVIZIO_DDS_DEBUG_SNAPSHOT_DIFF");
+                return raw != nullptr && *raw != '\0' && std::string{raw} != "0";
+            }();
+            return enabled;
+        }
+
         constexpr const char *safety_net_env_var_name = "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC";
 
         // Upper bound on the safety-net period. Beyond roughly 9.2e9 seconds, converting
@@ -643,6 +657,32 @@ namespace provizio::dds::detail
         // can't trigger this: it is filtered out of BOTH the start and end snapshots by
         // capture_address_snapshot.)
         const std::size_t returned = had_burst_start ? count_missing_from(new_snapshot, burst_start) : 0U;
+
+        // Diagnostic, opt-in through PROVIZIO_DDS_DEBUG_SNAPSHOT_DIFF: the counts alone say
+        // that something moved, never WHICH address, and on a host whose interfaces flap for
+        // reasons outside this process (a CI virtual machine, a laptop roaming networks) that
+        // is the whole question. Off by default because it names addresses, which a normal
+        // deployment has no reason to have in its logs.
+        if (debug_snapshot_diff_enabled())
+        {
+            const auto report_difference = [](const address_snapshot &addresses, const address_snapshot &reference,
+                                              const char *const sign) {
+                for (const auto &address : addresses)
+                {
+                    if (reference.find(address) == reference.end())
+                    {
+                        log_info() << "network snapshot diff: " << sign << " " << address.interface_name << " "
+                                   << address.address_text << "/" << address.prefix_length;
+                    }
+                }
+            };
+            report_difference(new_snapshot, last_known, "+");
+            report_difference(last_known, new_snapshot, "-");
+            if (had_burst_start)
+            {
+                report_difference(new_snapshot, burst_start, "returned-within-burst");
+            }
+        }
 
         // Names the path that noticed the change, and nothing more. Worth saying for the
         // safety net: a change that reached us without a kernel event means notifications

@@ -1,0 +1,140 @@
+name: macOS flake hunt
+
+# TEMPORARY investigation workflow (branch investigation/**). It exists to reproduce, with
+# enough diagnostics attached to explain it, the random test timeouts seen only on
+# macos-15-intel: a test that normally finishes in under a second occasionally consumes its
+# whole 45 s ctest TIMEOUT and is SIGKILLed with no output at all, and a request/response
+# test occasionally loses a response right after the library reports a spurious interface
+# address change.
+#
+# Each job builds once and then runs the suite in a loop until a deadline, with:
+#   - test/ci_net_watch.py recording, at 100 ms resolution, every interface/address/flag the
+#     kernel reports plus the routing-event stream, so an address flap can be confirmed or
+#     ruled out independently of the library;
+#   - test/ci_stall_watchdog.py sampling any test process that gets within a few seconds of
+#     its own ctest TIMEOUT, capturing full thread backtraces before CTest's SIGKILL.
+# Every iteration's ctest output and both recordings are uploaded as artifacts.
+
+on:
+  push:
+    branches: ['investigation/**']
+  workflow_dispatch:
+
+concurrency:
+  group: macos-flake-hunt-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hunt:
+    name: Hunt ${{matrix.label}}
+    runs-on: macos-15-intel
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Two identical broad shards: independent samples of the same configuration, which
+          # is what turns "it failed once" into a rate.
+          - {label: broad-release-gcc-py-a, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'ON'}
+          - {label: broad-release-gcc-py-b, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'ON'}
+          # The configuration failure (1) was seen in: Debug enables ASan/UBSan through
+          # coding_standards, and every TIMEOUT is multiplied by 5.
+          - {label: broad-debug-clang-py, exclude_re: 'reliability|cross_version_compat', build_type: Debug, cc: clang, with_python: 'ON'}
+          # C++ only: a ~5 min pass, so this shard trades breadth for many more iterations.
+          - {label: cpp-release-gcc-py, exclude_re: 'reliability|cross_version_compat|python', build_type: Release, cc: gcc, with_python: 'ON'}
+          # Control: does the flake need the Python bindings present at all?
+          - {label: broad-release-gcc-nopy, exclude_re: 'reliability|cross_version_compat', build_type: Release, cc: gcc, with_python: 'OFF'}
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: OFF
+      ENABLE_ROS_TESTS: OFF
+      PROVIZIO_DDS_CTEST_EXCLUDE: ${{matrix.exclude_re}}
+      # Name every address the snapshot gained or lost, not just how many.
+      PROVIZIO_DDS_DEBUG_SNAPSHOT_DIFF: '1'
+      HUNT_ARTIFACTS: ${{github.workspace}}/hunt-artifacts
+      # Leaves room inside timeout-minutes for the build, the artifact upload and the
+      # last iteration to finish.
+      HUNT_LOOP_SECONDS: '14400'
+    steps:
+      - uses: actions/checkout@v4
+      - run: rm -rf /tmp/provizio_dds.venv
+      - run: mkdir -p "${HUNT_ARTIFACTS}"
+
+      - name: Record the host's starting state
+        run: |
+          {
+            echo "=== sw_vers ==="; sw_vers
+            echo "=== uname ==="; uname -a
+            echo "=== cpu ==="; sysctl -n hw.ncpu hw.physicalcpu hw.memsize
+            echo "=== ulimit ==="; ulimit -a
+            echo "=== ifconfig -a ==="; ifconfig -a
+            echo "=== netstat -rn ==="; netstat -rn
+            echo "=== net sysctls ==="
+            sysctl net.inet.udp.recvspace net.inet.udp.maxdgram net.inet.udp.sendspace \
+                   kern.ipc.maxsockbuf net.inet.tcp.recvspace net.inet.ip.maxfragpackets \
+                   kern.maxfiles kern.maxfilesperproc 2>&1 || true
+            echo "=== scutil DNS/network ==="; scutil --nwi 2>&1 || true
+            echo "=== sudo -n check ==="; sudo -n true && echo "passwordless sudo: yes" || echo "passwordless sudo: no"
+            echo "=== sample/spindump/lldb availability ==="
+            command -v sample lldb spindump lsof || true
+          } > "${HUNT_ARTIFACTS}/host_state_before.txt" 2>&1
+          cat "${HUNT_ARTIFACTS}/host_state_before.txt"
+
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
+
+      - name: Prove the sampler can attach on this runner
+        # A watchdog that cannot take a backtrace here would leave the whole hunt with
+        # nothing to show, and the run is four hours long — so it is verified up front,
+        # against a process whose stack is known, and the result is recorded either way.
+        run: |
+          set +e
+          /bin/sleep 120 &
+          victim=$!
+          {
+            echo "=== ps -M ${victim} ==="; ps -M "${victim}"
+            echo "=== sample (unprivileged) ==="
+            sample "${victim}" 1 -mayDie -file "${HUNT_ARTIFACTS}/sampler_probe_user.txt"; echo "exit=$?"
+            echo "=== sample (sudo) ==="
+            sudo -n sample "${victim}" 1 -mayDie -file "${HUNT_ARTIFACTS}/sampler_probe_sudo.txt"; echo "exit=$?"
+            echo "=== spindump (sudo) ==="
+            sudo -n spindump "${victim}" 1 -o "${HUNT_ARTIFACTS}/sampler_probe_spindump.txt"; echo "exit=$?"
+          } > "${HUNT_ARTIFACTS}/sampler_probe.txt" 2>&1
+          kill "${victim}" 2>/dev/null
+          cat "${HUNT_ARTIFACTS}/sampler_probe.txt"
+          for f in sampler_probe_user sampler_probe_sudo sampler_probe_spindump; do
+            if [ -s "${HUNT_ARTIFACTS}/${f}.txt" ]; then
+              echo "--- ${f}: $(wc -l < "${HUNT_ARTIFACTS}/${f}.txt") lines, head:"
+              head -25 "${HUNT_ARTIFACTS}/${f}.txt"
+            else
+              echo "--- ${f}: EMPTY"
+            fi
+          done
+          exit 0
+
+      - name: Hunt
+        run: .github/workflows/macos_flake_loop.sh
+
+      - name: Summarise
+        if: always()
+        run: |
+          echo "=== iterations ==="
+          ls -1 "${HUNT_ARTIFACTS}"/ctest.*.log 2>/dev/null | wc -l
+          echo "=== failing iterations ==="
+          grep -l "tests failed" "${HUNT_ARTIFACTS}"/ctest.*.log 2>/dev/null || echo "(none)"
+          echo "=== every non-Passed test across all iterations ==="
+          grep -hE '\*\*\*(Failed|Timeout|Exception)' "${HUNT_ARTIFACTS}"/ctest.*.log 2>/dev/null | sort | uniq -c | sort -rn || echo "(none)"
+          echo "=== stall watchdog captures ==="
+          grep -hc "STALL " "${HUNT_ARTIFACTS}"/stall_report.*.txt 2>/dev/null || echo 0
+          echo "=== library-visible network changes ==="
+          grep -h "network change detected" "${HUNT_ARTIFACTS}"/ctest.*.log 2>/dev/null | sort | uniq -c | sort -rn | head -20 || echo "(none)"
+          echo "=== kernel-visible interface changes (net watcher) ==="
+          grep -hcE "RAW CHANGE|LIBRARY SNAPSHOT CHANGE" "${HUNT_ARTIFACTS}"/net_watch.txt 2>/dev/null || echo 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hunt-${{matrix.label}}
+          path: ${{github.workspace}}/hunt-artifacts
+          if-no-files-found: warn
+          retention-days: 7
