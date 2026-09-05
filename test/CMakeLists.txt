@@ -158,6 +158,17 @@ function(provizio_dds_add_subcommand_test name)
     endif()
 endfunction()
 
+# Every C++ test executable created below gets this object library's one global
+# constructor, which turns off stdout buffering. CTest pipes a test's stdout, making it
+# fully buffered, and kills a timed-out test with SIGKILL -- so without this, a test that
+# had already printed its result loses that output entirely and its failure reads exactly
+# like one that hung before printing anything. Applied through link_libraries() rather than
+# per target so a test added later cannot forget it, and reset before the Python bindings
+# subdirectory, whose targets are libraries loaded into an interpreter that does its own
+# buffering.
+add_library(provizio_dds_test_unbuffered_output OBJECT detail/unbuffered_test_output.cpp)
+link_libraries(provizio_dds_test_unbuffered_output)
+
 add_subdirectory(simplest_pub_sub)
 add_subdirectory(pub_sub_type_reuse)
 add_subdirectory(reliable_pub_sub)
@@ -179,6 +190,9 @@ add_subdirectory(keyless_topic_history)
 add_subdirectory(point_cloud2)
 add_subdirectory(accumulation)
 add_subdirectory(source_text)
+
+# See the link_libraries() above: from here on, targets are not test executables.
+set_property(DIRECTORY PROPERTY LINK_LIBRARIES "")
 
 if(PYTHON_BINDINGS)
     message(STATUS "PYTHON_BINDINGS is ON: Python tests will be built and enabled.")
