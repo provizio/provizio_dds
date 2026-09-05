@@ -75,6 +75,10 @@ FALLBACK_HOST_ID=7f01
 # factor): under a sanitizer everything is several times slower, and a budget that stays put
 # would report a slow runner as a host-id regression.
 SCALE="${PROVIZIO_DDS_TEST_TIMEOUT_SCALE:-1}"
+if ! [[ "$SCALE" =~ ^[1-9][0-9]*$ ]]; then
+    echo "PROVIZIO_DDS_TEST_TIMEOUT_SCALE must be a positive integer, got '$SCALE'" >&2
+    exit 1
+fi
 WARM_TIMEOUT=$((30 * SCALE))
 COLD_TIMEOUT=$((60 * SCALE))
 ARM_TIMEOUT=$((30 * SCALE))

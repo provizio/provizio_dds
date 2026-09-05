@@ -29,7 +29,6 @@ import threading
 import traceback
 from typing import Iterator, Tuple
 
-import provizio_test_deadline
 import provizio_dds
 from provizio_dds import network_recovery as _network_recovery
 
@@ -1651,10 +1650,6 @@ def main() -> int:
     if name not in _TESTS:
         print(f"Unknown subcommand: {name}", file=sys.stderr)
         return 1
-    # Armed before the case runs and left armed through interpreter shutdown, because a
-    # participant teardown that hangs does so after the last line of the case. Without it a
-    # hang here is a bare ***Timeout with an empty output block -- see the module docstring.
-    provizio_test_deadline.arm()
     # Hermetic: an ambient FASTDDS_DEFAULT_PROFILES_FILE makes the library defer to
     # that profile, transports included, so the path under test would never run.
     os.environ.pop("FASTDDS_DEFAULT_PROFILES_FILE", None)
