@@ -664,6 +664,15 @@ else(HAS_BIN_CACHE)
                 "-DRESOURCE_EVENT_CPP=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.cpp"
                 "-DWRITER_PROXY_CPP=<SOURCE_DIR>/src/cpp/rtps/reader/WriterProxy.cpp"
                 -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
+            # Make the per-topic payload-pool registry lock() its weak_ptr before deciding the pool
+            # is alive. As shipped it tests expired() first, and an endpoint on another thread can
+            # release the last reference in between, so create_datareader gets a null pool and
+            # dereferences it -- the SegFault CI saw in
+            # network_recovery_concurrent_make_publisher_during_reset, reproduced deterministically
+            # (see the script). Idempotent and self-checking like the three above.
+            COMMAND ${CMAKE_COMMAND}
+                "-DREGISTRY_HPP=<SOURCE_DIR>/src/cpp/rtps/history/TopicPayloadPoolRegistry_impl/TopicPayloadPoolRegistry.hpp"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
