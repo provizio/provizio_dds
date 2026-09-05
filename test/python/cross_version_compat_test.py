@@ -111,7 +111,7 @@ def skip_or_fail(reason: str) -> None:
     # catch. Fail with a clear remediation hint instead.
     if _in_ci():
         print(
-            f"FAIL cross_version_compat — {reason}\n"
+            f"FAIL cross_version_compat -- {reason}\n"
             f"  CI=true detected; refusing to skip the cross-version interop check.\n"
             f"  Set {LEGACY_ENV_VAR} to a python3 inside a venv with provizio_dds 1.10.1\n"
             f"  installed (use test/python/setup_legacy_provizio_dds_venv.sh on POSIX,\n"
@@ -119,7 +119,7 @@ def skip_or_fail(reason: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    print(f"SKIPPED: cross_version_compat — {reason}")
+    print(f"SKIPPED: cross_version_compat -- {reason}")
     sys.exit(0)
 
 
@@ -163,7 +163,37 @@ def _kill_quietly(proc: subprocess.Popen) -> None:
         pass
 
 
-def run_pair(stage: str, cmd_a, cmd_b, timeout: float = 25.0) -> None:
+# Children run with unbuffered stdio, so a side that gets killed on timeout still reports what
+# it managed to do. Their stdout is a pipe and therefore fully buffered, and that buffer dies
+# with the process: the one failure this harness has produced said only "B timed out" and showed
+# nothing at all from B, even though A had received every correct response back from it and so
+# proved B had served them. Same reason the C++ log emitter and the reliable_pub_sub verdicts
+# flush rather than trusting exit to do it.
+_CHILD_ENV = {**os.environ, "PYTHONUNBUFFERED": "1"}
+
+
+# Scaled the way CMake scales the ctest timeouts (provizio_dds_finalize_tests exports the
+# factor), because the per-pair budget below is a completion deadline like any other: a
+# sanitized build, or an ARM runner carrying 200 concurrent jobs, needs the same slack the
+# outer TIMEOUT already gets. Without this the pair budget stayed 25 s while the whole test
+# was given 300, and a legacy side that took 26 s to shut down failed a pair whose work had
+# demonstrably succeeded.
+_TIMEOUT_SCALE = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
+_PAIR_TIMEOUT_SEC = 25.0 * _TIMEOUT_SCALE
+# The request/response pairs drive five exchanges rather than one stream, and their service
+# side waits out a request budget before returning, so they get more -- scaled like the rest
+# rather than hardcoded, which is what they were.
+_REQUEST_PAIR_TIMEOUT_SEC = 40.0 * _TIMEOUT_SCALE
+# Once a lingering side is killed its peer loses the endpoint it was talking to, so give the
+# peer a moment to notice and leave rather than judging it against a deadline that has just
+# passed.
+_SIBLING_GRACE_SEC = 5.0 * _TIMEOUT_SCALE
+# The legacy interpreter, filled in by main() once it has been resolved. Used to tell which
+# side of a pair is the released 1.10.x -- see the timeout path in run_pair.
+_legacy_python = None
+
+
+def run_pair(stage: str, cmd_a, cmd_b, timeout: float = _PAIR_TIMEOUT_SEC) -> None:
     """Run two child processes in parallel; both must exit cleanly within
     `timeout` for the pair to count as a pass. This mirrors what
     `test/run_parallel.py` already does for the same-version tests so the
@@ -172,13 +202,13 @@ def run_pair(stage: str, cmd_a, cmd_b, timeout: float = 25.0) -> None:
     print(f"  A: {' '.join(cmd_a)}")
     print(f"  B: {' '.join(cmd_b)}")
     proc_a = subprocess.Popen(cmd_a, cwd=str(HERE), stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True)
+                              stderr=subprocess.STDOUT, text=True, env=_CHILD_ENV)
     # Tiny stagger: bringing both endpoints up at the exact same instant
     # occasionally misses the first match on slow CI runners. 100 ms is
     # plenty and doesn't measurably extend the test.
     time.sleep(0.1)
     proc_b = subprocess.Popen(cmd_b, cwd=str(HERE), stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True)
+                              stderr=subprocess.STDOUT, text=True, env=_CHILD_ENV)
 
     # Drain both children's stdout concurrently — sequential communicate()
     # calls would let the not-yet-waited child block on its pipe buffer
@@ -202,12 +232,32 @@ def run_pair(stage: str, cmd_a, cmd_b, timeout: float = 25.0) -> None:
     # On any failure path we tear down the sibling before calling fail() so
     # no orphaned DDS endpoint keeps publishing on the test domain (which
     # would race subsequent ctest runs of the same fixtures).
-    for proc, other, slot in ((proc_a, proc_b, "A"), (proc_b, proc_a, "B")):
+    for proc, other, slot, cmd, buf, drain in ((proc_a, proc_b, "A", cmd_a, buf_a, t_a),
+                                              (proc_b, proc_a, "B", cmd_b, buf_b, t_b)):
         remaining = max(0.0, deadline - time.monotonic())
         try:
             proc.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
+            # Killed BEFORE its output is judged, and its drain joined in between: the
+            # reader blocks in a 4 KiB read() that only returns short at EOF, so until this
+            # side's pipe closes its buffer is empty however much it printed.
             _kill_quietly(proc)
+            drain.join(timeout=5.0)
+            # A side that has printed its success line has done every bit of work this pair
+            # asserts: these children print it last, immediately before returning from main.
+            # What can still be outstanding is teardown -- and on the LEGACY side that is a
+            # released 1.10.x tearing a Fast-DDS participant down on whatever runner CI gave
+            # us, which on a loaded ARM box has now twice taken longer than the budget here.
+            # Its shutdown speed is not this repository's to fix and not what this test is
+            # for: the wire-interop it does assert is complete by then, proved by that line
+            # and by the peer having received every response. So it is killed and the pair
+            # stands. The CURRENT build's side keeps the full contract -- work done AND a
+            # clean exit inside the budget -- because that side is ours.
+            if cmd[:1] == [_legacy_python] and "Success" in "".join(buf):
+                print(f"NOTE {stage}: {slot} (legacy 1.10.x) completed its work but had not "
+                      f"exited after {timeout:.0f}s; killed.")
+                deadline = max(deadline, time.monotonic() + _SIBLING_GRACE_SEC)
+                continue
             _kill_quietly(other)
             join_drains()
             fail(f"{stage}: {slot} timed out", "".join(buf_a), "".join(buf_b))
@@ -224,11 +274,13 @@ def run_pair(stage: str, cmd_a, cmd_b, timeout: float = 25.0) -> None:
 
 
 def main() -> int:
+    global _legacy_python
     legacy_python = os.environ.get(LEGACY_ENV_VAR)
     if not legacy_python:
         skip_or_fail(f"{LEGACY_ENV_VAR} unset")
     if not Path(legacy_python).is_file():
         skip_or_fail(f"{LEGACY_ENV_VAR} points at non-existent file: {legacy_python}")
+    _legacy_python = legacy_python
 
     # Sanity-check that the legacy interpreter can actually import the
     # 1.10.x wrapper from its venv. The current build's `provizio_dds.py`
@@ -298,8 +350,10 @@ def main() -> int:
              py_cur(pc2_pub), py_legacy(pc2_sub))
     run_pair("PointCloud2 pub(1.10.1) -> sub(2.x)",
              py_legacy(pc2_pub), py_cur(pc2_sub))
-    run_pair("req(2.x) -> svc(1.10.1)", py_cur(req), py_legacy(svc), timeout=40.0)
-    run_pair("req(1.10.1) -> svc(2.x)", py_legacy(req), py_cur(svc), timeout=40.0)
+    run_pair("req(2.x) -> svc(1.10.1)", py_cur(req), py_legacy(svc),
+             timeout=_REQUEST_PAIR_TIMEOUT_SEC)
+    run_pair("req(1.10.1) -> svc(2.x)", py_legacy(req), py_cur(svc),
+             timeout=_REQUEST_PAIR_TIMEOUT_SEC)
 
     print("All cross-version compat checks passed.")
     return 0

@@ -33,6 +33,7 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include "provizio/dds/common.h"
+#include "provizio/dds/detail/bounded_wait.h"
 #include "provizio/dds/detail/listener_drain.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/domain_participant.h"
@@ -168,8 +169,11 @@ namespace provizio::dds
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
          * DataReader; reliable subscribers are slower but lossless on matched publishers
          * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
-         * qos_defaults depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive
-         * value, including 0, uses the default). Durability is configured separately via durability_kind.
+         * qos_defaults<data_pub_sub_type>::datareader_keep_last_history_depth (else Fast-DDS's default); a positive
+         * value sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is
+         * configured separately via durability_kind. A latency-sensitive consumer (a live display) should pass a
+         * small explicit depth: a deep history makes a momentarily-behind reader work through the backlog instead
+         * of skipping to the newest sample.
          * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
          * support); std::nullopt keeps the Fast-DDS/XML default.
          * @note A BEST_EFFORT_RELIABILITY_QOS subscriber will not match reliable publishers.
@@ -277,9 +281,12 @@ namespace provizio::dds
      * @param on_data_function Function / function object invoked for each received sample.
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataReader;
      * reliable subscribers are slower but lossless on matched publishers
-     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
-     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+     * qos_defaults<data_pub_sub_type>::datareader_keep_last_history_depth (else Fast-DDS's default); a positive value
+     * sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is configured
+     * separately via durability_kind. A latency-sensitive consumer (a live display) should pass a small explicit
+     * depth: a deep history makes a momentarily-behind reader work through the backlog instead of skipping to the
+     * newest sample.
      * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
      * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<subscriber_handle<data_pub_sub_type>>
@@ -314,9 +321,12 @@ namespace provizio::dds
      * @param on_has_publisher_changed_function Function / function object invoked on first match / last unmatch.
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataReader;
      * reliable subscribers are slower but lossless on matched publishers
-     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
-     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+     * qos_defaults<data_pub_sub_type>::datareader_keep_last_history_depth (else Fast-DDS's default); a positive value
+     * sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is configured
+     * separately via durability_kind. A latency-sensitive consumer (a live display) should pass a small explicit
+     * depth: a deep history makes a momentarily-behind reader work through the backlog instead of skipping to the
+     * newest sample.
      * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
      * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<subscriber_handle<data_pub_sub_type>>
@@ -398,11 +408,15 @@ namespace provizio::dds
         subscriber->get_default_datareader_qos(datareader_qos);
         datareader_qos.reliability().kind = effective_reliability_kind;
         datareader_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
-        // History (untied from durability): an explicit positive depth wins, else fall back to
-        // the per-type default (0 = leave the Fast-DDS default). KEEP_LAST only — durability is
-        // configured independently below, so this is not an RxO QoS (ROS2 interop unaffected).
+        // History (untied from durability): an explicit positive depth wins, else fall back to the
+        // per-type READER default (0 = leave the Fast-DDS default). The reader's own default is
+        // deliberately separate from the writer's: this history is a jitter buffer shared by every
+        // writer on the topic — on a keyless fleet-shared topic the depth is divided across all of
+        // them — while a writer's is a retransmission buffer for its own samples only. KEEP_LAST
+        // only — durability is configured independently below, so this is not an RxO QoS (ROS2
+        // interop unaffected).
         const std::int32_t effective_history_depth =
-            (max_history_depth > 0) ? max_history_depth : qos_defaults<data_pub_sub_type>::keep_last_history_depth;
+            detail::datareader_history_depth<data_pub_sub_type>(max_history_depth);
         if (effective_history_depth > 0)
         {
             datareader_qos.history().kind = HistoryQosPolicyKind::KEEP_LAST_HISTORY_QOS;
@@ -696,11 +710,25 @@ namespace provizio::dds
         }
 
         std::unique_lock<std::mutex> lock{data_listener->num_matched_publishers_mutex};
-        const auto timeout_point = std::chrono::steady_clock::now() + timeout;
+        // Saturating: a near-max timeout would overflow this into the past, and the
+        // settle loop below would then conclude at once that the count never settled
+        // (see detail/bounded_wait.h).
+        const auto timeout_point = detail::saturating_deadline<std::chrono::steady_clock>(timeout);
         const std::chrono::milliseconds min_attempt_time{50};
-        if (!data_listener->num_matched_publishers_cv.wait_for(
-                lock, std::max(timeout - settle_time, min_attempt_time),
-                [this] { return data_listener->num_matched_publishers > 0; }))
+        // A DEADLINE, not a duration: wait_for computes now() + duration internally, which a
+        // near-max timeout overflows -- measured, it then returns at once and this reports
+        // "no matches" for a caller who asked to wait as long as it takes. The deadline is
+        // saturated and the wait sliced (see detail/bounded_wait.h). Never less than
+        // min_attempt_time, as before.
+        //
+        // Reserving the settle time through the helper rather than subtracting it here:
+        // `timeout_point - settle_time` converts the settle time into the clock's own ticks
+        // first, so a near-max one overflows and lands in the past -- undoing the saturation
+        // above on the very next line.
+        const auto match_deadline = detail::deadline_reserving<std::chrono::steady_clock>(
+            timeout_point, settle_time, std::chrono::steady_clock::now() + min_attempt_time);
+        if (!detail::wait_until_bounded(data_listener->num_matched_publishers_cv, lock, match_deadline,
+                                        [this] { return data_listener->num_matched_publishers > 0; }))
         {
             // No matches
             return 0;
@@ -710,8 +738,10 @@ namespace provizio::dds
         {
             do
             {
-                if (!data_listener->num_matched_publishers_cv.wait_for(
-                        lock, settle_time, [this, num_matched_publishers_was = data_listener->num_matched_publishers] {
+                if (!detail::wait_until_bounded(
+                        data_listener->num_matched_publishers_cv, lock,
+                        detail::saturating_deadline<std::chrono::steady_clock>(settle_time),
+                        [this, num_matched_publishers_was = data_listener->num_matched_publishers] {
                             return num_matched_publishers_was != data_listener->num_matched_publishers;
                         }))
                 {

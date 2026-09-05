@@ -19,6 +19,7 @@ Subcommand-driven so each ctest entry can run in its own process (the
 env-var resolution is one-shot cached per process, matching the C++ side).
 """
 
+import faulthandler
 import gc
 import os
 import sys
@@ -27,7 +28,42 @@ import time
 import traceback
 import weakref
 
+import provizio_test_deadline
 import provizio_dds
+
+
+# A case that stops making progress used to reach its ctest timeout and be killed with
+# no output and no stacks — an unexplained hang and nothing to diagnose it with (seen as
+# a 45 s timeout of reset_roundtrip on macOS while its neighbours took ~1 s). This dumps
+# every thread's stack, repeatedly, once a case runs longer than any of them ever should.
+# exit=False and repeat=True deliberately: the dump must not decide the case's outcome,
+# only describe where each thread is waiting, and repeating distinguishes "wedged" from
+# "slow" by showing whether the stacks move.
+# Scaled the same way CMake scales the ctest timeouts (provizio_dds_finalize_tests
+# multiplies them by PROVIZIO_DDS_TEST_TIMEOUT_SCALE for sanitizer builds), so a
+# slow-but-passing Debug/ASan case does not dump every thread's stack just for being slow.
+# The same scale on its own, for the cases whose OWN waits have to follow the
+# environment the way the ctest timeouts do.
+_TIMEOUT_SCALE = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
+_WATCHDOG_SEC = 20.0 * _TIMEOUT_SCALE
+
+
+def _arm_watchdog():
+    faulthandler.dump_traceback_later(_WATCHDOG_SEC, repeat=True, exit=False)
+
+
+def _disarm_watchdog():
+    """Replace the repeating per-case watchdog with the one-shot deadline dump, so a case
+    that finished cannot dump stacks repeatedly while the process tears its participants
+    down -- but a teardown that never finishes still says so.
+
+    Cancelling outright, which this used to do, left the whole of interpreter shutdown
+    unwatched. That is not a quiet stretch: a participant destroyed there reaches Fast-DDS'
+    listener detach, and a hang in it is invisible because CTest's SIGKILL takes the
+    buffered stdout with it. The deadline dump fires only if the process is still alive a
+    few seconds short of the ctest TIMEOUT, so a healthy teardown stays silent."""
+    faulthandler.cancel_dump_traceback_later()
+    provizio_test_deadline.arm()
 
 
 def _log(message):
@@ -174,6 +210,7 @@ def test_reset_roundtrip():
     participant = provizio_dds.make_domain_participant(
         0, provizio_dds.NetworkRecoveryMode.ON
     )
+    _log("reset_roundtrip: participant created")
 
     received = []
     received_event = threading.Event()
@@ -185,6 +222,7 @@ def test_reset_roundtrip():
             received_event.set()
 
     publisher, subscriber = _make_pub_sub_pair(participant, "provizio_dds_python_recovery_topic", on_data)
+    _log("reset_roundtrip: endpoints created")
 
     # Baseline: publish-receive before reset.
     deadline = time.monotonic() + 10.0
@@ -199,6 +237,7 @@ def test_reset_roundtrip():
                     saw_before = True
                 received_event.clear()
     assert saw_before, "did not receive baseline message"
+    _log("reset_roundtrip: baseline round-trip ok")
 
     # Publisher.get_guid() returns a copy of the DataWriter's GUID rather than
     # the by-reference view Fast-DDS' DataWriter::guid() returns directly —
@@ -210,7 +249,9 @@ def test_reset_roundtrip():
     # Trigger the reset directly via the participant's recovery hook. This
     # is the same code path the polling-based monitor would drive on a
     # confirmed network change.
+    _log("reset_roundtrip: triggering reset")
     participant._reset_hook(frozenset(), frozenset([("synthetic", "1.2.3.4", 24)]))
+    _log("reset_roundtrip: reset returned")
 
     # After reset, publish-receive must resume on the freshly-rebuilt
     # DataReader / DataWriter.
@@ -227,6 +268,7 @@ def test_reset_roundtrip():
                     saw_after = True
                 received_event.clear()
     assert saw_after, "did not receive after-reset message"
+    _log("reset_roundtrip: post-reset round-trip ok")
 
     guid_after = publisher.get_guid()
     assert str(guid_before) != str(guid_after), "DataWriter GUID did not change across reset"
@@ -322,7 +364,7 @@ def test_reset_refreshes_fastdds_interface_cache():
 
     # (1) and (2): refresh helper is wired up and works.
     assert nr.refresh_fastdds_interface_cache() is True, (
-        "refresh_fastdds_interface_cache() returned False — either "
+        "refresh_fastdds_interface_cache() returned False -- either "
         "libprovizio_dds wasn't found or the underlying "
         "eprosima::SystemInfo::update_interfaces failed."
     )
@@ -479,6 +521,216 @@ def test_coalescer_resets_on_transient_flap():
     return 0
 
 
+def test_no_rebuild_on_address_loss():
+    """An address going away is not worth a rebuild: nothing can be bound to what is gone,
+    and tearing down endpoints that still work over the remaining interfaces costs every
+    in-flight sample for no gain. The rebuild belongs to the moment the address comes BACK,
+    which is when it can achieve something — so this drives the pair and asserts exactly
+    one rebuild across both halves.
+
+    Mirrors the C++ network_recovery_no_rebuild_on_address_loss."""
+    from provizio_dds import network_recovery as nr
+
+    participant = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert participant is not None
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+
+    lost = ("provizio_test_lost_if", "203.0.113.9", 24)
+    with_address = frozenset(nr._capture_address_snapshot()) | {lost}
+    without_address = with_address - {lost}
+
+    # Half one: the address goes away and stays away.
+    reset_before = coordinator.reset_count
+    skipped_before = coordinator.skipped_reset_count
+    coordinator.inject_change_for_test(with_address, without_address)
+    assert coordinator.reset_count == reset_before, (coordinator.reset_count, reset_before)
+    assert coordinator.skipped_reset_count == skipped_before + 1, (
+        coordinator.skipped_reset_count,
+        skipped_before,
+    )
+
+    # Half two: the same address returns, which is what a rebuild can act on.
+    coordinator.inject_change_for_test(without_address, with_address)
+    assert coordinator.reset_count == reset_before + 1, (coordinator.reset_count, reset_before)
+
+    _log(f"no_rebuild_on_address_loss: PASS (reset_count {reset_before} -> {coordinator.reset_count})")
+    return 0
+
+
+def test_rebuild_on_address_change():
+    """The "rebuild only for what was gained" rule is about snapshot ENTRIES, not interfaces,
+    and an entry is (interface name, address, prefix length). So re-addressing an interface that
+    never went away is a gain — the old entry leaves and a new one arrives — and so is
+    re-subnetting one without changing its address at all, which changes which peers
+    Fast-DDS considers on-link. Both must rebuild; only a purely subtractive change must
+    not.
+
+    Mirrors the C++ network_recovery_rebuild_on_address_change."""
+    from provizio_dds import network_recovery as nr
+
+    participant = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert participant is not None
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+
+    before = frozenset({("provizio_test_dhcp_if", "203.0.113.20", 24)})
+    readdressed = frozenset({("provizio_test_dhcp_if", "203.0.113.21", 24)})
+    resubnetted = frozenset({("provizio_test_dhcp_if", "203.0.113.21", 16)})
+
+    # A new address on an interface that never left.
+    reset_before = coordinator.reset_count
+    coordinator.inject_change_for_test(before, readdressed)
+    assert coordinator.reset_count == reset_before + 1, (coordinator.reset_count, reset_before)
+
+    # Same address, different prefix.
+    reset_before_resubnet = coordinator.reset_count
+    coordinator.inject_change_for_test(readdressed, resubnetted)
+    assert coordinator.reset_count == reset_before_resubnet + 1, (
+        coordinator.reset_count,
+        reset_before_resubnet,
+    )
+
+    _log(f"rebuild_on_address_change: PASS (reset_count {reset_before} -> {coordinator.reset_count})")
+    return 0
+
+
+def test_no_baseline_rebuilds_for_first_readable_list():
+    """The interface read at construction can fail just as any later one can, and the monitor's
+    baseline is seeded from it. A failure there is not "no addresses" and not "the addresses we
+    have" -- it is not knowing, and specifically not knowing what the participants bound to.
+
+    So the first readable list REBUILDS rather than being quietly adopted: an interface can come
+    up while the list is unreadable, and adopting it would lose that rebuild permanently, since
+    an adopted address is no longer a gain against any later snapshot. An extra rebuild costs one
+    reconnect; a missed one costs the interface until the process restarts.
+
+    What this pins, for both backends: a failed seed leaves no baseline, the first readable list
+    is reported as all-new exactly once, an empty one is reported as nothing (there is nothing to
+    bind), and a real change measured from the baseline is still reported after that.
+
+    Mirrors the C++ network_recovery_no_baseline_rebuilds_for_first_readable_list and
+    network_recovery_no_baseline_empty_list_is_not_a_rebuild."""
+    from provizio_dds import network_recovery as nr
+
+    snapshot_a = frozenset({("provizio_test_seeded_if", "203.0.113.30", 24)})
+    snapshot_b = snapshot_a | {("provizio_test_seeded_if2", "203.0.113.31", 24)}
+
+    def failing():
+        raise OSError(12, "getifaddrs failed: Cannot allocate memory")
+
+    def check(make_monitor, label, first_readable):
+        events = []
+        real_capture = nr._capture_address_snapshot
+        nr._capture_address_snapshot = failing
+        nr._enumeration_failure_reported = False
+        monitor = None
+        try:
+            # Constructed while the interface list is unreadable: no baseline, NOT an empty one.
+            monitor = make_monitor(lambda *args: events.append(args))
+            assert monitor.initial_snapshot() is None, (label, monitor.initial_snapshot())
+
+            # Reads start succeeding. With no baseline every visible address counts as new, so a
+            # non-empty list is reported once (old is empty, which is what makes the coordinator
+            # rebuild) while an empty one has nothing to bind and is reported not at all.
+            nr._capture_address_snapshot = lambda: first_readable
+            monitor.run_safety_net_tick_for_test()
+            expected = 1 if first_readable else 0
+            assert len(events) == expected, (label, events)
+            if expected:
+                old, new, _burst_start = events[0]
+                assert old == frozenset(), (label, old)
+                assert new == first_readable, (label, new)
+
+            # Seeing the same list again is not a change, which proves the baseline was stored.
+            monitor.run_safety_net_tick_for_test()
+            assert len(events) == expected, (label, events)
+
+            # A genuine change measured from that baseline is still reported.
+            nr._capture_address_snapshot = lambda: snapshot_b
+            monitor.run_safety_net_tick_for_test()
+            assert len(events) == expected + 1, (label, events)
+            old, new, _burst_start = events[-1]
+            assert old == first_readable, (label, old)
+            assert new == snapshot_b, (label, new)
+        finally:
+            nr._capture_address_snapshot = real_capture
+            nr._enumeration_failure_reported = False
+            if monitor is not None:
+                monitor.stop()
+
+    # A long interval keeps each monitor's own thread from ticking underneath the test; every
+    # tick here is driven explicitly. Each backend is run twice: once where the first readable
+    # list has addresses to bind, once where it is empty.
+    backends = [(lambda on_event: nr._PollingNetworkMonitor(on_event, 3600.0), "polling")]
+    if sys.platform.startswith("linux"):
+        backends.append(
+            (lambda on_event: nr._NetlinkNetworkMonitor(on_event, 3600.0, None, 0.0), "netlink")
+        )
+    for make_monitor, label in backends:
+        check(make_monitor, f"{label}/non-empty", snapshot_a)
+        check(make_monitor, f"{label}/empty", frozenset())
+
+    _log(f"no_baseline_rebuilds_for_first_readable_list: PASS ({len(backends)} backend(s))")
+    return 0
+
+
+def test_unreadable_interfaces_are_not_a_change():
+    """Asking the OS for its interfaces can fail — on macOS getifaddrs is a
+    sysctl(NET_RT_IFLIST) pair that can lose a race with a routing-table change. Reporting
+    that as an empty snapshot is indistinguishable from a host that genuinely has no usable
+    address (a container whose only device is a filtered-out veth reads exactly that), so a
+    failed read used to present itself as every address disappearing: every participant
+    rebuilt for nothing, then rebuilt again when the next read succeeded, with any in-flight
+    request/response lost to it.
+
+    Mirrors the C++ network_recovery_unreadable_interfaces_are_not_a_change."""
+    from provizio_dds import network_recovery as nr
+
+    def raising_capture():
+        raise OSError(12, "getifaddrs failed: Cannot allocate memory")
+
+    captured = []
+    previous = provizio_dds.set_log_callback(
+        lambda level, message: captured.append((level, message))
+    )
+    real_capture = nr._capture_address_snapshot
+    nr._capture_address_snapshot = raising_capture
+    nr._enumeration_failure_reported = False
+    try:
+        first = nr._try_capture_address_snapshot()
+        second = nr._try_capture_address_snapshot()
+        warnings_while_failing = [
+            message for level, message in captured if level == provizio_dds.LogLevel.WARNING
+        ]
+
+        # A successful read ends the streak, so a later failure is reported again rather
+        # than being silenced for the life of the process.
+        nr._capture_address_snapshot = real_capture
+        recovered = nr._try_capture_address_snapshot()
+        nr._capture_address_snapshot = raising_capture
+        nr._try_capture_address_snapshot()
+        warnings_after_recovery = [
+            message for level, message in captured if level == provizio_dds.LogLevel.WARNING
+        ]
+    finally:
+        nr._capture_address_snapshot = real_capture
+        nr._enumeration_failure_reported = False
+        provizio_dds.set_log_callback(previous)
+
+    # A failed read is not a snapshot, so no decision can be made from it.
+    assert first is None, first
+    assert second is None, second
+    # Warned once per run of failures, not once per attempt: a poller asks every few seconds.
+    assert len(warnings_while_failing) == 1, warnings_while_failing
+    assert recovered is not None, "a readable interface list must produce a snapshot"
+    assert len(warnings_after_recovery) == 2, warnings_after_recovery
+
+    _log(
+        f"unreadable_interfaces_are_not_a_change: PASS "
+        f"({len(warnings_after_recovery)} warning(s) across two failure streaks)"
+    )
+    return 0
+
+
 def test_snapshot_prefix_length():
     """The prefix length is part of the snapshot identity, so re-subnetting an
     interface without changing its address counts as a network change (Fast-DDS
@@ -578,6 +830,49 @@ def test_netmask_read_is_bounded():
     return 0
 
 
+def test_linked_list_walk_advances() -> int:
+    """Regression: the interface walks step through linked lists the OS owns, and a
+    ``continue`` that skipped the step stranded the cursor on one node forever — on
+    Windows the unicast walk hung the process outright on any adapter carrying a
+    tentative, deprecated or duplicate address, which is a state an adapter passes
+    through on every DHCP lease. The step therefore belongs to the iterator rather
+    than to each branch of the body, so no branch can omit it.
+
+    Runs on every platform: the list is synthetic, so Linux CI covers the structure of
+    the Windows walk, which cannot otherwise be exercised here."""
+    import ctypes
+
+    from provizio_dds import network_recovery as nr
+
+    class Node(ctypes.Structure):
+        pass
+
+    # Self-referential, so the field list is declared after the class exists.
+    Node._fields_ = [("next", ctypes.POINTER(Node)), ("value", ctypes.c_int)]
+
+    # The nodes stay owned by this list; the fields hold borrowed pointers into it.
+    nodes = [Node() for _ in range(4)]
+    for index, node in enumerate(nodes[:-1]):
+        node.next = ctypes.pointer(nodes[index + 1])
+    for index, node in enumerate(nodes):
+        node.value = index
+
+    seen = []
+    # Bounded: a walk that fails to advance must fail the case, not hang it.
+    for step, node in enumerate(nr._iter_linked_nodes(ctypes.pointer(nodes[0]), "next")):
+        assert step < 2 * len(nodes), f"the walk did not advance past {seen}"
+        if node.value % 2 == 1:
+            continue  # the branch that used to strand the cursor
+        seen.append(node.value)
+    assert seen == [0, 2], seen
+
+    empty = list(nr._iter_linked_nodes(ctypes.POINTER(Node)(), "next"))
+    assert not empty, f"a null head must yield nothing, yielded {len(empty)}"
+
+    _log(f"linked_list_walk_advances: PASS (visited {seen} of {len(nodes)})")
+    return 0
+
+
 def test_extra_interfaces_env():
     """PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES parsing: whitespace trimmed,
     empty entries dropped. Runs in its own process — the value is parsed once."""
@@ -626,6 +921,181 @@ def test_netlink_binds_before_snapshot():
         monitor.stop()
 
     _log(f"netlink_binds_before_snapshot: PASS (order={order[:2]})")
+    return 0
+
+
+def test_listener_drain_reports_a_stall_until_it_ends():
+    """A callback that does not return says so for as long as it does not, and the log
+    gets an end as well as a beginning.
+
+    One line cannot say whether a stall is over: the wait is unbounded and the caller
+    holds the registration lock throughout, so an operator seeing a single warning could
+    not tell a stall that cleared from one still going hours later. Mirrors the C++
+    listener_drain cases in test/listener_drain.
+
+    Hermetic: threads, a condition variable and the log callback, with no DDS entity and
+    no traffic. The drain's reporting period is an argument for exactly this reason."""
+    from provizio_dds import network_recovery as nr
+
+    # Short enough to keep the case under a second, long enough that a loaded runner
+    # cannot mistake one slice for two.
+    slice_sec = 0.05 * _TIMEOUT_SCALE
+    wedged_sec = slice_sec * 8
+
+    captured = []
+    captured_lock = threading.Lock()
+
+    def _count(needle):
+        with captured_lock:
+            return sum(1 for message in captured if needle in message)
+
+    stall_needle = "listener drain has been waiting"
+    completion_needle = "listener drain completed after"
+
+    previous = provizio_dds.set_log_callback(
+        lambda level, message: captured.append(message)
+    )
+    try:
+        # The ordinary drain -- a callback that has already returned -- says nothing at
+        # all. Unconditional, the completion line would put a warning into the log of
+        # every reset on a healthy system.
+        quiet = nr.ListenerDrain(stall_warning_period=slice_sec)
+        with quiet.scope():
+            pass
+        quiet.detach_and_drain()
+        if _count(stall_needle) or _count(completion_needle):
+            _log("listener_drain_reports_a_stall_until_it_ends: FAIL (a quiet drain logged)")
+            return 1
+
+        drain = nr.ListenerDrain(stall_warning_period=slice_sec)
+        entered = threading.Event()
+        returned = []
+
+        def _wedged_callback():
+            with drain.scope():
+                entered.set()
+                time.sleep(wedged_sec)
+                returned.append(True)
+
+        callback = threading.Thread(target=_wedged_callback)
+        callback.start()
+        # The drain has nothing to wait for until the callback is in flight, so starting
+        # before that would test nothing at all.
+        entered.wait(timeout=30 * _TIMEOUT_SCALE)
+
+        drain.detach_and_drain()
+        # Read after the drain returned: the callback appends before leaving its scope,
+        # and the drain may not return until that scope has been left. A drain that
+        # returned early would be a teardown under a running callback in production.
+        drained_after_callback = bool(returned)
+        callback.join()
+    finally:
+        provizio_dds.set_log_callback(previous)
+
+    passed = True
+    if not drained_after_callback:
+        passed = False
+        _log("  detach_and_drain returned while a callback was still in flight")
+    # At least two, not exactly N: the count is what the scheduler grants in the time the
+    # callback is held, and pinning it would make this a timing assertion. Two is what
+    # distinguishes a heartbeat from a one-shot report.
+    stalls = _count(stall_needle)
+    if stalls < 2:
+        passed = False
+        _log(f"  expected the stall warning to repeat, saw it {stalls} time(s)")
+    # Exactly one, and only because a stall was reported: it supersedes the warnings.
+    completions = _count(completion_needle)
+    if completions != 1:
+        passed = False
+        _log(f"  expected exactly one completion line, saw {completions}")
+
+    _log(
+        f"listener_drain_reports_a_stall_until_it_ends: {'PASS' if passed else 'FAIL'} "
+        f"({stalls} stall report(s))"
+    )
+    return 0 if passed else 1
+
+
+def test_netlink_kinds_match_the_kernel():
+    """The RTM_GETLINK dump actually delivers, checked against what the kernel says
+    elsewhere.
+
+    Everything downstream of it degrades silently: a dump whose replies were all discarded
+    (the sequence and port-id checks failing, say, on a kernel or netns that does not echo
+    the port id the way this assumes) yields an empty kind map, and VPN classification then
+    falls back to name prefixes alone with nothing logged -- losing the signal that catches
+    a renamed WireGuard device. Nothing pinned that end of it before: the sibling case
+    asserts only that the socket is bound before the snapshot runs.
+
+    /sys/class/net/<dev>/uevent carries a DEVTYPE, which OVERLAPS IFLA_INFO_KIND without
+    matching it: a physical Wi-Fi NIC reports DEVTYPE=wlan and no netlink kind at all,
+    because it is not a virtual link. So only the virtual types both sides name are
+    compared, and the same set is what proves the dump delivered -- one of them present in
+    sysfs but missing from the map means every reply was discarded. Where the host has no
+    such device -- a bare-metal runner whose only NIC is physical -- there is nothing to
+    compare and the case says so rather than passing vacuously."""
+    import glob
+
+    from provizio_dds import network_recovery as nr
+
+    if sys.platform != "linux":
+        _log("netlink_kinds_match_the_kernel: SKIP (netlink is Linux-only)")
+        return 0
+
+    # The device types rtnetlink names with an IFLA_INFO_KIND, spelled the same way in
+    # both places. Anything outside this set (wlan, and the physical devices that report
+    # no DEVTYPE at all) tells us nothing about whether the dump worked.
+    virtual_devtypes = {
+        "bond",
+        "bridge",
+        "geneve",
+        "macvlan",
+        "tun",
+        "veth",
+        "vlan",
+        "vxlan",
+        "wireguard",
+    }
+
+    from_sysfs = {}
+    for uevent in glob.glob("/sys/class/net/*/uevent"):
+        device = uevent.split("/")[-2]
+        try:
+            with open(uevent, "r", encoding="ascii", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("DEVTYPE="):
+                        devtype = line.strip().split("=", 1)[1]
+                        if devtype in virtual_devtypes:
+                            from_sysfs[device] = devtype
+        except OSError:
+            continue
+
+    kinds = nr._fetch_link_kinds_linux()
+    if not from_sysfs:
+        _log(
+            "netlink_kinds_match_the_kernel: SKIP (no virtual device on this host, so "
+            f"nothing proves the dump either way; netlink returned {len(kinds)} kind(s))"
+        )
+        return 0
+
+    # The map is by interface index, so resolve each name the way the walk does.
+    import socket as socket_module
+
+    mismatched = []
+    for device, devtype in sorted(from_sysfs.items()):
+        try:
+            index = socket_module.if_nametoindex(device)
+        except OSError:
+            continue
+        reported = kinds.get(index)
+        if reported != devtype:
+            mismatched.append(f"{device}: netlink={reported!r} sysfs={devtype!r}")
+
+    assert not mismatched, "; ".join(mismatched)
+    _log(
+        f"netlink_kinds_match_the_kernel: PASS ({len(from_sysfs)} virtual device(s) "
+        f"cross-checked, {len(kinds)} kind(s) from netlink)"
+    )
     return 0
 
 
@@ -713,6 +1183,75 @@ def test_safety_net_retries_failed_rebuild():
     return 0
 
 
+def test_safety_net_retries_while_interfaces_are_unreadable():
+    """An unreadable interface list must not cancel the retry pass.
+
+    The retry re-attempts a rebuild that already failed; it needs to know nothing about
+    what changed, and the C++ counterpart runs apply_reset(retry_only) before it reads a
+    snapshot at all -- handing participants none, since trigger_network_recovery_reset
+    takes none. Gating it on a read, as this side did, meant a failing enumeration
+    silently removed the retry: the counter never moved, so the bound was never reached,
+    so the exhaustion warning never fired, and a participant left torn down by a failed
+    rebuild could stay dead for as long as the reads kept failing with nothing logged.
+    macOS' getifaddrs is a sysctl(NET_RT_IFLIST) size-then-fetch pair that fails exactly
+    that way.
+
+    Driven through stub participants rather than real ones: what is under test is the
+    coordinator's ordering, and a stub makes both the retry and the give-up path
+    deterministic without a live monitor or DDS traffic."""
+    from provizio_dds import network_recovery as nr
+
+    class _StubParticipant:
+        def __init__(self, recovers: bool):
+            self._recovery_retry_needed = True
+            self._recovers = recovers
+            self.resets = 0
+
+        def _reset_hook(self, old_snapshot, new_snapshot):
+            self.resets += 1
+            # A participant that recovers clears the flag; one that never does keeps it
+            # set, which is what drives the pass towards its bound.
+            self._recovery_retry_needed = not self._recovers
+
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+    messages = []
+    original_capture = nr._try_capture_address_snapshot
+    original_emit = nr._emit_log
+    nr._emit_log = lambda level, message: messages.append((level, message))
+    # Every read fails, for the whole case.
+    nr._try_capture_address_snapshot = lambda: None
+    try:
+        recovering = _StubParticipant(recovers=True)
+        coordinator.register_participant(recovering, recovering._reset_hook)
+        coordinator._on_safety_net_tick()
+        assert recovering.resets == 1, recovering.resets
+        assert not recovering._recovery_retry_needed
+
+        # A participant that never comes back still reaches the bound and reports once --
+        # the counter moving at all is the part the old ordering skipped entirely. Cleared
+        # first because the pass above consumed one, which is the bookkeeping the real code
+        # does for itself only once nothing needs retrying at all.
+        coordinator._consecutive_retry_passes = 0
+        stuck = _StubParticipant(recovers=False)
+        coordinator.register_participant(stuck, stuck._reset_hook)
+        for _ in range(nr._NetworkRecoveryCoordinator._MAX_CONSECUTIVE_RETRY_PASSES + 2):
+            coordinator._on_safety_net_tick()
+        assert stuck.resets == nr._NetworkRecoveryCoordinator._MAX_CONSECUTIVE_RETRY_PASSES, stuck.resets
+        gave_up = [m for _level, m in messages if "Retrying further" in m]
+        assert len(gave_up) == 1, [m for _l, m in messages][-3:]
+    finally:
+        nr._try_capture_address_snapshot = original_capture
+        nr._emit_log = original_emit
+        coordinator._consecutive_retry_passes = 0
+        coordinator._retry_exhaustion_reported = False
+
+    _log(
+        f"safety_net_retries_while_interfaces_are_unreadable: PASS "
+        f"({recovering.resets} retry, {stuck.resets} before giving up, every read failing)"
+    )
+    return 0
+
+
 def test_safety_net_retry_gives_up_after_bound():
     """A participant whose rebuild NEVER succeeds must stop being retried after
     _MAX_CONSECUTIVE_RETRY_PASSES consecutive passes — one error log, then
@@ -780,7 +1319,7 @@ def test_safety_net_env():
         ("-5", default),  # negative
         ("abc", default),  # non-numeric
         ("99999999999999999999", default),  # > int64: rejected, like C++ stoll's out_of_range
-        (" 30", default),  # non-ASCII whitespace: rejected, like C++ byte-wise isspace
+        ("\u00a030", default),  # NBSP: non-ASCII whitespace is rejected, like C++ byte-wise isspace
         ("1" * 5000, default),  # beyond int()'s conversion-length limit (Python 3.11+)
         ("999999999", 86400.0),  # clamped to a day
     )
@@ -792,6 +1331,112 @@ def test_safety_net_env():
     assert nr._resolve_safety_net_period() == default
 
     _log("safety_net_env: PASS")
+    return 0
+
+
+def _tunnel_identity():
+    """A synthetic tunnel interface for whatever platform the test runs on: (name, kind)
+    on POSIX, (name, friendly, description, if_type) on Windows.
+
+    Synthetic because the host is not a controllable input -- no runner has a tunnel up,
+    so every assertion about how one is treated would otherwise be vacuous. The C++ suite
+    uses the same identities for the same reason (see vpn_interfaces_test.cpp)."""
+    if sys.platform == "win32":
+        return ("{00000000-0000-0000-0000-provizio-test}", "Tailscale", "Tailscale Tunnel", 131)
+    if sys.platform == "darwin":
+        # Every macOS VPN lands on a utunN device -- the prefix that is ALSO in the
+        # snapshot's own name-exclusion list, which is what made the override unable to
+        # re-admit it.
+        return ("utun9", "")
+    return ("tailscale0", "wireguard")
+
+
+def _ordinary_identity():
+    if sys.platform == "win32":
+        return ("{11111111-1111-1111-1111-provizio-test}", "Ethernet 2",
+                "Intel(R) Ethernet Connection I219-LM", 6)
+    if sys.platform == "darwin":
+        return ("en0", "")
+    return ("eth0", "")
+
+
+def _virtual_identity():
+    """Excluded by a heuristic that has nothing to do with VPNs -- container plumbing or a
+    hypervisor adapter. The override must not re-admit these with the tunnels."""
+    if sys.platform == "win32":
+        return ("{22222222-2222-2222-2222-provizio-test}", "vEthernet (WSL)",
+                "Hyper-V Virtual Ethernet Adapter", 6)
+    if sys.platform == "darwin":
+        return ("bridge0", "")
+    return ("docker0", "bridge")
+
+
+def _snapshot_policy_excludes(nr, identity):
+    if sys.platform == "win32":
+        return nr._snapshot_policy_excludes_windows(*identity)
+    return nr._snapshot_policy_excludes_posix(*identity)
+
+
+def test_snapshot_policy_excludes_tunnel():
+    """With no override, an interface the transports refuse to bind is kept out of the
+    change-detection snapshot too; an ordinary NIC is not."""
+    from provizio_dds import network_recovery as nr
+
+    assert _snapshot_policy_excludes(nr, _tunnel_identity())
+    assert not _snapshot_policy_excludes(nr, _ordinary_identity())
+    assert _snapshot_policy_excludes(nr, _virtual_identity())
+    _log("snapshot_policy_excludes_tunnel: PASS")
+    return 0
+
+
+def test_snapshot_policy_follows_transports():
+    """A tunnel stays in the snapshot once a participant reports that the exclusion never
+    reached its transports.
+
+    The mirror of the C++ snapshot_policy_follows_transports case, and it exists for the
+    same failure: where the caller owns the transport configuration -- their own XML,
+    FASTDDS_BUILTIN_TRANSPORTS, descriptors they configured -- DDS binds and announces the
+    tunnel after all. Dropping it from change detection then would leave a re-auth or a
+    reconnect with a dead locator that no rebuild replaces, which is the one outcome the
+    two filters may never produce between them.
+
+    Runs last-ish in its own process: the latch is one-way by design, so everything
+    asserted after it must be asserted with it set."""
+    from provizio_dds import network_recovery as nr
+
+    # Before: the exclusion is believed to apply, so the tunnel is dropped.
+    assert _snapshot_policy_excludes(nr, _tunnel_identity())
+
+    nr.report_vpn_exclusion_not_applied()
+
+    # After: the tunnel is watched like any other interface...
+    assert not _snapshot_policy_excludes(nr, _tunnel_identity())
+    # ...and nothing else moves with it. Container plumbing has nothing to do with who
+    # owns the transports and must still be dropped, or every veth churn on a Docker host
+    # would rebuild every participant.
+    assert _snapshot_policy_excludes(nr, _virtual_identity())
+    assert not _snapshot_policy_excludes(nr, _ordinary_identity())
+    _log("snapshot_policy_follows_transports: PASS")
+    return 0
+
+
+def test_snapshot_policy_honours_override():
+    """PROVIZIO_DDS_ALLOW_VPN_INTERFACES puts tunnels back into change detection, and
+    nothing else with them.
+
+    The variable is set by the ctest registration, not here: it is parsed once per
+    process on first use, which is inside the very call being asserted on. Mirror of the
+    C++ snapshot_policy_honours_override case, and the regression test for a divergence
+    that shipped on macOS and Windows -- the override bypassed the VPN filter and the
+    interface was then dropped anyway by the utun name prefix / the adapter-type gate,
+    leaving the transports binding an interface change detection ignored."""
+    from provizio_dds import network_recovery as nr
+
+    assert not _snapshot_policy_excludes(nr, _tunnel_identity())
+    assert not _snapshot_policy_excludes(nr, _ordinary_identity())
+    # Still excluded: the override is about tunnels, not about the heuristics.
+    assert _snapshot_policy_excludes(nr, _virtual_identity())
+    _log("snapshot_policy_honours_override: PASS")
     return 0
 
 
@@ -810,8 +1455,13 @@ _TESTS = {
     "reset_refreshes_fastdds_interface_cache": test_reset_refreshes_fastdds_interface_cache,
     "teardown_deferred": test_teardown_deferred,
     "coalescer_resets_on_transient_flap": test_coalescer_resets_on_transient_flap,
+    "no_rebuild_on_address_loss": test_no_rebuild_on_address_loss,
+    "unreadable_interfaces_are_not_a_change": test_unreadable_interfaces_are_not_a_change,
+    "no_baseline_rebuilds_for_first_readable_list": test_no_baseline_rebuilds_for_first_readable_list,
+    "rebuild_on_address_change": test_rebuild_on_address_change,
     "snapshot_prefix_length": test_snapshot_prefix_length,
     "netmask_read_is_bounded": test_netmask_read_is_bounded,
+    "linked_list_walk_advances": test_linked_list_walk_advances,
     "extra_interfaces_env": test_extra_interfaces_env,
     "netlink_binds_before_snapshot": test_netlink_binds_before_snapshot,
     "safety_net_detects_missed_change": test_safety_net_detects_missed_change,
@@ -819,6 +1469,12 @@ _TESTS = {
     "safety_net_retries_failed_rebuild": test_safety_net_retries_failed_rebuild,
     "safety_net_retry_gives_up_after_bound": test_safety_net_retry_gives_up_after_bound,
     "safety_net_env": test_safety_net_env,
+    "snapshot_policy_excludes_tunnel": test_snapshot_policy_excludes_tunnel,
+    "snapshot_policy_follows_transports": test_snapshot_policy_follows_transports,
+    "safety_net_retries_while_interfaces_are_unreadable": test_safety_net_retries_while_interfaces_are_unreadable,
+    "netlink_kinds_match_the_kernel": test_netlink_kinds_match_the_kernel,
+    "listener_drain_reports_a_stall_until_it_ends": test_listener_drain_reports_a_stall_until_it_ends,
+    "snapshot_policy_honours_override": test_snapshot_policy_honours_override,
 }
 
 
@@ -839,11 +1495,14 @@ def main():
     if name not in _TESTS:
         print(f"Unknown subcommand: {name}", file=sys.stderr)
         return 1
+    _arm_watchdog()
     try:
         return _TESTS[name]()
     except Exception:
         traceback.print_exc()
         return 1
+    finally:
+        _disarm_watchdog()
 
 
 if __name__ == "__main__":

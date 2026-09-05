@@ -85,7 +85,10 @@ int main()
         return 1;
     }
 
-    std::cout << "reliable_publisher: Success" << '\n';
+    // Flushed, not just newline-terminated: CTest captures stdout through a pipe, so it
+    // is fully buffered and a run killed on timeout would take its verdict with it --
+    // leaving a failure that says only that the test did not finish.
+    std::cout << "reliable_publisher: Success" << '\n' << std::flush;
 
     return 0;
 }

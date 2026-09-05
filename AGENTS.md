@@ -49,7 +49,7 @@ ctest --output-on-failure
 ctest --output-on-failure -R simplest_pub_sub
 ```
 
-Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `shm_cleanup`, `callback_exceptions`, `point_cloud2`, `accumulation`.
+Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `shm_cleanup`, `callback_exceptions`, `point_cloud2`, `accumulation`, `vpn_interfaces`, `listener_drain`, `bounded_wait`, `keyless_topic_history`.
 
 ### CI Build Scripts
 
@@ -79,8 +79,9 @@ Two shared libraries are produced:
 - **`accumulation.h`** — Point clouds accumulation & multi-radar fusion: `rigid_transform`, core `point_clouds_accumulator` and the DDS-fed `dds_point_clouds_accumulator` (Odometry/NavSatFix/no localization). Mirrors `python/accumulation.py`. Non-template logic is compiled into the library; the maths path (`get_points_*` → `detail/accumulation_math.h`) is header-only and auto-detects Eigen at the consumer's compile time (`PROVIZIO_DDS_DISABLE_EIGEN` opts out; `DISABLE_EIGEN` CMake option for provizio_dds's own builds).
 - **`common.h`** — `PROVIZIO_DDS_API` macro for DLL export/import, namespace aliases.
 - **`point_cloud2.h`** — Generic + Provizio-radar-specific PointCloud2 reading/writing: `cloud_view` field-driven reading, tiered `create_cloud` writing, `radar_point`/`read_radar_points`/`make_radar_point_cloud`, entity cloud makers + unified read_entities/get_entities_kind. Mirrors `python/point_cloud2.py`. Templates header-only; non-template functions compiled into the library.
-- **`qos_defaults.h`** — `apply_qos_defaults()` configures QoS policies (reliability, durability, history, memory).
+- **`qos_defaults.h`** — The per-type QoS defaults template `qos_defaults<PubSubType>` (reliability, publish mode, memory policy and the two KEEP_LAST history depths — reader and writer are configured separately). Specializations for the Provizio fleet-shared types and the large-sample types live here; `src/qos_defaults_checks.cpp` pins every one of them against the real generated types at compile time, and `test/python/python_qos_parity_test.py` checks the Python registration agrees. Documented for consumers under "QoS Defaults per Type" in DETAILS.md.
 - **`topic.h`** — RAII `make_topic()` with deduplication (reuses existing topic if same name/type).
+- **`detail/vpn_interfaces.h`** / **`src/vpn_interfaces.cpp`** — Identifies VPN / overlay-tunnel interfaces, which are kept out of the DDS transports (and out of network-recovery change detection) by default; `PROVIZIO_DDS_ALLOW_VPN_INTERFACES` opts out. Mirrors the classifier in `python/network_recovery.py`. Exists because Fast-DDS announces an address on every bindable interface and a writer sends every sample to all of a peer's announced locators, so two hosts sharing a LAN that are both on a VPN duplicate all traffic through the tunnel.
 
 ### Key Design Patterns
 
@@ -115,6 +116,8 @@ Dependencies are auto-downloaded and built by CMake when not found:
 - **foonathan_memory_vendor** (built in a subprocess during configure)
 - **provizio_dds_idls** (FetchContent)
 
+Fast-DDS is patched at build time by the scripts in `cmake/fast_dds/`, run as the ExternalProject `PATCH_COMMAND`: `export_system_info.cmake` (Windows DLL export of `SystemInfo::update_interfaces`, which network recovery calls), `host_id_without_interfaces.cmake` (a machine-id-derived host id for a process that creates its first participant before any interface has carrier — see "Starting before the network is up" under Network Auto-Recovery in DETAILS.md) and `resource_event_per_timer_wait.cmake` (fixes a Fast-DDS deadlock between destroying/recreating a `TimedEvent` while holding an endpoint mutex and the timer thread reaping an expired participant lease — eProsima/Fast-DDS#6502; it made tests hang for their whole ctest TIMEOUT) and `topic_payload_pool_registry_lock_first.cmake` (fixes a null payload pool handed to `create_datareader` when an endpoint on the same topic is destroyed concurrently — a SegFault). Each is idempotent and fails the configure loudly when its anchor in the Fast-DDS sources has moved, so a `FAST_DDS_VERSION` bump must re-check all four, and re-check `test/sanitizers/tsan.supp`, whose one `race:` entry covers a Fast-DDS 3.6.2 race fixed upstream in 3.6.3. `LOOK_FOR_FAST_DDS=TRUE` builds against an unpatched system Fast-DDS and gets none of them.
+
 A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. It is bypassed when `ENABLE_TESTS=ON`, `STATIC_ANALYSIS=ON`, or `IGNORE_BIN_CACHE=ON`. On Linux a cache is only used when the host provides the glibc / libstdc++ ABI level its binaries require, which each cache records in its `abi_requirements` file — see `cmake/bin_cache/host_abi_compatibility.cmake`.
 
 ### CMake Options Reference
@@ -148,3 +151,4 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
   - Debug test timeouts are multiplied by `PROVIZIO_DDS_TEST_TIMEOUT_SCALE` (5) because instrumented runs are several times slower.
   - MSan is not used: it needs an instrumented libc++/libstdc++, which this project does not build.
 - ROS 2 topic names use the `rt/` prefix convention.
+- **Emitted text is ASCII.** Any string literal that can reach a stream at runtime -- log messages, exception text, assertion and test-failure messages -- must contain only ASCII. A Python interpreter on Windows encodes `stdout` with the ANSI code page (cp1252 in CI), so `print` raises `UnicodeEncodeError` on an em dash or an arrow, and the same text routed through `logging` is dropped silently instead. Comments and docstrings are exempt and use the full character set freely; nothing prints them. Where a non-ASCII character IS the payload (test data for a rejected input, say), write it as an escape (`"\u00a0"`) so the source itself stays ASCII. The `runtime_text_is_ascii` test enforces this over `include/`, `src/`, `python/`, `test/` and `cmake/`.

@@ -41,11 +41,16 @@ namespace provizio::dds
      */
     enum class log_level
     {
-        /// Something happened that affects the caller, but nothing is wrong — currently only a
-        /// network change that rebuilt the participants, which briefly interrupts communication.
+        /// Something happened that affects the caller, but nothing is wrong: a network change
+        /// that rebuilt the participants (which briefly interrupts communication), or -- once
+        /// per distinct set, at participant creation on a host with a tunnel up -- which VPN /
+        /// tunnel interfaces the transports leave out and whether netmask filtering came with
+        /// it (see "VPN and tunnel interfaces" in DETAILS.md).
         info,
-        /// The caller should act: a rejected @c PROVIZIO_DDS_* value, or a host limit the
-        /// library cannot work around on its own (capped socket buffers, a full /dev/shm).
+        /// The caller should act: a rejected @c PROVIZIO_DDS_* value, a host limit the
+        /// library cannot work around on its own (capped socket buffers, a full /dev/shm),
+        /// or a requested @c transport_mode the participant could not honour because the
+        /// transports are the caller's.
         warning,
         /// Functionality was lost: a participant that could not be created or rebuilt, a
         /// monitor that could not start, or an exception thrown out of a caller's callback.
@@ -55,7 +60,10 @@ namespace provizio::dds
     // Note on what is NOT logged: provizio_dds stays silent about its own internals — start-up
     // state, successful operations, and anomalies it handled itself (a coalesced network event
     // that changed nothing, a retried internal fallback). A healthy process produces no output
-    // at all, so anything that does appear is worth reading.
+    // about them, so anything that does appear is worth reading; what a healthy process CAN
+    // say is limited to the info lines above, and a callback that forwards every line to an
+    // alerting channel should expect the VPN-exclusion report at start-up on every host with a
+    // tunnel up.
 
     /**
      * @brief Callback signature for custom log emitters.
@@ -67,6 +75,19 @@ namespace provizio::dds
      * May be invoked from any thread, including the network-monitor worker thread,
      * the coalescer thread, and a participant's reset path. Implementations should
      * be brief and reentrant; do any heavy work in their own background thread.
+     *
+     * A callback may use provizio_dds entities that already exist — publishing a log
+     * line onto a DDS topic is a supported and expected use, and every diagnostic but
+     * one is emitted with no lifecycle lock held. The one exception is the
+     * listener-drain stall warning (see detail/listener_drain.h), emitted while the
+     * participant's endpoint-registration lock is held: it reports a user data callback
+     * that has stopped returning — an unbounded stall, so deferring it until the lock is
+     * released would mean never emitting it at all. A callback must therefore NOT create
+     * or destroy a publisher, subscriber or service: doing so takes that same lock, and a
+     * callback that does it on receiving that warning deadlocks on the calling thread.
+     * Creating a @c domain_participant is fine: participant creation takes the recovery
+     * coordinator's registry lock, a different lock, and no diagnostic is ever emitted
+     * while it is held.
      */
     using log_callback = std::function<void(log_level level, std::string_view message)>;
 

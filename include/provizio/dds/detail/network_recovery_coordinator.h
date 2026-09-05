@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -223,6 +225,46 @@ namespace provizio::dds::detail
         PROVIZIO_DDS_API void seed_last_known_snapshot_for_test(const address_snapshot &snapshot);
 
         /**
+         * @name Substitutes for what the coordinator reads from the host
+         *
+         * Two orthogonal knobs over the same read: what the interface list SAYS, and
+         * whether it can be read AT ALL. Kept as separate setters rather than folded into
+         * one tagged value because a test sets whichever it is about and says so at the
+         * call site; the value they share is not the two states but the one warning below.
+         *
+         * Test-only, both of them.
+         *
+         * @warning Only safe while the coordinator is idle — both are read from the
+         * coalescer and kernel-notification threads without synchronisation, on the
+         * strength of that contract. See @c run_safety_net_tick_for_test.
+         * @{
+         */
+
+        /**
+         * @brief Make this coordinator read @p snapshot instead of enumerating the host,
+         * or pass @c std::nullopt to go back to the real thing.
+         *
+         * What it buys a test: the address set becomes an input rather than a property of
+         * the runner, so cases about losing and regaining an address run identically on a
+         * developer machine and in a CI container that has no usable address at all (a
+         * container's veth is filtered out by design, so its snapshot is legitimately
+         * empty and nothing can be made to "return" in it).
+         *
+         * @param snapshot Snapshot to report, or @c std::nullopt to resume enumerating.
+         */
+        PROVIZIO_DDS_API void force_snapshot_for_test(std::optional<address_snapshot> snapshot);
+
+        /**
+         * @brief Make this coordinator behave as if the OS refused to list its interfaces,
+         * so a test can verify that an unreadable interface list is not mistaken for every
+         * address disappearing.
+         *
+         * @param fail Whether enumeration should report failure.
+         */
+        PROVIZIO_DDS_API void force_enumeration_failure_for_test(bool fail);
+        /** @} */
+
+        /**
          * @brief Force the kernel notification channel's worker to exit as if it had hit
          * an unrecoverable error, so a test can verify the safety-net tick notices and
          * reopens it. No-op where the OS owns the notification thread (Windows).
@@ -282,6 +324,70 @@ namespace provizio::dds::detail
         void on_kernel_event();
         void coalescer_loop();
         void run_reset(const address_snapshot &burst_start, bool had_burst_start);
+
+        /// Which path noticed a change — the wording of the log line, and nothing else.
+        enum class change_source
+        {
+            kernel_event,  ///< A coalesced burst of kernel notifications.
+            safety_net     ///< The periodic re-read, which no kernel event preceded.
+        };
+
+        /**
+         * @brief Decide what a newly captured snapshot means and act on it: rebuild every
+         * recovery-enabled participant, adopt the new set without rebuilding, or do
+         * nothing. Also owns the no-baseline case (@c adopt_first_readable_snapshot), so
+         * that the counts below always have a baseline to measure against.
+         *
+         * Shared by both paths that capture a snapshot — the coalesced event burst and the
+         * periodic safety-net tick — because the decision is a property of the change, not
+         * of what noticed it. The safety net exists precisely to catch the events the
+         * kernel never delivered (a dropped @c ENOBUFS datagram, a channel we do not
+         * subscribe to), so a change reaching this through that route deserves exactly the
+         * same treatment: notably, a pure address LOSS must not rebuild anything, whichever
+         * path saw it. Two copies of the rule is how the tick came to rebuild for a loss
+         * the event path deliberately skips.
+         *
+         * @param new_snapshot The address set just captured.
+         * @param burst_start Snapshot taken when the burst opened, for the transient-flap
+         * check; ignored when @p had_burst_start is false.
+         * @param had_burst_start Whether @p burst_start holds a real capture — only an
+         * event-driven backend has one.
+         * @param source Which path captured @p new_snapshot; affects only the log wording.
+         */
+        void decide_and_apply(const address_snapshot &new_snapshot, const address_snapshot &burst_start,
+                              bool had_burst_start, change_source source);
+
+        /**
+         * @brief Adopt the first readable interface list as the baseline, rebuilding for it.
+         *
+         * Precondition: @c last_known_snapshot is empty. Callers test that themselves rather
+         * than delegating it, so the emptiness check stays in the function that goes on to
+         * dereference the optional -- both for the reader and for
+         * @c bugprone-unchecked-optional-access, which tracks the engaged state through one
+         * function's control flow and cannot see a postcondition across a call.
+         *
+         * Rebuilds, rather than quietly adopting. What the participants were actually built
+         * with is unknown -- that is exactly what a failed read at startup costs -- so an
+         * interface may well have come up while the list was unreadable. Absorbing it into the
+         * baseline would lose that rebuild permanently: the address would no longer be a gain
+         * for any later comparison, and nothing would ever bind it short of a process restart.
+         * An extra rebuild costs one reconnect; a missed one costs the interface.
+         */
+        void adopt_first_readable_snapshot(const address_snapshot &new_snapshot);
+
+        /// @brief The address set the reset decisions are made against: the host's, or
+        /// whatever @c force_snapshot_for_test substituted for it. Empty when the
+        /// interfaces could not be read at all, which is NOT the same as reading an empty
+        /// set and must not be acted on.
+        ///
+        /// @param deferred_warning When non-null, the "could not read this host's network
+        /// interfaces" line is written here instead of being logged, for a caller that
+        /// holds a lock the log callback could re-enter. @c register_participant must pass
+        /// it: the callback is free to create a participant (see logging.h), which would
+        /// re-enter that function and block on the non-recursive @c registry_mutex it holds
+        /// across this call. The threads that read the interfaces with no lifecycle lock
+        /// held pass nothing and let it log.
+        std::optional<address_snapshot> current_snapshot(std::string *deferred_warning = nullptr);
         void apply_reset(reset_scope scope);
         void safety_net_tick();
         void ensure_monitor_alive();
@@ -311,7 +417,33 @@ namespace provizio::dds::detail
         bool stop_requested{false};
         std::thread coalescer_thread;
 
-        address_snapshot last_known_snapshot;
+        /// The address set the participants were last rebuilt for, or @c std::nullopt while no
+        /// baseline has been established yet.
+        ///
+        /// The distinction is load-bearing, not defensive: a host whose interface list cannot
+        /// be read has no baseline, which is NOT the same as a baseline of no addresses. Seeding
+        /// the empty set would make the first successful read look like every address arriving
+        /// at once and rebuild every participant for nothing -- the phantom rebuild this class
+        /// otherwise goes to some length to avoid. Unset instead, so the first readable snapshot
+        /// is adopted as the baseline and only changes measured from there count.
+        std::optional<address_snapshot> last_known_snapshot;
+
+        /// Set only by @c force_snapshot_for_test, and empty in every non-test build path.
+        /// Written only while the coordinator is idle (the hook is documented idle-only), but
+        /// READ from both the coalescer thread and the kernel-notification thread, since
+        /// @c current_snapshot serves the burst-start capture as well as the reset decision.
+        /// Concurrent reads without a concurrent write need no synchronisation.
+        std::optional<address_snapshot> forced_snapshot_for_test;
+        /// Set only by @c force_enumeration_failure_for_test. Same access rules.
+        bool forced_enumeration_failure_for_test{false};
+        /// Whether the current run of unreadable-interface failures has been logged, so the
+        /// warning is emitted once per streak rather than once per attempt. Atomic because
+        /// @c current_snapshot writes it from whichever thread reads the interfaces — the
+        /// coalescer for a reset decision, the notification thread for a burst-start
+        /// snapshot — and those genuinely race. Relaxed ordering throughout: this orders
+        /// nothing but itself, and losing a race here can only mean one extra or one missing
+        /// log line, never a wrong rebuild decision.
+        std::atomic<bool> enumeration_failure_reported{false};
 
         // Snapshot captured at the FIRST event of the current coalescing burst,
         // before a quick flap can revert. A burst whose post-debounce end-snapshot

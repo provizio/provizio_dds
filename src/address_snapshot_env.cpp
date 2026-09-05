@@ -17,6 +17,10 @@
 #include <cstdlib>
 #include <string>
 #include <unordered_set>
+#include <utility>
+
+#include "detail/env_utils.h"
+#include "detail/immortal.h"
 
 namespace provizio::dds::detail
 {
@@ -24,9 +28,9 @@ namespace provizio::dds::detail
     {
         constexpr const char *extra_interfaces_env_var_name = "PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES";
 
-        // Splits the comma-separated list once, trimming surrounding whitespace off each
-        // entry so that "br0, virbr2" behaves like "br0,virbr2". Empty entries (a trailing
-        // comma, "a,,b") are skipped rather than turned into an unmatchable "" name.
+        // Reads the comma-separated list once. Splitting and trimming is
+        // split_comma_separated's job, shared with every other PROVIZIO_DDS_* list so the
+        // two cannot drift apart on what counts as an entry.
         std::unordered_set<std::string> parse_extra_interfaces_once()
         {
             std::unordered_set<std::string> names;
@@ -39,37 +43,9 @@ namespace provizio::dds::detail
                 return names;
             }
 
-            const std::string value{raw};
-            std::string::size_type start = 0;
-            while (start <= value.size())
+            for (auto &entry : split_comma_separated(std::string{raw}))
             {
-                const auto comma = value.find(',', start);
-                const auto end = (comma == std::string::npos) ? value.size() : comma;
-
-                auto first = start;
-                auto last = end;
-                const auto is_space = [&value](const std::string::size_type index) {
-                    const auto chr = static_cast<unsigned char>(value[index]);
-                    return chr == ' ' || chr == '\t' || chr == '\r' || chr == '\n';
-                };
-                while (first < last && is_space(first))
-                {
-                    ++first;
-                }
-                while (last > first && is_space(last - 1))
-                {
-                    --last;
-                }
-                if (last > first)
-                {
-                    names.insert(value.substr(first, last - first));
-                }
-
-                if (comma == std::string::npos)
-                {
-                    break;
-                }
-                start = comma + 1;
+                names.insert(std::move(entry));
             }
 
             // Deliberately silent. This runs inside the one-shot initializer of
@@ -87,10 +63,15 @@ namespace provizio::dds::detail
 
     const std::unordered_set<std::string> &force_included_interfaces()
     {
-        // Meyers' singleton: parsed on first use, then immutable — so the snapshot
-        // filters stay consistent for the process' lifetime and repeated captures
-        // (one per coalesced burst and one per safety-net tick) cost no getenv().
-        static const std::unordered_set<std::string> names = parse_extra_interfaces_once();
-        return names;
+        // Parsed on first use, then immutable — so the snapshot filters stay consistent
+        // for the process' lifetime and repeated captures (one per coalesced burst and one
+        // per safety-net tick) cost no getenv().
+        //
+        // Immortal, not a plain static: the network-recovery threads read this set until
+        // the coordinator singleton is destroyed at process exit, and a plain static first
+        // constructed by the first snapshot -- after that singleton -- would be destroyed
+        // before it. See detail/immortal.h for the full account.
+        static const immortal<std::unordered_set<std::string>> names{parse_extra_interfaces_once()};
+        return *names;
     }
 }  // namespace provizio::dds::detail

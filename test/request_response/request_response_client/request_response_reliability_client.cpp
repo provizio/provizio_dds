@@ -50,7 +50,13 @@ namespace
 int main(int argc, char *argv[])
 try
 {
-    constexpr std::chrono::seconds timeout{30};
+    // Scaled like every other completion deadline in this suite (see
+    // PROVIZIO_DDS_TEST_TIMEOUT_SCALE in test/CMakeLists.txt): this waits for a response,
+    // and a sanitized build or a loaded runner needs the same slack the outer ctest TIMEOUT
+    // already gets. It was the one deadline here left unscaled, so on the runners where
+    // discovery for a fresh participant occasionally stalls it gave up 5x sooner than its
+    // siblings would have.
+    constexpr std::chrono::seconds timeout{30 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
     constexpr int max_wait_rnd = 1999;
     constexpr int half_wait_rnd = 1000;
 

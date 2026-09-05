@@ -17,8 +17,10 @@
 #if defined(__APPLE__)
 
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <fcntl.h>
+#include <net/if.h>
 #include <net/route.h>
 #include <stdexcept>
 #include <sys/poll.h>
@@ -160,7 +162,10 @@ namespace provizio::dds::detail
                 }
 
                 const ssize_t got = ::recv(route_fd, buffer.data(), buffer.size(), 0);
-                if (got <= static_cast<ssize_t>(sizeof(rt_msghdr)))
+                // Every routing message, whatever its type, begins with the same three
+                // fields: rtm_msglen, rtm_version, rtm_type. Nothing past those is read
+                // before the type-specific length check below.
+                if (got < static_cast<ssize_t>(offsetof(rt_msghdr, rtm_index)))
                 {
                     if (got < 0 && errno != EAGAIN && errno != EINTR)
                     {
@@ -170,11 +175,23 @@ namespace provizio::dds::detail
                     continue;
                 }
                 const auto *hdr = reinterpret_cast<const rt_msghdr *>(buffer.data());
-                // Defense-in-depth bounds check: only read fields after we have
-                // verified the kernel-reported length covers them. Today we only
-                // touch rtm_type, but any future field read past the head must
-                // see a length that includes it.
-                if (hdr->rtm_msglen > got || hdr->rtm_msglen < sizeof(rt_msghdr))
+                // The header a message carries depends on its type: an address event is an
+                // ifa_msghdr (20 bytes on macOS) followed by its sockaddrs, an interface event
+                // an if_msghdr, and only a route entry an rt_msghdr -- which, with its
+                // rt_metrics, is 92 bytes. Measuring every message against rt_msghdr, as this
+                // code once did, threw away every RTM_NEWADDR and RTM_DELADDR the kernel sent
+                // (a real one for en0 is 80 bytes) and left address changes to the periodic
+                // re-check, tens of seconds late.
+                std::size_t expected_header = sizeof(rt_msghdr);
+                if (hdr->rtm_type == RTM_NEWADDR || hdr->rtm_type == RTM_DELADDR)
+                {
+                    expected_header = sizeof(ifa_msghdr);
+                }
+                else if (hdr->rtm_type == RTM_IFINFO)
+                {
+                    expected_header = sizeof(if_msghdr);
+                }
+                if (hdr->rtm_msglen > got || hdr->rtm_msglen < expected_header)
                 {
                     // Silent: a malformed routing message is skipped; the periodic re-check
                     // still observes whatever the kernel ended up with.

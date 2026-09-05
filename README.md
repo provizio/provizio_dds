@@ -7,6 +7,10 @@ License 2.0).
 Although based directly on DDS, it's compatible with [ROS2](https://docs.ros.org/en/rolling/) and provides all ROS2
 built-in data types.
 
+This README is the guide to using the library. Behaviour and configuration that most callers never
+need to touch — network auto-recovery, transports, discovery tuning, logging, XML profiles — is in
+[DETAILS.md](DETAILS.md).
+
 | CI Status: master | CI Status: develop |
 | ----------------- | ----------------- |
 | ![CI Status: master](https://github.com/provizio/provizio_dds/actions/workflows/ci.yml/badge.svg?branch=master) | ![CI Status: develop](https://github.com/provizio/provizio_dds/actions/workflows/ci.yml/badge.svg?branch=develop) |
@@ -23,7 +27,7 @@ built-in data types.
 - Git
 - C++ 17 compiler (gcc, clang, or MSVC)
 - libssl-dev (OpenSSL development headers)
-- eProsima Fast-DDS 3.x (provizio_dds builds against the Fast-DDS 3.x API): when a Fast-DDS installation is present it will be used, otherwise it's downloaded and built automatically. Note that the `FASTRTPS_DEFAULT_PROFILES_FILE` environment variable was renamed to `FASTDDS_DEFAULT_PROFILES_FILE` in Fast-DDS 3.x (see [XML Profiles](#xml-profiles)).
+- eProsima Fast-DDS 3.x (provizio_dds builds against the Fast-DDS 3.x API): when a Fast-DDS installation is present it will be used, otherwise it's downloaded and built automatically. Note that the `FASTRTPS_DEFAULT_PROFILES_FILE` environment variable was renamed to `FASTDDS_DEFAULT_PROFILES_FILE` in Fast-DDS 3.x (see [XML Profiles](DETAILS.md#xml-profiles)).
 
 **C++ (Windows):**
 
@@ -90,9 +94,17 @@ set(PROVIZIO_DDS_PREFIX "${CMAKE_CURRENT_BINARY_DIR}")
 set(PROVIZIO_DDS_GITHUB_PROJECT "provizio/provizio_dds")
 set(PROVIZIO_DDS_GITHUB_BRANCH "master") # Or a specific tag or branch you prefer
 set(PROVIZIO_DDS_INSTALL_DIR "${PROVIZIO_DDS_BINARY_DIR}/install")
+find_package(Git REQUIRED)
 ExternalProject_Add(libprovizio_dds
-    GIT_REPOSITORY "https://github.com/${PROVIZIO_DDS_GITHUB_PROJECT}.git"
-    GIT_TAG "${PROVIZIO_DDS_GITHUB_BRANCH}"
+    # Cloned by hand rather than with GIT_REPOSITORY/GIT_SHALLOW, which would also fetch the
+    # tip of every other branch and tag — see "Cloning only what you need" in DETAILS.md. The
+    # remove_directory keeps the step re-runnable: git refuses a non-empty destination, which
+    # a second run (after changing the branch above, say) would otherwise hit.
+    DOWNLOAD_COMMAND "${CMAKE_COMMAND}" -E remove_directory "${PROVIZIO_DDS_SOURCE_DIR}"
+             COMMAND "${GIT_EXECUTABLE}" clone --depth 1 --single-branch
+                     --branch "${PROVIZIO_DDS_GITHUB_BRANCH}"
+                     "https://github.com/${PROVIZIO_DDS_GITHUB_PROJECT}.git"
+                     "${PROVIZIO_DDS_SOURCE_DIR}"
     UPDATE_COMMAND ""
     PREFIX "${PROVIZIO_DDS_PREFIX}"
     SOURCE_DIR "${PROVIZIO_DDS_SOURCE_DIR}"
@@ -190,8 +202,8 @@ For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/
 - Publishers support configurable reliability QoS (BEST_EFFORT or RELIABLE; RELIABLE by default). See `provizio::dds::make_publisher` (C++) or `provizio_dds.Publisher` (Python) for parameters.
 - Durability and history depth are now configured **independently** (they used to be a single combined parameter):
   - `durability_kind` selects the DDS durability QoS — pass `TRANSIENT_LOCAL_DURABILITY_QOS` for late-joiner delivery or `VOLATILE_DURABILITY_QOS` to force volatile. Leave it unset (`std::nullopt` in C++, omit / `None` in Python) to keep the Fast-DDS / XML-profile default.
-  - `history_depth` controls the KEEP_LAST history depth only. Pass `use_default_history_depth` (`-1`; `USE_DEFAULT_HISTORY_DEPTH` in Python), or any non-positive value, to keep the default depth (the per-type default where one exists — see the large-data note below — otherwise Fast-DDS's default); pass a positive value for an explicit KEEP_LAST depth.
-- Large-sample types (`sensor_msgs::msg::Image`, `CompressedImage`, `MultiEchoLaserScan`, `PointCloud2`, `nav_msgs::msg::OccupancyGrid`, and the `geometry_msgs::msg::PolygonStamped` / `PolygonInstanceStamped` freespace polygons) default to **ASYNCHRONOUS** publishing with a small **KEEP_LAST(4)** history, so a multi-megabyte write hands off to the participant's async sender thread and a momentarily slow consumer doesn't drop frames. These are writer-local defaults and do not affect reader/writer matching or ROS 2 interoperability.
+  - `history_depth` controls the KEEP_LAST history depth only. Pass `use_default_history_depth` (`-1`; `USE_DEFAULT_HISTORY_DEPTH` in Python), or any non-positive value, to keep the default depth (the per-type *writer* default where one exists — see the note below — otherwise Fast-DDS's default); pass a positive value for an explicit KEEP_LAST depth.
+- **Per-type QoS defaults.** Publish mode, writer reliability and the KEEP_LAST history depths are defaulted per message type, with the **writer and reader depths configured separately** (they do different jobs, usually on different machines). Large-sample types publish ASYNCHRONOUSly so a multi-megabyte write hands off to the participant's async sender thread; the types every sensor publishes to one shared, keyless topic get a deep reader history, because on such a topic the depth is spent by the whole fleet rather than granted to each sensor; and raw `sensor_msgs::msg::Image` defaults to a **BEST_EFFORT** writer, a deliberate breaking change for ROS 2 subscribers. The full table and the reasoning behind every number are in [DETAILS.md](DETAILS.md#qos-defaults-per-type) — read the raw-image note there before upgrading if you consume `rt/provizio_camera` or `rt/provizio_freespace` from ROS 2.
 - You can optionally receive subscriber match/unmatch notifications. See `provizio::dds::make_publisher` (C++) or `provizio_dds.Publisher` (Python) for parameters.
 
 ## Receiving Data
@@ -242,285 +254,37 @@ For more details see [python/provizio_dds.py](python/provizio_dds.py) and [test/
 
 - The data callback can take either one argument (the data) or two (data and `SampleInfo`). Both are supported in C++ and Python bindings.
 - **By default a subscriber adopts the discovered publisher's reliability.** Rather than creating its DataReader eagerly, it defers creation until a matching remote DataWriter is discovered on its topic, then builds the reader with that writer's offered reliability (the first-discovered writer's reliability is adopted while it stays live; if it later leaves and only a differently-configured writer remains, a newly-created default subscriber re-derives the reliability from a still-live writer so it still matches — while an already-built reader keeps its own reliability for its lifetime). A default subscriber is therefore automatically reliable against a RELIABLE publisher and best-effort against a best-effort one, with no configuration and without the reliability mismatch that would otherwise prevent matching. Pass an explicit `reliability_kind` (`BEST_EFFORT_RELIABILITY_QOS` / `RELIABLE_RELIABILITY_QOS`) to opt out and get an eagerly-created reader with that fixed reliability (the previous behaviour).
-- Durability and history depth are configured **independently** (as for publishers above): `durability_kind` selects the durability QoS (unset keeps the default), and `max_history_depth` controls only the KEEP_LAST history depth (`-1` / non-positive keeps the default depth; a positive value sets an explicit depth).
+- Durability and history depth are configured **independently** (as for publishers above): `durability_kind` selects the durability QoS (unset keeps the default), and `max_history_depth` controls only the KEEP_LAST history depth (`-1` / non-positive keeps the per-type *reader* default; a positive value sets an explicit depth). That reader default is deep for the types a whole fleet of sensors shares a topic for, so a consumer that must not lose samples needs no configuration — but a **latency-sensitive** consumer (a live display) should pass a small explicit depth, or a momentarily-behind reader works through a backlog of stale frames instead of skipping to the newest. See [DETAILS.md](DETAILS.md#qos-defaults-per-type).
 - You can optionally receive publisher match/unmatch notifications. See `provizio::dds::make_subscriber` (C++) or `provizio_dds.Subscriber` (Python) for parameters.
 
-## Discovering Endpoints and Known Types
-
-For tools that don't know their topic list up front — recorders, bridges, monitors — the domain participant can report remote DDS endpoints as they appear and disappear on the network, and tell you which message types the process is able to handle.
-
-Register an `on_discovered_endpoint` callback and it fires whenever a remote endpoint of the requested kind(s) is discovered or removed. The callback receives the topic name, the wire-format type name, the endpoint kind (data writer / data reader), whether it appeared or disappeared, and the endpoint's reliability and durability QoS — enough for a recording bridge to create a matching reader/writer per topic. `is_known_type` / `known_types` let the callback filter the stream down to the types it can actually deserialise.
-
-**C++ Example:**
-
-```C++
-#include "provizio/dds/domain_participant.h"
-#include <iostream>
-
-int main()
-{
-    // Installing the callback at construction (rather than calling
-    // on_discovered_endpoint() afterwards) guarantees no endpoint already on
-    // the network is missed — the listener is attached before discovery starts.
-    auto participant = provizio::dds::make_domain_participant(
-        0,                                                        // DDS domain id
-        provizio::dds::network_recovery_mode::env_var_controlled, // Network auto-recovery
-        [](provizio::dds::domain_participant &participant, const std::string &topic_name,
-           const std::string &type_name, provizio::dds::endpoint_kind /*kind*/, bool discovered,
-           eprosima::fastdds::dds::ReliabilityQosPolicyKind reliability,
-           eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
-            // Only react to types this process can actually deserialise
-            if (discovered && participant.is_known_type(type_name))
-            {
-                const bool reliable = reliability == eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS;
-                std::cout << (reliable ? "reliable" : "best-effort") << " publisher on " << topic_name
-                          << " (" << type_name << ")\n";
-            }
-        });
-
-    std::cin.get(); // Wait for any user input
-    return 0;
-}
-```
-
-By default the callback fires for remote DataWriters only (the right choice for a recorder). Pass `provizio::dds::endpoint_kind::data_writer | provizio::dds::endpoint_kind::data_reader` as the following argument to receive both.
-
-**Python Example:**
-
-```Python
-import provizio_dds
-
-def on_endpoint(participant, topic_name, type_name, kind, discovered, reliability, durability):
-    # Only react to types this process can deserialise
-    if discovered and participant.is_known_type(type_name):
-        reliable = reliability == provizio_dds.RELIABLE_RELIABILITY_QOS
-        print(f"{'reliable' if reliable else 'best-effort'} publisher on {topic_name} ({type_name})")
-
-# Install at construction to avoid missing endpoints already on the network
-participant = provizio_dds.make_domain_participant(initial_discovery_callback=on_endpoint)
-
-input("Press Enter to continue...")
-```
-
-You can also register, replace, or unregister (with an empty / `None` callback) the handler after construction via `participant.on_discovered_endpoint(callback, kinds)` — at the cost of a tiny race window for endpoints discovered before the call.
-
-**Notes:**
-
-- The callback runs on the Fast-DDS discovery thread. Keep it short, don't block, and don't create endpoints or re-register the callback from inside it — filter and enqueue, then do the real work on your own thread.
-- It survives network-recovery resets: the listener is re-attached to the recreated participant automatically.
-- For C++ callers that want to construct a typed publisher/subscriber for a discovered type without hard-coding it, the build generates a `provizio::dds::visit_known_type<Visitor>(type_name, visitor)` dispatcher that routes a runtime type-name string to a templated visitor instantiated for every type shipped by `provizio_dds_idls`. See [cmake/known_types_dispatcher.h.in](cmake/known_types_dispatcher.h.in).
-
-For details see [include/provizio/dds/domain_participant.h](include/provizio/dds/domain_participant.h).
-
-## Network Auto-Recovery
-
-DDS participants bind their UDP transports to the set of network interfaces present at participant-creation time. If the host's network changes afterwards — the primary interface comes up after the application started, a DHCP lease arrives, a USB Ethernet adapter is plugged in, the host roams to a new network — Fast-DDS does not refresh those bindings, and affected participants stop discovering off-host peers until recreated.
-
-provizio_dds handles this transparently. A process-wide background monitor watches the OS for interface **address and link-state** changes (netlink `RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR | RTMGRP_LINK` on Linux, `PF_ROUTE` incl. `RTM_IFINFO` on macOS, `NotifyUnicastIpAddressChange` + `NotifyIpInterfaceChange` on Windows), coalesces bursts of events (3 s of quiescence or up to 60 s of debounce), snapshot-diffs to filter out irrelevant churn (Docker / veth bridges, virtual interfaces, link-local IPv6), and on a confirmed change tears down and rebuilds the underlying Fast-DDS participant for every participant that opted in. Existing publisher and subscriber handles survive the rebuild — their internal Fast-DDS objects are swapped under the caller-held `shared_ptr` and the user-supplied callbacks are re-attached automatically.
-
-An interface only counts as present while it is **operationally** up — carrier present, not merely administratively up (`IFF_RUNNING` on Linux/macOS, `OperStatus` on Windows). That deliberately matches how Fast-DDS itself enumerates interfaces, so the snapshot models exactly the set it will bind locators to. It is also why link-state events are subscribed to: powering on a network switch, or replugging a cable, moves an interface in and out of that set while often emitting no address event at all.
-
-Two further safety properties matter in the field:
-
-- **Periodic re-verification.** Whenever no event burst is pending, the monitor re-checks the interface set directly every 30 s (`PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC`, `0` disables). This is the backstop for what a kernel event channel cannot report: an event the kernel dropped under load (netlink `ENOBUFS`), a notification channel that failed unrecoverably (the same check reopens it), and a change that raced the monitor's own startup. Purely event-driven recovery has no way back from any of those — the process would stay unable to communicate for the rest of its life.
-- **Retry of failed rebuilds.** A rebuild that fails part-way (the OS refuses to create the replacement participant, or an endpoint cannot be re-created) leaves that participant inert. The same periodic check retries it — and only it — rather than waiting for a network change that may never come.
-
-Note: IPv6 RFC 4941 temporary / privacy addresses are not filtered by `IFA_F_*` flags today, so on Linux/macOS/Windows hosts with privacy addresses enabled (the default on desktop installs of Ubuntu/Fedora/Mint, macOS, and Windows) the periodic rotation produces a snapshot delta — typically not more than once per 24 h with default kernel settings. In practice this is negligible and doesn't require any changes; if you ever hit a host where it matters, disable `use_tempaddr` on the DDS-carrying interface or opt out per-process via `PROVIZIO_DDS_NETWORK_RECOVERY=off`.
-
-Auto-recovery is **on by default**. To override the mode per participant, pass a `network_recovery_mode` to `make_domain_participant`:
-
-```C++
-#include "provizio/dds/domain_participant.h"
-#include "provizio/dds/network_recovery.h"
-
-// Default — honour the PROVIZIO_DDS_NETWORK_RECOVERY env var (on by default):
-auto participant_default = provizio::dds::make_domain_participant();
-
-// Always on, regardless of env var:
-auto participant_on = provizio::dds::make_domain_participant(
-    0, provizio::dds::network_recovery_mode::on);
-
-// Always off:
-auto participant_off = provizio::dds::make_domain_participant(
-    0, provizio::dds::network_recovery_mode::off);
-```
-
-The Python binding exposes the same surface via `provizio_dds.make_domain_participant`:
-
-```Python
-import provizio_dds
-
-# Default — honour the PROVIZIO_DDS_NETWORK_RECOVERY env var:
-participant = provizio_dds.make_domain_participant()
-
-# Always on:
-participant = provizio_dds.make_domain_participant(
-    0, provizio_dds.NetworkRecoveryMode.ON)
-
-# Always off:
-participant = provizio_dds.make_domain_participant(
-    0, provizio_dds.NetworkRecoveryMode.OFF)
-```
-
-The Python implementation is event-driven on Linux (its own netlink subscription, same groups as the C++ side) and falls back to polling on macOS / Windows, or on Linux if the netlink socket cannot be opened — Python's stdlib has no portable kernel-event subscription API. Polling cannot observe a sub-interval transient (an address removed and re-added between two polls), which is the one blind spot the event-driven backend does not have. It applies the same operationally-up / loopback / link-local / per-OS adapter-name exclusions as the C++ side, AND on Linux the same `IFLA_INFO_KIND` exclusions (bridge / veth / dummy / vxlan / macvlan / ipvlan) via a small `RTM_GETLINK` netlink dump on each snapshot, plus the same periodic re-verification and failed-rebuild retry. The polling cadence is configurable via `PROVIZIO_DDS_NETWORK_RECOVERY_POLL_INTERVAL_SEC`, default 3 s. See `python/network_recovery.py` for details.
-
-### Interfaces the filters skip
-
-The exclusions above are heuristics aimed at container and virtualization churn, and they are applied to the *change-detection* snapshot only — Fast-DDS still binds to whatever the OS offers. Tunnel interfaces (`tun`, `ip6tnl`) are deliberately **not** excluded, since a VPN endpoint routinely carries real DDS traffic. Bridges are, because `docker0` and `virbr0` are bridges — so if the interface your DDS traffic actually uses *is* a bridge (`br0` on a vehicle PC, `br-lan` on a router-like unit), name it explicitly so changes on it trigger a recovery:
-
-```Bash
-PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES=br0,br-lan my_app
-```
-
-Comma-separated, whitespace around entries ignored. A named interface bypasses the name / kind / adapter-type exclusions but still has to be operationally up, non-loopback, and carrying a non-link-local address. On Windows, match either the adapter's friendly name or its GUID-style name.
-
-To disable auto-recovery process-wide, set the env var before launching:
-
-```Bash
-PROVIZIO_DDS_NETWORK_RECOVERY=off my_app
-```
-
-Recognised values (case-insensitive): `on` / `1` / `true` / `yes` to enable, `off` / `0` / `false` / `no` to disable. Unset or empty defaults to enabled. An unrecognised value is treated as enabled and logged as a warning.
-
-All auto-recovery environment variables, each read once per process:
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `PROVIZIO_DDS_NETWORK_RECOVERY` | `on` | Enable / disable auto-recovery process-wide. |
-| `PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC` | `30` | Cadence of the periodic re-verification — and of everything that rides on it: notification-channel revival and the bounded failed-rebuild retry. `0` disables **all three**, leaving recovery purely event-driven. Values above one day are clamped. Read by C++ everywhere and by Python on its event-driven (Linux) backend. The Python **polling** backends (macOS, Windows, Linux without netlink) ignore it entirely — for a poller the poll *is* the periodic check, so `0` cannot disable the backstop there, and the failed-rebuild retry runs at `..._POLL_INTERVAL_SEC` cadence instead. |
-| `PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES` | *(empty)* | Comma-separated interfaces to include in change detection regardless of the name / kind exclusions. |
-| `PROVIZIO_DDS_NETWORK_RECOVERY_POLL_INTERVAL_SEC` | `3` | Python only: quiet period, and the polling cadence on the non-event-driven backends. |
-
-**Cost when not in use:** if no participant ever enables auto-recovery, the background monitor is never started — no threads, no kernel channels, no per-participant memory beyond a single boolean flag.
-
-**Cost during a reset:** typical end-to-end recovery time is a few seconds — about 3 s of event coalescing plus the time Fast-DDS needs for rediscovery and TypeLookup against the new participant. Each reset is logged, once, when the change is detected (see [Logging](#logging) below); a network event that turns out to change nothing is silent.
-
-For details see [include/provizio/dds/network_recovery.h](include/provizio/dds/network_recovery.h).
-
-## Transport Selection
-
-By default a participant uses the platform's standard transports: shared memory plus UDPv4 on Linux, and UDPv4 only on Windows/macOS (where shared memory is disabled to avoid a Boost.Interprocess cleanup bug). On every platform the UDP transport is tuned with enlarged (16 MiB) socket buffers so reliable delivery of large samples — camera frames, point clouds — works across hosts without extra configuration.
-
-Pass `transport_mode::udp_only` (C++) / `TransportMode.UDP_ONLY` (Python) to `make_domain_participant` to disable shared memory on every platform. This helps when a participant bridges mismatched Fast-DDS major versions (e.g. a recorder relaying 2.x publishers), where cross-major shared-memory negotiation can degrade large-sample throughput.
-
-```C++
-#include "provizio/dds/domain_participant.h"
-
-// Platform default — SHM + UDP on Linux, UDP-only on Windows/macOS:
-auto participant_default = provizio::dds::make_domain_participant();
-
-// UDP-only on every platform:
-auto participant_udp_only = provizio::dds::make_domain_participant(
-    0, provizio::dds::network_recovery_mode::env_var_controlled, {},
-    provizio::dds::endpoint_kind::data_writer, provizio::dds::transport_mode::udp_only);
-```
-
-```Python
-import provizio_dds
-
-# Platform default:
-participant_default = provizio_dds.make_domain_participant()
-
-# UDP-only on every platform:
-participant_udp_only = provizio_dds.make_domain_participant(transport=provizio_dds.TransportMode.UDP_ONLY)
-```
-
-The large-sample message types listed under [Publishing Data](#publishing-data) additionally default to asynchronous publishing with a small KEEP_LAST history, which complements the enlarged socket buffers for high-throughput data.
-
-Three transport-level environment options are read once at participant creation. In C++ the first two are skipped when transports are configured through Fast-DDS's own `FASTDDS_BUILTIN_TRANSPORTS` variable or an [XML profile](#xml-profiles); in Python the socket-buffer request is applied *through* `FASTDDS_BUILTIN_TRANSPORTS` itself (an externally-set value always wins, and the first participant created in the process fixes it for the rest — the XML-profile skip does not apply). `PROVIZIO_DDS_MAX_MESSAGE_SIZE` caps the RTPS output path whichever transports carry it (XML-profile participants excepted):
-
-| Environment variable | Default | Meaning |
-|---|---|---|
-| `PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE` | `16777216` | UDP send/receive socket buffer ceiling (bytes). The OS clamps it to `net.core.rmem_max` / `wmem_max` — raise those sysctls for the request to take full effect (C++ participants log a warning when they cap it). |
-| `PROVIZIO_DDS_SHM_SEGMENT_SIZE` | derived by Fast-DDS | Shared-memory segment size (bytes) per participant, decoupled from the UDP socket buffer request Fast-DDS otherwise derives it from (16 MiB of socket buffer produces a ~33.5 MiB segment). Lower it on `/dev/shm`-constrained hosts. C++ participants only: the Python bindings configure transports through `FASTDDS_BUILTIN_TRANSPORTS`, which exposes no segment-size option. |
-| `PROVIZIO_DDS_MAX_MESSAGE_SIZE` | `1400` | Send-side cap (bytes) for RTPS messages, mapping to Fast-DDS's `fastdds.max_message_size` property (output path only — reception from differently-configured peers is unaffected, so mixed fleets and default-configured ROS 2 peers stay compatible). The default keeps every UDP datagram within a single ~1500-byte-MTU link frame, so samples above it travel as individually-retransmittable RTPS fragments instead of one large UDP datagram that the IP layer splits into many link frames: with IP fragmentation, sustained frame loss makes large-sample delivery all-or-nothing and can exhaust the receiving kernel's reassembly cache (`net.ipv4.ipfrag_high_thresh` / `ipfrag_time`), blacking out every fragmented topic in ~30 s cycles while single-frame topics keep flowing — the dominant failure mode for radar point clouds on lossy links (Wi-Fi, embedded routers). Measured at 10% injected frame loss with 28 KB point clouds: ~36% delivery in blackout cycles at `65500` vs 99%+ at `1400`, p90 latency 160 ms. CycloneDDS keeps its fragments MTU-sized by default the same way (its `General/FragmentSize` default is 1344 bytes). Values below `576` are rejected (with a logged error): a complete discovery announcement must fit in one RTPS message, and Fast-DDS itself does not diagnose a property that breaks that. Values above Fast-DDS's `65500` maximum are clamped to it (with a logged warning). See the CPU trade-off note below. |
-
-**Trade-off of the `1400` default — CPU when publishing very large samples.** The cap sets the size of every outgoing datagram, so per-datagram costs are paid per ~1.4 KB instead of per ~64 KB. Most messages published by Provizio components are far smaller than 64 KB, where the difference is negligible — radar point clouds and freespace polygons gain dramatically better deliverability on lossy networks at near-zero cost, which is why `1400` is the default. But bulk multi-MB streams pay for it: a 6 MB raw camera frame becomes ~4500 datagrams instead of ~100, costing roughly 10x the sender/receiver CPU. The cap is participant-wide, so same-host **shared-memory** traffic fragments at the same ~1.4 KB granularity even though no MTU is involved — an SHM-only multi-MB pipeline pays the same overhead and may equally prefer raising the cap. Hosts publishing such streams over clean, loss-free links (e.g. a wired lab bench) can set `PROVIZIO_DDS_MAX_MESSAGE_SIZE=65500` (Fast-DDS's maximum) to restore the single-datagram-per-64-KB behaviour and reclaim that CPU at the cost of loss resilience. Conversely, the cap can be lowered on paths with a smaller MTU — the cap is the UDP payload size, so it plus 28 bytes of UDP/IPv4 headers must fit the path MTU (e.g. `1350` keeps strict single-frame delivery through a WireGuard tunnel with its default 1420 MTU; exceeding a path's MTU is benign but splits each datagram into two IP fragments). One more sizing constraint: the participant's own discovery announcement grows with its addressed-interface count (~56 bytes per extra interface) and must fit the cap in one message, so the `1400` default accommodates roughly 15 addressed interfaces beyond a typical baseline — hosts with unusually many (dense container/VM networking) should raise the cap accordingly.
-
-### Shared-Memory Cleanup
-
-Fast-DDS never garbage-collects the shared-memory files of a participant that died without destroying itself. Every unclean process death — `SIGKILL`, a bare `exit()`, an uncaught exception — leaks that participant's data segment (~33.5 MiB at the default transport configuration), its lock file, and often its port files, **forever**. A service that exits and is restarted in a loop therefore fills `/dev/shm`, and once it is full every new participant *on the host* fails to register the shared-memory transport and silently falls back to UDP — a host-wide degradation with no symptom other than an obscure `Failed to create segment` line on the dying process's own stderr. (Measured on a deployed unit: 41,642 orphaned files, 3.87 GB, at ~850 files/hour.) eProsima's answer is to run `fastdds shm clean` by hand; provizio_dds runs the same algorithm automatically instead.
-
-Every participant that may use shared memory sweeps the shared-memory directory **once per process, immediately before creating its first participant** — so a service restarted in a loop buries its own predecessor's corpse and the steady state is at most one dead generation, not unbounded growth — and again, rate-limited to once per 30 s, whenever it finds the filesystem nearly full, so a long-running process heals its host rather than only complaining about it. It is silent whatever it reclaims: this is housekeeping you neither asked for nor can act on, and what it removes is by definition unreachable by any live process.
-
-Fast-DDS keeps a companion lock file beside every segment and port and holds an `flock()` on it for the owner's whole lifetime; the kernel releases flocks on process death, `SIGKILL` included. So a lock file that *can* be locked provably has no live owner. For segments that settles it. For **ports** it is Fast-DDS's own contract rather than a proof — a port opened for writing takes no lock at all, so the sweep inherits exactly the verdict `SharedMemGlobal::Port::is_zombie` reaches from the same evidence. On top of that:
-
-- only the exact Fast-DDS lock-file name shapes are considered — `fastdds_<16 chars>_el` for a segment and `fastdds_port<N>_el|_sl` for a port, plus the Fast-DDS 2.x `fastrtps_` equivalents. Every other file in the directory, `fast_datasharing_*` segments in particular, is left strictly alone. (Narrower than `fastdds shm clean`, which also accepts `_sl` for segments: Fast-DDS never gives a segment a shared lock, so that name is free for the taking *while the segment is alive* — precisely what someone would need to aim a sweep at a live participant.);
-- a lock file younger than `PROVIZIO_DDS_SHM_CLEANUP_MIN_AGE_SEC` is skipped, which closes the microsecond window in which a participant has created its segment but not yet taken its lock — a participant caught there would lose its segment and silently spend the rest of its life unreachable over shared memory. The guard is short (5 s) so a corpse is reclaimed by the very next incarnation of an exit-looping service rather than lingering for several;
-- the lock file must be one Fast-DDS could have written — a regular file, empty, and not hardlinked onto something else — and each companion is removed only if it belongs to the same user as its lock file, so nobody can steer the sweep by choosing a *name*;
-- the directory is opened once and every lookup is made relative to that descriptor, so the sweep cannot be redirected mid-run; the lock is held across the unlink; and concurrent sweeps in any number of processes are harmless;
-- Linux and macOS only — Windows uses different paths and locking semantics. In practice it runs on Linux, the only platform where this library selects shared memory; the macOS path exists for a participant that opts back into it through `FASTDDS_BUILTIN_TRANSPORTS` or an XML profile.
-
-One deliberate limitation: a port file whose lock file is already gone is never reclaimed. A participant that opens a port for *writing* creates no lock file, so such a port may well be in use — and unlike segment names (random, so they accumulate without bound), port names are derived from the domain and are reused rather than multiplied.
-
-| Environment variable | Default | Meaning |
-|---|---|---|
-| `PROVIZIO_DDS_SHM_CLEANUP` | `on` | Enable / disable the automatic sweep process-wide. `off` / `0` / `false` / `no` disable it; an unrecognised value leaves it enabled (with a logged warning), since a typo must not silently reintroduce the leak. |
-| `PROVIZIO_DDS_SHM_CLEANUP_MIN_AGE_SEC` | `5` | How long (seconds) a lock file must have been untouched before an unlocked one counts as a corpse — the safety margin over the microsecond window in which a starting participant has created its segment but not yet locked it. Rarely worth changing. `0` removes the guard entirely, which re-opens that window; values above one day are clamped to it (a guard that large would wrap `time_t` on 32-bit targets and invert the check). |
-
-## Discovery Tuning
-
-Participants discover each other over best-effort multicast (SPDP), so some announcements are lost on a busy or lossy network. Fast-DDS counters this with an **initial burst** of announcements sent once at participant creation, plus a **periodic re-announcement** thereafter. Both are levers: set too high, the discovery traffic itself becomes a primary source of UDP congestion once many participants (sensors + clients) run at once — the initial burst is paid on every participant creation (including each [network-recovery](#network-auto-recovery) reset, which recreates the participant), and the periodic re-announcement is paid by every participant forever, so its multicast rate scales with the participant count.
-
-provizio_dds therefore uses de-escalated defaults — a modest initial burst of **15 announcements 100 ms apart** (still well above Fast-DDS's own default of 5, so a lossy link gets several shots through) and a relaxed periodic re-announcement of **3 s** (the Fast-DDS default). The participant lease duration is also raised from the Fast-DDS default of 20 s to **30 s**, giving the relaxed cadence more margin before a peer is wrongly declared lost when announcements are dropped (at the cost of detecting a genuinely-dead peer ~10 s later). For most deployments these need no tuning. When they do — an unusually large fleet, or a particularly lossy link — all four are overridable at runtime via environment variables (read once at participant creation; ignored, with a logged warning, when unset or malformed):
-
-| Environment variable | Default | Meaning |
-|---|---|---|
-| `PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_COUNT` | `15` | Number of announcements in the one-time initial burst. Raise on very lossy links; lower to reduce the startup/reset burst. |
-| `PROVIZIO_DDS_DISCOVERY_INITIAL_ANNOUNCEMENT_PERIOD_MS` | `100` | Spacing (milliseconds) between the initial-burst announcements. |
-| `PROVIZIO_DDS_DISCOVERY_ANNOUNCEMENT_PERIOD_MS` | `3000` | Period (milliseconds) of the steady-state periodic re-announcement. Raise to cut steady-state congestion in large fleets; lower to speed up late-joiner discovery. |
-| `PROVIZIO_DDS_DISCOVERY_LEASE_DURATION_MS` | `30000` | Lease duration (milliseconds) — how long a peer is considered alive without a fresh announcement. Raise for more tolerance of dropped announcements; must stay longer than the re-announcement period. |
-
-Keep the periodic re-announcement period shorter than the participant lease duration (30 s by default), or peers can be declared lost in the gap between announcements; a warning is logged if an override crosses that threshold. These settings are skipped entirely when discovery is configured through an [XML profile](#xml-profiles) instead.
-
-```bash
-# Example: a large fleet trading slightly slower late-joiner discovery for less steady-state traffic
-PROVIZIO_DDS_DISCOVERY_ANNOUNCEMENT_PERIOD_MS=6000 my_app
-```
-
-## Logging
-
-provizio_dds logs sparingly and on purpose: **a healthy process is a silent one.** Nothing is emitted for start-up state, successful internal operations, or events the library handled by itself — those are its internals, and they are not your concern while it is working. What you do get is limited to things that either need your attention or change what the library can do for you:
-
-- **your configuration was rejected** — an unparseable or out-of-range `PROVIZIO_DDS_*` value, naming the variable and the default used instead;
-- **the host is limiting the library** — the kernel capping the requested socket buffers (with the `sysctl` to raise), or a shared-memory filesystem too full to register the transport;
-- **something you gave us threw** — an exception out of any of your callbacks, caught at the library boundary (see below);
-- **functionality was lost** — a participant that could not be created or rebuilt, a network monitor that could not start, auto-recovery unavailable for the process;
-- **the network changed and participants were rebuilt** — one line per actual reset, since communication is briefly interrupted by it.
-
-By default, info and warning messages go to `std::cout` and errors go to `std::cerr`, all prefixed with `[provizio_dds]`. To route the output into your application's logging system, install a callback:
-
-```C++
-#include "provizio/dds/logging.h"
-
-provizio::dds::set_log_callback(
-    [](provizio::dds::log_level level, std::string_view message) {
-        switch (level) {
-            case provizio::dds::log_level::info:    my_logger.info(message);    break;
-            case provizio::dds::log_level::warning: my_logger.warning(message); break;
-            case provizio::dds::log_level::error:   my_logger.error(message);   break;
-        }
-    });
-```
-
-`set_log_callback` returns the previously installed callback; passing an empty callback restores the default stdout/stderr emitter. The callback may be invoked from any thread and must be reentrant; do any heavy work in your own background thread.
-
-The Python binding mirrors this:
-
-```Python
-import provizio_dds
-
-def on_log(level, message):
-    if level == provizio_dds.LogLevel.INFO:    my_logger.info(message)
-    elif level == provizio_dds.LogLevel.WARNING: my_logger.warning(message)
-    elif level == provizio_dds.LogLevel.ERROR:   my_logger.error(message)
-
-provizio_dds.set_log_callback(on_log)
-```
-
-Exceptions thrown from any user-supplied callback — data handlers, publisher/subscriber match notifications, the endpoint-discovery callback — are caught at the library boundary and reported through this log callback (at error level) instead of propagating into the Fast-DDS background threads, where an uncaught exception would terminate the process. Your callbacks can therefore throw without crashing the application, though handling errors within them is still preferable.
-
-For details see [include/provizio/dds/logging.h](include/provizio/dds/logging.h) and [python/network_recovery.py](python/network_recovery.py).
+## Behaviour and configuration
+
+The defaults are the recommended settings — a participant from `make_domain_participant()` needs
+none of the following. Each topic is summarised here and covered in full in
+[DETAILS.md](DETAILS.md).
+
+- **[Network auto-recovery](DETAILS.md#network-auto-recovery)** is **on by default**. Participants
+  survive an interface going down, a DHCP lease changing the host's address, or a cable moving to
+  another NIC: the change is detected, endpoints are rebuilt and publishers and subscribers carry
+  on without the application restarting.
+- **[VPN and tunnel interfaces](DETAILS.md#vpn-and-tunnel-interfaces)** are **kept out of the DDS
+  transports by default** — new in this release. A participant neither binds nor announces a
+  tunnel address, so traffic is no longer duplicated over a VPN shared with a LAN peer. A
+  deployment that carried DDS *through* a tunnel (unicast discovery over it) sets
+  `PROVIZIO_DDS_ALLOW_VPN_INTERFACES=1` to keep doing so.
+- **[Transport selection](DETAILS.md#transport-selection)** defaults to shared memory plus UDP on
+  Linux and UDP-only on Windows and macOS, with enlarged socket buffers and an MTU-sized message
+  cap suited to camera frames and point clouds. Pass `transport_mode` to override it — including
+  `localhost_only`, which confines a same-host domain to shared memory and loopback UDP.
+- **[Discovery tuning](DETAILS.md#discovery-tuning)** controls the announcement burst and lease
+  durations. The defaults suit a mixed fleet; large deployments may want them longer.
+- **[Logging](DETAILS.md#logging)** goes to stdout and stderr unless you install a callback with
+  `set_log_callback`, which routes every message into your own logger.
+- **[XML profiles](DETAILS.md#xml-profiles)** let you configure Fast-DDS directly. A participant
+  configured that way keeps exactly what your profile asks for.
+- **[Discovering endpoints and known types](DETAILS.md#discovering-endpoints-and-known-types)**
+  reports remote publishers, subscribers and services as they appear, for tooling that has to
+  learn the network rather than be told about it.
 
 ## Request/Response
 
@@ -724,6 +488,7 @@ service.stop()
 - For both publish/subscribe and request/response to interoperate with ROS 2, either:
   - Keep the default `max_history_depth` on subscribers and services/requests, or
   - Configure ROS 2 QoS to use TRANSIENT_LOCAL durability on the ROS 2 publishers with appropriate history depth for better reliability.
+- **Raw camera images need `SensorDataQoS` on the ROS 2 side.** provizio_dds publishes `sensor_msgs::msg::Image` (`rt/provizio_camera` and `rt/provizio_freespace`) with a **BEST_EFFORT** writer by default. Reliability is an RxO policy, so a ROS 2 subscriber on the default (RELIABLE) QoS will not match such a publisher at all, and an RxO mismatch is a silent non-match rather than a logged error. Request `rclcpp::SensorDataQoS()` / `rclpy.qos.qos_profile_sensor_data` — the conventional ROS 2 profile for camera streams — or have the publisher pass an explicit `RELIABLE_RELIABILITY_QOS`. This is deliberate: raw images are being superseded by compressed images and by polygonal freespace. Every other type keeps a RELIABLE writer and is unaffected. See [DETAILS.md](DETAILS.md#ros-2-interoperability-raw-images-need-sensordataqos).
 - When running provizio_dds binaries in a shell with a **sourced ROS 2 environment** (`setup.bash`), note that ROS 2 distros bundle their own eProsima Fast-DDS. If its major.minor version matches the Fast-DDS bundled by provizio_dds (e.g. ROS 2 Lyrical ships Fast-DDS v3.6.1 while provizio_dds bundles v3.6.2 — both named `libfastdds.so.3.6`), the sourced `LD_LIBRARY_PATH` makes provizio_dds binaries load the ROS-bundled library. Fast-DDS doesn't guarantee ABI stability across patch releases, so this can break discovery or crash. To make an installed provizio_dds immune to it, build with `-DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS=ON` (Linux): installed binaries then link Fast-DDS by its fully-qualified name (e.g. `libfastdds.so.3.6.2.0`), which never collides with the ROS-bundled copy. Linking both provizio_dds and ROS 2 libraries into the *same process* is a different problem — see [provizio_radar_api_ros2](https://github.com/provizio/provizio_radar_api_ros2) for the namespace-isolation approach it requires.
 
 ## Reading and Creating PointCloud2 Messages
@@ -916,26 +681,3 @@ The C++ accumulation maths uses [Eigen](https://eigen.tuxfamily.org/) when YOUR 
 The localization source has its own extrinsics (sensor → ego frame), read by default from the same `rt/provizio_extrinsics` topic as the radars. For **odometry** the localization frame defaults to `provizio_radar_front_center`: radar-based odometry is published in the front-center radar's frame, so it shares that radar's calibration — the same `rt/provizio_extrinsics` transform is applied to both the odometry and that radar's point clouds. The localization extrinsics is **assumed identity until that frame's transform is received**; when it arrives (or later changes) any already-accumulated frames are **retroactively re-placed**, so none are lost. For **GNSS** (`NavSatFix`) the localization frame is instead learned from the first fix and, having no radar extrinsics, stays ego-relative (identity). When multiple localization sources share the topic, only the one whose `child_frame_id` (odometry) / `header.frame_id` (GNSS) matches `localization_frame_id` is used — the rest are dropped. Set `localization_frame_id` / `localization_extrinsics_topic` to override these defaults.
 
 For more details see [include/provizio/dds/accumulation.h](include/provizio/dds/accumulation.h) and [test/accumulation/accumulation_test.cpp](test/accumulation/accumulation_test.cpp).
-
-## XML Profiles
-
-As DDS allows for configuring many of its parameters, you can optionally define a custom XML profile and enable it via setting its path to environment variable `FASTDDS_DEFAULT_PROFILES_FILE` (renamed from `FASTRTPS_DEFAULT_PROFILES_FILE` in Fast-DDS 3.x). Make sure to set the `participant` tag's attribute `is_default_profile` to `true` to activate the profile automatically, f.e.:
-
-```XML
-<?xml version="1.0" encoding="UTF-8" ?>
-<profiles xmlns="http://www.eprosima.com">
-    <participant profile_name="my_custom_profile" is_default_profile="true">
-        <rtps>
-        ...
-        </rtps>
-    </participant>
-</profiles>
-```
-
-For more details, please refer to [Fast-DDS documentation](https://fast-dds.docs.eprosima.com/en/v3.6.2/fastdds/xml_configuration/xml_configuration.html).
-Please note that some of the changes may break compatibility between publishers and subscribers, unless applied on both sides.
-
-You may see how this functionality is used to activate Discovery-Server-based participants discovery in provizio_dds tests:
-
-- [test/congested_network_test/fast_dds_server_config.xml](test/congested_network_test/fast_dds_server_config.xml)
-- [test/congested_network_test/fast_dds_client_config.xml](test/congested_network_test/fast_dds_client_config.xml)

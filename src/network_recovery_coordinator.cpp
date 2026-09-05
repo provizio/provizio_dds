@@ -23,6 +23,7 @@
 #include <string>
 
 #include "detail/env_utils.h"
+#include "provizio/dds/detail/vpn_interfaces.h"
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/logging.h"
 
@@ -146,6 +147,9 @@ namespace provizio::dds::detail
         // section and emit the corresponding log line after we release.
         std::string init_error;
         std::string env_warning;
+        // The third deferred diagnostic, for the same reason as the two above: see
+        // current_snapshot, which cannot log for itself while this holds registry_mutex.
+        std::string snapshot_warning;
 
         {
             const std::lock_guard<std::mutex> lock{registry_mutex};
@@ -189,7 +193,12 @@ namespace provizio::dds::detail
                 {
                     safety_net_period = resolve_safety_net_period(env_warning);
                     monitor = std::make_unique<network_monitor>([this] { on_kernel_event(); });
-                    last_known_snapshot = capture_address_snapshot();
+                    // Through current_snapshot(), not capture_address_snapshot(), so a failed
+                    // read leaves the baseline UNSET (nullopt) instead of seeding the empty
+                    // set: seeding it would make the first successful read look like every
+                    // address arriving at once and rebuild every participant for nothing. Using
+                    // the same accessor as every other read is also what keeps the two in step.
+                    last_known_snapshot = current_snapshot(&snapshot_warning);
                     coalescer_thread = std::thread{[this] { coalescer_loop(); }};
                 }
                 catch (const std::exception &exception)
@@ -235,6 +244,10 @@ namespace provizio::dds::detail
         if (!env_warning.empty())
         {
             log_warning() << env_warning;
+        }
+        if (!snapshot_warning.empty())
+        {
+            log_warning() << snapshot_warning;
         }
         // Nothing is logged when the monitor starts successfully. That auto-recovery is
         // enabled, how many addresses it saw and how often it re-checks are this library's
@@ -308,6 +321,78 @@ namespace provizio::dds::detail
         safety_net_tick();
     }
 
+    void network_recovery_coordinator::force_enumeration_failure_for_test(const bool fail)
+    {
+        // Only what its name says: it makes the read fail, and touches nothing else. In
+        // particular it does NOT re-arm the once-per-streak warning (see current_snapshot),
+        // tempting though that is -- a test could then never observe the production re-arm,
+        // because no second failure streak is reachable without coming back through here and
+        // being handed a fresh latch either way. A hook that quietly repairs the state under
+        // test can only hide a regression in it.
+        forced_enumeration_failure_for_test = fail;
+    }
+
+    void network_recovery_coordinator::force_snapshot_for_test(std::optional<address_snapshot> snapshot)
+    {
+        // No lock, for the same reason as seed_last_known_snapshot_for_test: idle-only by
+        // contract, so nothing reads it concurrently.
+        forced_snapshot_for_test = std::move(snapshot);
+    }
+
+    std::optional<address_snapshot> network_recovery_coordinator::current_snapshot(std::string *deferred_warning)
+    {
+        // The forced failure joins the real one rather than returning early, so a test
+        // exercises everything a failed read does -- the diagnostic included, which is the
+        // only way to reach the callback re-entrancy this path has to survive.
+        bool enumeration_failed = forced_enumeration_failure_for_test;
+        address_snapshot snapshot;
+        if (!enumeration_failed)
+        {
+            if (forced_snapshot_for_test)
+            {
+                // Returned as the optional it already is: dereferencing it here only to have
+                // the return type wrap it again is what bugprone-optional-value-conversion
+                // objects to.
+                return forced_snapshot_for_test;
+            }
+            snapshot = capture_address_snapshot(&enumeration_failed);
+        }
+        if (enumeration_failed)
+        {
+            // Warned once per streak, not once per attempt: a poller asks every few
+            // seconds, and a host that has genuinely lost the ability to enumerate would
+            // otherwise fill the log with the same line for the life of the process. The
+            // exchange makes the "first of the streak" decision atomic, because this runs on
+            // whichever thread is reading the interfaces — the coalescer for a reset
+            // decision, the notification thread for a burst-start snapshot.
+            if (!enumeration_failure_reported.exchange(true, std::memory_order_relaxed))
+            {
+                constexpr const char *const message =
+                    "could not read this host's network interfaces; keeping the last known "
+                    "address set and making no participant rebuild decision until it can be read "
+                    "again (an unreadable interface list is not an interface change)";
+                if (deferred_warning != nullptr)
+                {
+                    // A caller holding a lifecycle lock takes the text and emits it once it
+                    // does not: the log callback is documented as free to create a
+                    // participant, which would re-enter register_participant and block on
+                    // the non-recursive registry_mutex this runs under. Every other
+                    // diagnostic on that path (init_error, env_warning) is deferred for the
+                    // same reason, and this is the one read that can fail on it -- the
+                    // macOS sysctl(NET_RT_IFLIST) race this feature exists to tolerate.
+                    *deferred_warning = message;
+                }
+                else
+                {
+                    log_warning() << message;
+                }
+            }
+            return std::nullopt;
+        }
+        enumeration_failure_reported.store(false, std::memory_order_relaxed);
+        return snapshot;
+    }
+
     void network_recovery_coordinator::seed_last_known_snapshot_for_test(const address_snapshot &snapshot)
     {
         // No lock: last_known_snapshot is single-writer state owned by the coalescer
@@ -352,12 +437,15 @@ namespace provizio::dds::detail
         // coalescer_mutex across, so capture outside it and then store under the lock.
         if (first_of_burst)
         {
-            auto start_snapshot = capture_address_snapshot();
+            // An unreadable interface list leaves the burst with no start snapshot rather
+            // than an empty one: run_reset() would otherwise see every address as having
+            // "returned" during the burst and rebuild for it.
+            auto start_snapshot = current_snapshot();
             const std::lock_guard<std::mutex> lock{coalescer_mutex};
             // Guard against a racing coalescer having already consumed this burst.
-            if (has_pending_burst && !burst_start_valid)
+            if (start_snapshot && has_pending_burst && !burst_start_valid)
             {
-                burst_start_snapshot = std::move(start_snapshot);
+                burst_start_snapshot = std::move(*start_snapshot);
                 burst_start_valid = true;
             }
         }
@@ -469,6 +557,31 @@ namespace provizio::dds::detail
         }
     }
 
+    void network_recovery_coordinator::adopt_first_readable_snapshot(const address_snapshot &new_snapshot)
+    {
+        last_known_snapshot = new_snapshot;
+
+        if (new_snapshot.empty())
+        {
+            // Nothing to bind, so nothing a rebuild could achieve -- the same judgement the
+            // added == 0 path below makes. A host that genuinely has no usable address reads
+            // exactly this (a container whose only device is a filtered-out veth), and so does
+            // one whose addresses arrive a moment later; either way the next change decides.
+            skipped_reset_count.fetch_add(1, std::memory_order_acq_rel);
+            return;
+        }
+
+        log_info() << "no interface baseline to compare against (the list could not be read at "
+                      "startup), so all "
+                   << new_snapshot.size()
+                   << " interface address(es) now visible are treated as new; resetting "
+                      "recovery-enabled participants";
+        // A real change re-arms bounded retrying, as in the paths below.
+        consecutive_retry_passes = 0;
+        retry_exhaustion_reported = false;
+        apply_reset(reset_scope::all);
+    }
+
     void network_recovery_coordinator::run_reset(const address_snapshot &burst_start, bool had_burst_start)
     {
         // last_known_snapshot is only mutated here (inside the coalescer
@@ -477,66 +590,123 @@ namespace provizio::dds::detail
         // BEFORE the coalescer thread is constructed, so no actual race
         // exists. Documented to forestall future readers wondering
         // whether the access pattern needs additional synchronisation.
-        const auto new_snapshot = capture_address_snapshot();
-
-        const bool end_changed = (new_snapshot != last_known_snapshot);
-        // Transient flap: the burst OPENED with a different DDS-interesting address
-        // set than last known (e.g. an address had just been removed) but the set is
-        // back to normal by the time the burst settles. An end-snapshot-only diff
-        // treats this as "nothing changed" and skips the rebuild — but the Fast-DDS
-        // sockets bound to that address were torn down while it was gone, so a rebuild
-        // is still required. (Container/veth/link-local churn can't trigger this: it is
-        // filtered out of BOTH the start and end snapshots by capture_address_snapshot.)
-        const bool transient_changed = had_burst_start && (burst_start != last_known_snapshot);
-
-        if (!end_changed && !transient_changed)
+        const auto captured = current_snapshot();
+        if (!captured)
         {
-            // Silent: a burst that changed nothing is a non-event. The counter below is what
-            // the tests observe.
+            // Could not read the interfaces — see current_snapshot. Deliberately does NOT
+            // count as a skipped reset: nothing was decided, and last_known_snapshot is
+            // left alone so the next readable snapshot is compared against the last one
+            // this actually saw.
+            return;
+        }
+        const auto &new_snapshot = *captured;
+
+        decide_and_apply(new_snapshot, burst_start, had_burst_start, change_source::kernel_event);
+    }
+
+    void network_recovery_coordinator::decide_and_apply(const address_snapshot &new_snapshot,
+                                                        const address_snapshot &burst_start, const bool had_burst_start,
+                                                        const change_source source)
+    {
+        if (!last_known_snapshot)
+        {
+            // No baseline to measure against: the read at startup failed, so every address
+            // now visible counts as new. Handled here rather than in each caller so both
+            // paths reach it, and so the counts below always have a baseline to subtract.
+            adopt_first_readable_snapshot(new_snapshot);
+            return;
+        }
+        const address_snapshot &last_known = *last_known_snapshot;
+        // Taken now, not read from last_known where the log lines need it: the branches
+        // below adopt the new set (assigning last_known_snapshot, which leaves the
+        // reference above dangling), so a future edit that logged after adopting would
+        // otherwise be reading freed memory.
+        const std::size_t previous_size = last_known.size();
+
+        // Three counts decide this, and the same three describe it in the log. Additions
+        // and removals are measured against the last set we rebuilt for; `returned` is
+        // measured against the start of this burst.
+        const auto count_missing_from = [](const address_snapshot &addresses, const address_snapshot &reference) {
+            return static_cast<std::size_t>(std::count_if(addresses.begin(), addresses.end(),
+                                                          [&reference](const address_snapshot::value_type &address) {
+                                                              return reference.find(address) == reference.end();
+                                                          }));
+        };
+        const std::size_t added = count_missing_from(new_snapshot, last_known);
+        const std::size_t removed = count_missing_from(last_known, new_snapshot);
+        // Transient flap: an address the host has NOW was missing when the burst opened,
+        // so it left and came back inside the debounce window. An end-snapshot-only diff
+        // treats that as "nothing changed" and skips the rebuild — but the Fast-DDS
+        // sockets bound to that address were torn down while it was gone, so a rebuild is
+        // still required. Only an event-driven backend can observe it; a poller, and the
+        // safety-net tick, pass no burst-start snapshot. (Container/veth/link-local churn
+        // can't trigger this: it is filtered out of BOTH the start and end snapshots by
+        // capture_address_snapshot.)
+        const std::size_t returned = had_burst_start ? count_missing_from(new_snapshot, burst_start) : 0U;
+
+        // Names the path that noticed the change, and nothing more. Worth saying for the
+        // safety net: a change that reached us without a kernel event means notifications
+        // were lost, which is the one thing that distinguishes a healthy monitor from a
+        // silently broken one in a log.
+        const char *const noticed_by = (source == change_source::safety_net)
+                                           ? " by the periodic safety-net check -- no kernel event reported it"
+                                           : "";
+
+        // A rebuild is worth doing only when the host has GAINED something to bind — a
+        // new address, or one that went away and came back. Addresses merely going away
+        // are handled below.
+        if (added == 0 && returned == 0)
+        {
+            if (removed == 0)
+            {
+                // Silent: a change that changed nothing is a non-event. The counter below is
+                // what the tests observe.
+                skipped_reset_count.fetch_add(1, std::memory_order_acq_rel);
+                // A burst that changed nothing does not clear a pending retry: the
+                // participant it refers to is still torn down, and the next safety-net
+                // tick is what will pick it up.
+                return;
+            }
+
+            // Addresses only went away. Rebuilding cannot bind what is gone, and it would
+            // tear down endpoints still working over the interfaces that remain — so the
+            // smaller set is adopted and nothing is rebuilt. This is not a lost signal: if
+            // an address comes back, even the very same one, it counts as `added` here (or
+            // as `returned` when it happens inside one burst) and the rebuild happens then,
+            // which is the moment it can actually achieve something. The cost of waiting is
+            // that this participant keeps announcing a locator that no longer answers until
+            // the next real change — cheaper than dropping every in-flight sample now.
+            log_info() << "network change detected" << noticed_by << ": +0 / -" << removed << " interface address(es) ("
+                       << previous_size << " -> " << new_snapshot.size()
+                       << "); not rebuilding for a loss alone -- will rebuild if address(es) return";
+            // Adopted so a return reads as a gain rather than as "no change".
+            last_known_snapshot = new_snapshot;
             skipped_reset_count.fetch_add(1, std::memory_order_acq_rel);
-            // A burst that changed nothing does not clear a pending retry: the
-            // participant it refers to is still torn down, and the next safety-net
-            // tick is what will pick it up.
             return;
         }
 
-        if (end_changed)
+        if (added != 0 || removed != 0)
         {
             // Quick diff summary for the log: counts of additions and removals
             // give a more useful one-liner than "old.size() → new.size()" which
             // could be the same even when contents fully differ.
-            std::size_t added = 0;
-            for (const auto &address : new_snapshot)
-            {
-                if (last_known_snapshot.find(address) == last_known_snapshot.end())
-                {
-                    ++added;
-                }
-            }
-            std::size_t removed = 0;
-            for (const auto &address : last_known_snapshot)
-            {
-                if (new_snapshot.find(address) == new_snapshot.end())
-                {
-                    ++removed;
-                }
-            }
-
-            log_info() << "network change detected: +" << added << " / -" << removed << " interface address(es) ("
-                       << last_known_snapshot.size() << " → " << new_snapshot.size()
+            log_info() << "network change detected" << noticed_by << ": +" << added << " / -" << removed
+                       << " interface address(es) (" << previous_size << " -> " << new_snapshot.size()
                        << "); resetting recovery-enabled participants";
         }
         else
         {
             // Transient: end-state matches last known (added/removed both 0), so log
             // the actual reason rather than a misleading "+0 / -0".
-            log_info() << "network change detected: transient interface change within the debounce window "
+            log_info() << "network change detected" << noticed_by
+                       << ": transient interface change within the debounce window "
                           "(a DDS-relevant address left and returned, end-state unchanged); "
                           "resetting recovery-enabled participants";
         }
 
         last_known_snapshot = new_snapshot;
-        // As in safety_net_tick: a real change re-arms bounded retrying.
+        // A real change re-arms bounded retrying: the reason a rebuild failed before may
+        // well be gone now, so an earlier give-up must not be permanent.
         consecutive_retry_passes = 0;
         retry_exhaustion_reported = false;
         apply_reset(reset_scope::all);
@@ -559,6 +729,22 @@ namespace provizio::dds::detail
                 }
             }
         }
+
+        // One enumeration of the host's VPN / tunnel interfaces for the whole pass rather
+        // than one per participant rebuilt: every participant here is being rebuilt for the
+        // SAME network change, so they should be configured for the same interface set, and
+        // asking the OS again for each of them costs an rtnetlink dump per participant to
+        // answer a question that has not changed in between.
+        const detail::scoped_vpn_blocklist_cache vpn_blocklist_cache;
+
+        // Filled HERE, before the first participant takes its reset lock, and not left to
+        // the first refresh that needs it. On Linux that call is an rtnetlink RTM_GETLINK
+        // dump with a receive timeout, and a participant's refresh runs inside
+        // reset_mutex held exclusively -- so priming it there would stall every concurrent
+        // publish(), take() and register_topic() on that participant for the length of a
+        // netlink round trip. Out here it blocks nobody: the participants are still live and
+        // unlocked. The result is what the cache above hands to all of them.
+        (void)detail::vpn_interface_blocklist_entries();
 
         std::size_t reset_participants = 0;
         std::size_t still_unrecovered = 0;
@@ -636,22 +822,27 @@ namespace provizio::dds::detail
         // 3. Re-verify the snapshot directly, catching any change no event reported —
         //    a dropped netlink datagram (ENOBUFS), an interface transition on a channel
         //    we do not subscribe to, or a change that raced the monitor's startup.
-        auto new_snapshot = capture_address_snapshot();
-        if (new_snapshot == last_known_snapshot)
+        const auto captured = current_snapshot();
+        if (!captured)
         {
-            // Deliberately silent: this runs on a timer for the life of the process.
+            return;  // Unreadable interfaces are not a change — see current_snapshot.
+        }
+        const auto &new_snapshot = *captured;
+        if (last_known_snapshot && new_snapshot == *last_known_snapshot)
+        {
+            // Deliberately silent, and deliberately not counted as a skipped reset: this
+            // runs on a timer for the life of the process, so an unchanged host would
+            // otherwise emit a line and move a counter once per period forever.
             return;
         }
 
-        log_info() << "network change detected by the periodic safety-net check — no kernel event reported it ("
-                   << last_known_snapshot.size() << " → " << new_snapshot.size()
-                   << " interface address(es)); resetting recovery-enabled participants";
-        last_known_snapshot = std::move(new_snapshot);
-        // A real change re-arms retrying: the reason a rebuild failed before may well be
-        // gone now, so the give-up above must not be permanent.
-        consecutive_retry_passes = 0;
-        retry_exhaustion_reported = false;
-        apply_reset(reset_scope::all);
+        // The same decision the event path makes, for the same reasons — including not
+        // rebuilding for a loss alone. The tick exists to catch changes whose events were
+        // never delivered, and such a change is no more deserving of a rebuild than one
+        // that arrived normally. It passes no burst-start snapshot: a periodic re-read
+        // cannot say what the host looked like when the change began, so a flap that
+        // started and ended between two ticks is invisible to it either way.
+        decide_and_apply(new_snapshot, address_snapshot{}, /*had_burst_start=*/false, change_source::safety_net);
     }
 
     bool network_recovery_coordinator::any_participant_needs_retry()

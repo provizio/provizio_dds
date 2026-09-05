@@ -52,20 +52,20 @@ endif(FAST_DDS_DEPENDENCIES)
 
 add_test(NAME python_pub_python_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_publisher.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_subscriber.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 add_test(NAME python_pub_python_sub_type_reuse COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher_type_reuse.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber_type_reuse.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_publisher_type_reuse.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_subscriber_type_reuse.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
 add_test(NAME python_pub_cpp_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_publisher.py"
     "\"$<TARGET_FILE:simplest_subscriber>\""
     WORKING_DIRECTORY "${TEST_PATH}"
 )
@@ -74,23 +74,23 @@ set_tests_properties(python_pub_cpp_sub PROPERTIES TIMEOUT 20)
 add_test(NAME cpp_pub_python_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "\"$<TARGET_FILE:simplest_publisher>\""
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_subscriber.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(cpp_pub_python_sub PROPERTIES TIMEOUT 20)
 
 add_test(NAME python_request_response COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_request_response_async COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_concurrent.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service_concurrent.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_async PROPERTIES TIMEOUT 30)
@@ -99,8 +99,8 @@ set_tests_properties(python_request_response_async PROPERTIES TIMEOUT 30)
 # existing x^2 services. Consecutive requests after an explicit wait_for_service():
 add_test(NAME python_request_response_service_client COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_service_client PROPERTIES TIMEOUT 90)
@@ -108,8 +108,8 @@ set_tests_properties(python_request_response_service_client PROPERTIES TIMEOUT 9
 # Many parallel requests (asyncio.gather) against the async service:
 add_test(NAME python_request_response_concurrent_service_client COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_concurrent.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_concurrent_service_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service_concurrent.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_concurrent_service_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_concurrent_service_client PROPERTIES TIMEOUT 90)
@@ -118,7 +118,7 @@ set_tests_properties(python_request_response_concurrent_service_client PROPERTIE
 add_test(NAME python_service_client_cpp_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "\"$<TARGET_FILE:request_response_service>\" serial_requests"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_service_client_cpp_service PROPERTIES TIMEOUT 90)
@@ -126,7 +126,7 @@ set_tests_properties(python_service_client_cpp_service PROPERTIES TIMEOUT 90)
 # Cross-compat: C++ service_client against the Python service.
 add_test(NAME cpp_service_client_python_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service.py"
     "\"$<TARGET_FILE:request_response_service_client>\""
     WORKING_DIRECTORY "${TEST_PATH}"
 )
@@ -144,36 +144,36 @@ set(PYTHON_RELIABILITY_DELAY_ARGS "--delay" "0.5")
 add_test(NAME python_request_response_reliability COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_times.py" ${PYTHON_RELIABILITY_DELAY_ARGS} "--timeout" "40" "128"
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_service.py \"\" {i} 1 {i}"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py \"\" {i} {i}"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_reliability_service.py \"\" {i} 1 {i}"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_reliability_client.py \"\" {i} {i}"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_reliability PROPERTIES TIMEOUT 2000) # Takes long by design
 
 add_test(NAME python_request_response_reliability_single_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_service.py _single_service 1 128 200"
-    "\"${PYTHON_EXECUTABLE}\" \"${CMAKE_SOURCE_DIR}/test/run_times.py\" 128 \"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_reliability_client.py _single_service {i} 200"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_reliability_service.py _single_service 1 128 200"
+    "\"${PYTHON_EXECUTABLE}\" \"${CMAKE_SOURCE_DIR}/test/run_times.py\" 128 \"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_reliability_client.py _single_service {i} 200"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_response_reliability_single_service PROPERTIES TIMEOUT 3500) # Takes long by design
 
 add_test(NAME python_request_response_ignore COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_ignore_service.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_ignore_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_ignore_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_ignore_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 add_test(NAME python_request_response_ignore_async COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_ignore_service_async.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_ignore_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_ignore_service_async.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_ignore_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
 add_test(NAME python_request_response_dual_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_dual_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_dual_service.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 # The test's deterministic floor is ~3 s (2 services + 5 concurrent requests
@@ -188,7 +188,7 @@ set_tests_properties(python_request_response_dual_service PROPERTIES TIMEOUT 60)
 add_test(NAME python_request_cpp_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "\"$<TARGET_FILE:request_response_service>\""
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_cpp_service PROPERTIES TIMEOUT 30)
@@ -196,7 +196,7 @@ set_tests_properties(python_request_cpp_service PROPERTIES TIMEOUT 30)
 add_test(NAME python_request_cpp_response_concurrent_requests_serial_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "\"$<TARGET_FILE:request_response_service>\""
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_concurrent_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_concurrent_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_cpp_response_concurrent_requests_serial_service PROPERTIES TIMEOUT 30)
@@ -204,14 +204,14 @@ set_tests_properties(python_request_cpp_response_concurrent_requests_serial_serv
 add_test(NAME python_request_cpp_service_concurrent COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "\"$<TARGET_FILE:request_response_concurrent_service>\" 5"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_concurrent_client.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_concurrent_client.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_request_cpp_service_concurrent PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_service_cpp_client COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service.py"
     "\"$<TARGET_FILE:request_response_client>\""
     WORKING_DIRECTORY "${TEST_PATH}"
 )
@@ -219,7 +219,7 @@ set_tests_properties(python_service_cpp_client PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_serial_service_cpp_concurrent_requests COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service.py"
     "\"$<TARGET_FILE:request_response_concurrent_requests>\""
     WORKING_DIRECTORY "${TEST_PATH}"
 )
@@ -227,39 +227,39 @@ set_tests_properties(python_serial_service_cpp_concurrent_requests PROPERTIES TI
 
 add_test(NAME python_service_cpp_requests_concurrent COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_request_response_service_concurrent.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_service_concurrent.py"
     "\"$<TARGET_FILE:request_response_concurrent_requests>\""
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_service_cpp_requests_concurrent PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_point_cloud2_test COMMAND
-    "${PYTHON_EXECUTABLE}" -q -X faulthandler ./point_cloud2_test.py
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline ./point_cloud2_test.py
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 set_tests_properties(python_point_cloud2_test PROPERTIES TIMEOUT 30)
 
 add_test(NAME python_publisher_no_leaks_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_publisher_no_leaks_test.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_publisher_no_leaks_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
 add_test(NAME python_subscriber_no_leaks_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_subscriber_no_leaks_test.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_subscriber_no_leaks_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
 add_test(NAME python_stop_subscriber_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./python_stop_subscriber_test.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_stop_subscriber_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
 add_test(NAME accumulation_test COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
-    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler ./accumulation_test.py"
+    "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./accumulation_test.py"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
@@ -273,10 +273,16 @@ add_test(NAME accumulation_test COMMAND
 set(_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV)
 foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         reset_refreshes_fastdds_interface_cache teardown_deferred
-        coalescer_resets_on_transient_flap snapshot_prefix_length
-        netmask_read_is_bounded netlink_binds_before_snapshot safety_net_env)
+        coalescer_resets_on_transient_flap no_rebuild_on_address_loss
+        unreadable_interfaces_are_not_a_change no_baseline_rebuilds_for_first_readable_list
+        rebuild_on_address_change snapshot_prefix_length
+        netmask_read_is_bounded linked_list_walk_advances
+        netlink_binds_before_snapshot safety_net_env
+        snapshot_policy_excludes_tunnel snapshot_policy_follows_transports
+        netlink_kinds_match_the_kernel listener_drain_reports_a_stall_until_it_ends
+        safety_net_retries_while_interfaces_are_unreadable)
     add_test(NAME python_network_recovery_${_nrt_case} COMMAND
-        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_network_recovery_test.py ${_nrt_case}
         WORKING_DIRECTORY "${TEST_PATH}"
     )
@@ -302,7 +308,7 @@ endforeach()
 foreach(_nrt_tick_case safety_net_detects_missed_change safety_net_reopens_dead_monitor
         safety_net_retries_failed_rebuild safety_net_retry_gives_up_after_bound)
     add_test(NAME python_network_recovery_${_nrt_tick_case} COMMAND
-        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_network_recovery_test.py ${_nrt_tick_case}
         WORKING_DIRECTORY "${TEST_PATH}"
     )
@@ -331,9 +337,9 @@ endforeach()
 # Discovered-endpoints / type-registry suite — Python mirror of the C++
 # test/discovered_endpoints/ subcommands.
 set(_PYTHON_DISCOVERED_ENDPOINTS_TEST_NAMES)
-foreach(_de_case type_registry discovers_writer kind_filter constructor_callback callback_receives_participant survives_reset unregister)
+foreach(_de_case type_registry discovers_writer kind_filter constructor_callback callback_receives_participant survives_reset unregister teardown_does_not_spin)
     add_test(NAME python_discovered_endpoints_${_de_case} COMMAND
-        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_discovered_endpoints_test.py ${_de_case}
         WORKING_DIRECTORY "${TEST_PATH}"
     )
@@ -364,7 +370,7 @@ endforeach()
 set(_PYTHON_MATCH_PUBLISHER_TEST_NAMES)
 foreach(_mp_case deferral adopts_reliable adopts_best_effort explicit_best_effort explicit_reliable participant_dropped heterogeneous_rederive)
     add_test(NAME python_match_publisher_default_${_mp_case} COMMAND
-        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_match_publisher_default_test.py ${_mp_case}
         WORKING_DIRECTORY "${TEST_PATH}"
     )
@@ -380,7 +386,7 @@ endforeach()
 set(_PYTHON_DISCOVERY_TUNING_TEST_NAMES)
 foreach(_dt_case defaults env_overrides env_invalid multi_participant)
     add_test(NAME python_discovery_tuning_${_dt_case} COMMAND
-        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_discovery_tuning_test.py ${_dt_case}
         WORKING_DIRECTORY "${TEST_PATH}"
     )
@@ -401,12 +407,53 @@ endforeach()
 set(_PYTHON_TRANSPORT_TUNING_TEST_NAMES)
 foreach(_tt_case defaults env_override env_invalid)
     add_test(NAME python_transport_tuning_${_tt_case} COMMAND
-        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_transport_tuning_test.py ${_tt_case}
         WORKING_DIRECTORY "${TEST_PATH}"
     )
     list(APPEND _PYTHON_TRANSPORT_TUNING_TEST_NAMES python_transport_tuning_${_tt_case})
     set_tests_properties(python_transport_tuning_${_tt_case} PROPERTIES TIMEOUT 30)
+endforeach()
+
+# Keeping VPN / tunnel interfaces out of the DDS transports — Python mirror of the
+# C++ test/vpn_interfaces/ subcommands: the interface classifier, the generated
+# transport profile and its once-per-configuration loading, that a participant
+# configured with an interface blocklist still communicates, the
+# PROVIZIO_DDS_ALLOW_VPN_INTERFACES override, and the matching exclusion from
+# network-recovery change detection. Each subcommand is its own ctest entry so
+# per-case failure stays isolated — and because the override is parsed once per
+# process, so a case can set it before anything reads it.
+set(_PYTHON_VPN_INTERFACES_TEST_NAMES)
+foreach(_vpn_case classifier transports_profile profile_loaded_once profile_limit
+        profile_route_honours_process_transports leaves_caller_profile_alone
+        participant_communicates blocklist_read_failure_keeps_exclusion
+        blocklist_read_failure_reports_to_change_detection
+        interface_kind_lookup_failure_reported
+        allowed_read_failure_keeps_exclusion
+        allowed_read_failure_reports_to_change_detection
+        profile_forgotten_when_tunnel_gone read_failure_flags_are_per_thread
+        allowed_interfaces_include_loopback_on_windows
+        exclusion_report_names_netmask_filtering caller_takeover_forgets_profile
+        profile_cache_follows_the_interfaces
+        override_all override_named override_unmatched_names_reported
+        override_all_matched_is_quiet unmatched_name_survives_a_failed_profile_readback
+        no_op_with_builtin_transports_env
+        caller_builtin_transports_matching_ours env_xml_profile_honoured_per_participant
+        snapshot_excludes_vpn
+        snapshot_excludes_vpn_ipv6 unreadable_interfaces_still_create_participant)
+    add_test(NAME python_vpn_interfaces_${_vpn_case} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
+        ./python_vpn_interfaces_test.py ${_vpn_case}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    list(APPEND _PYTHON_VPN_INTERFACES_TEST_NAMES python_vpn_interfaces_${_vpn_case})
+    # participant_communicates waits for a match and a delivered sample; the rest
+    # only enumerate interfaces or build a profile string and return near-instantly.
+    if(_vpn_case STREQUAL "participant_communicates")
+        set_tests_properties(python_vpn_interfaces_${_vpn_case} PROPERTIES TIMEOUT 90)
+    else()
+        set_tests_properties(python_vpn_interfaces_${_vpn_case} PROPERTIES TIMEOUT 30)
+    endif()
 endforeach()
 
 # Dead-owner shared-memory cleanup — Python mirror of the C++ test/shm_cleanup/
@@ -422,7 +469,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     foreach(_sc_case reclaims_synthetic age_guard kill_switch leaves_other_files_alone
                      rejects_planted_lock_files rate_limited reclaims_dead_participant spares_the_living)
         add_test(NAME python_shm_cleanup_${_sc_case} COMMAND
-            "${PYTHON_EXECUTABLE}" -q -X faulthandler
+            "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
             ./python_shm_cleanup_test.py ${_sc_case}
             WORKING_DIRECTORY "${TEST_PATH}"
         )
@@ -447,20 +494,40 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                          RESOURCE_LOCK provizio_dds_shm_cleanup)
 endif()
 
-# Cross-language parity of the large-sample QoS default overrides: the Python
-# registration must cover the C++ qos_defaults<T> specialization list exactly (the
-# header, passed from the source tree, is the source of truth). Import-only — no
-# DDS participants — so it returns in milliseconds.
-add_test(NAME python_large_sample_qos_parity COMMAND
-    "${PYTHON_EXECUTABLE}" -q -X faulthandler
+# Cross-language parity of the per-type QoS default overrides: the Python registration
+# must cover the C++ qos_defaults<T> specialization list exactly AND register the same
+# values for every type. Both source files are passed from the source tree: the header
+# for the list of specializations, and qos_defaults_checks.cpp for the values it already
+# pins in static_asserts — so the C++ compiler, not a regex, is what keeps those values
+# in step with the header. Import-only — no DDS participants — so it returns in
+# milliseconds.
+add_test(NAME python_per_type_qos_parity COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
     ./python_qos_parity_test.py "${CMAKE_SOURCE_DIR}/include/provizio/dds/qos_defaults.h"
+    "${CMAKE_SOURCE_DIR}/src/qos_defaults_checks.cpp"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 if(WIN32)
-    set_tests_properties(python_large_sample_qos_parity PROPERTIES TIMEOUT 30
+    set_tests_properties(python_per_type_qos_parity PROPERTIES TIMEOUT 30
         ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
 else()
-    set_tests_properties(python_large_sample_qos_parity PROPERTIES TIMEOUT 30)
+    set_tests_properties(python_per_type_qos_parity PROPERTIES TIMEOUT 30)
+endif()
+
+# Cross-language parity of the VPN / tunnel classifier: the same table of interface
+# names is put to both languages' classifiers and the verdicts must match, so a vendor
+# needle or prefix rule added on one side only is caught here rather than by two hosts
+# disagreeing about one tunnel in the field. Import-only plus one short subprocess.
+add_test(NAME python_vpn_classifier_parity COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
+    ./vpn_classifier_parity_test.py "$<TARGET_FILE:vpn_interfaces_test>"
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+if(WIN32)
+    set_tests_properties(python_vpn_classifier_parity PROPERTIES TIMEOUT 60
+        ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
+else()
+    set_tests_properties(python_vpn_classifier_parity PROPERTIES TIMEOUT 60)
 endif()
 
 # Crash-safety of throwing user callbacks (Python mirror of the C++
@@ -469,7 +536,7 @@ endif()
 # service. Each subcommand is its own ctest entry.
 foreach(_cbe_case on_data on_has_publisher_changed on_has_subscriber_changed service_sync service_async)
     add_test(NAME python_callback_exceptions_${_cbe_case} COMMAND
-        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_callback_exceptions_test.py ${_cbe_case}
         WORKING_DIRECTORY "${TEST_PATH}"
     )
@@ -488,7 +555,7 @@ endforeach()
 # ENVIRONMENT with PATH alone, which would erase our env-var override.
 function(_python_nr_env_test name case_name env_value)
     add_test(NAME ${name} COMMAND
-        "${PYTHON_EXECUTABLE}" -q -X faulthandler
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_network_recovery_test.py ${case_name}
         WORKING_DIRECTORY "${TEST_PATH}"
     )
@@ -513,7 +580,7 @@ _python_nr_env_test(python_network_recovery_env_garbage env_garbage "banana")
 # Written out rather than routed through _python_nr_env_test because it overrides a
 # different variable.
 add_test(NAME python_network_recovery_extra_interfaces_env COMMAND
-    "${PYTHON_EXECUTABLE}" -q -X faulthandler
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
     ./python_network_recovery_test.py extra_interfaces_env
     WORKING_DIRECTORY "${TEST_PATH}"
 )
@@ -524,12 +591,27 @@ endif()
 set_tests_properties(python_network_recovery_extra_interfaces_env
     PROPERTIES TIMEOUT 30 ENVIRONMENT "${_extra_if_env}")
 
+# The override case needs PROVIZIO_DDS_ALLOW_VPN_INTERFACES set before the process starts:
+# it is parsed once per process, on first use, which is inside the very call the case
+# asserts on. Its no-override twin runs in the plain list above.
+add_test(NAME python_network_recovery_snapshot_policy_honours_override COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
+    ./python_network_recovery_test.py snapshot_policy_honours_override
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set(_allow_vpn_env "PROVIZIO_DDS_ALLOW_VPN_INTERFACES=1")
+if(WIN32)
+    list(APPEND _allow_vpn_env "PATH=${PROVIZIO_DDS_TEST_PATH}")
+endif()
+set_tests_properties(python_network_recovery_snapshot_policy_honours_override
+    PROPERTIES TIMEOUT 30 ENVIRONMENT "${_allow_vpn_env}")
+
 # 1.10.x Python API source-compat: ensures `ReturnCode_t.RETCODE_OK`,
 # `pub_sub_type.getName()`, and other camelCase / enum-class spellings
 # carried over from Fast-DDS-python 1.x still resolve after the 2.x
 # migration. Pure import-level checks, no DDS network activity.
 add_test(NAME legacy_api_compat_test COMMAND
-    "${PYTHON_EXECUTABLE}" -q -X faulthandler ./legacy_api_compat_test.py
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline ./legacy_api_compat_test.py
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
@@ -563,7 +645,7 @@ endif()
 
 if(CROSS_VERSION_COMPAT_TEST_ENABLED)
     add_test(NAME cross_version_compat_test COMMAND
-        "${PYTHON_EXECUTABLE}" -q -X faulthandler ./cross_version_compat_test.py
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline ./cross_version_compat_test.py
         WORKING_DIRECTORY "${TEST_PATH}"
     )
     # `SKIPPED:` is the marker the test prints when `PROVIZIO_DDS_LEGACY_PYTHON`
@@ -593,10 +675,14 @@ else()
     # detects a genuine hang/regression while tolerating the slower containers.
     set_tests_properties(python_pub_python_sub PROPERTIES TIMEOUT 40)
     set_tests_properties(python_pub_python_sub_type_reuse PROPERTIES TIMEOUT 40)
+    # 60, as on Windows, and for the same reason the pub/sub budgets above were raised:
+    # these two spend ~25 s by design (the service waits out its request budget and then
+    # sleeps), so 30 left about five seconds of margin -- which a jetson runner duly
+    # consumed, failing a test whose assertions had already passed.
     set_tests_properties(
         python_request_response_ignore
         python_request_response_ignore_async
-        PROPERTIES TIMEOUT 30)
+        PROPERTIES TIMEOUT 60)
 endif()
 
 if(WIN32)
@@ -606,6 +692,7 @@ if(WIN32)
         ${_PYTHON_MATCH_PUBLISHER_TEST_NAMES}
         ${_PYTHON_DISCOVERY_TUNING_TEST_NAMES}
         ${_PYTHON_TRANSPORT_TUNING_TEST_NAMES}
+        ${_PYTHON_VPN_INTERFACES_TEST_NAMES}
         ${_PYTHON_CALLBACK_EXCEPTIONS_TEST_NAMES}
         python_pub_python_sub python_pub_python_sub_type_reuse
         python_pub_cpp_sub cpp_pub_python_sub
@@ -657,5 +744,6 @@ set_tests_properties(
     python_request_response_ignore_async
     PROPERTIES RESOURCE_LOCK provizio_dds_test_request_response_ignore)
 
-# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
-provizio_dds_scale_test_timeouts()
+# Scale this directory's test timeouts under a sanitizer, and let a stuck test report
+# itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
+provizio_dds_finalize_tests()

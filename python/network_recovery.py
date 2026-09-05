@@ -46,6 +46,7 @@ burst debounce (quiet period) on the netlink backend — is configurable via the
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import errno
 import math
@@ -60,7 +61,7 @@ import threading
 import time
 import weakref
 from enum import Enum
-from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
+from typing import Any, Callable, Collection, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +131,14 @@ def set_log_callback(callback: Optional[LogCallback]) -> Optional[LogCallback]:
     The callback may be invoked from the network-recovery monitor thread or
     from a participant reset path. Implementations should be brief and
     reentrant; do any heavy work in their own background thread.
+
+    A callback may use provizio_dds entities that already exist -- publishing
+    the line onto a DDS topic is a supported use. It must NOT create or destroy
+    a publisher, subscriber, service or client: some diagnostics are emitted
+    while a participant's registration lock is held, and every endpoint
+    constructor and destructor takes that same non-reentrant lock, so doing so
+    from the callback deadlocks the calling thread. Creating a domain
+    participant is fine. This is the same contract the C++ ``logging.h`` states.
     """
 
     global _log_callback
@@ -343,6 +352,43 @@ def refresh_fastdds_interface_cache() -> bool:
 AddressSnapshot = FrozenSet[Tuple[str, str, int]]
 
 
+# Whether the current run of unreadable-interface failures has been reported, so the
+# warning is emitted once per streak rather than once per attempt (a poller asks every few
+# seconds). Cleared by the first successful read.
+_enumeration_failure_reported = False
+
+
+def _try_capture_address_snapshot() -> "Optional[AddressSnapshot]":
+    """The current address snapshot, or ``None`` when the host's interfaces could not be
+    read at all.
+
+    The distinction matters because an empty snapshot is a legitimate reading — a container
+    whose only device is a filtered-out veth reports exactly that — so a failed read that
+    returned one would be taken for every address disappearing: every participant rebuilt
+    for nothing, then rebuilt again once the next read succeeds, with any in-flight
+    request/response lost to it. Mirrors
+    ``network_recovery_coordinator::current_snapshot`` in
+    src/network_recovery_coordinator.cpp."""
+    global _enumeration_failure_reported
+
+    try:
+        snapshot = _capture_address_snapshot()
+    except Exception as ex:
+        if not _enumeration_failure_reported:
+            _enumeration_failure_reported = True
+            _emit_log(
+                LogLevel.WARNING,
+                f"could not read this host's network interfaces ({ex}); keeping the last "
+                f"known address set and making no participant rebuild decision until it "
+                f"can be read again (an unreadable interface list is not an interface "
+                f"change)",
+            )
+        return None
+
+    _enumeration_failure_reported = False
+    return snapshot
+
+
 def _capture_address_snapshot() -> AddressSnapshot:
     """Capture the host's current 'DDS-interesting' interface→address set.
 
@@ -365,8 +411,9 @@ def _capture_address_snapshot() -> AddressSnapshot:
       - Names matching Docker / Kubernetes / LXC conventions
         (docker*, br-*, cni*, kube*, lxc*, flannel*, weave*, veth*).
       - Linux: container / virtual interface kinds (bridge, veth, dummy, vxlan,
-        macvlan, ipvlan). Tunnel kinds are deliberately NOT excluded — a VPN
-        endpoint routinely carries real DDS traffic.
+        macvlan, ipvlan). Tunnel kinds are handled by the VPN filter instead
+        (see :func:`_excluded_as_vpn_interface`), so one environment variable
+        governs both change detection and the transports.
       - macOS: Apple-internal NICs (utun, awdl, llw, gif, stf, anpi, ap[0-9]).
 
     Windows (via GetAdaptersAddresses):
@@ -375,7 +422,13 @@ def _capture_address_snapshot() -> AddressSnapshot:
 
     Interfaces named in ``PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES`` bypass
     the name / kind / adapter-type heuristics above — see
-    :func:`_force_included_interfaces`.
+    :func:`_force_included_interfaces`. They do NOT bypass the VPN filter;
+    ``PROVIZIO_DDS_ALLOW_VPN_INTERFACES`` is the only knob for that.
+
+    VPN / overlay-tunnel interfaces are excluded unless
+    ``PROVIZIO_DDS_ALLOW_VPN_INTERFACES`` re-admits them: they are kept out of the
+    DDS transports too, so their address churn can no longer change any locator
+    and rebuilding participants over it would be pure disruption.
 
     Returns an empty snapshot if the OS call fails or the host has no
     operationally-up non-loopback interface.
@@ -422,13 +475,316 @@ _LINUX_NAME_PREFIXES = (
 # src/address_snapshot_linux.cpp. Physical Ethernet / Wi-Fi have no kind attribute
 # and fall through.
 #
-# Tunnel kinds ("tun", "ip6tnl") are deliberately absent: a VPN or tunnel endpoint
-# routinely carries real DDS traffic and, unlike container plumbing, is not a churn
-# source (libvirt's per-VM vnetN devices are of kind tun but hold no address of
-# their own, so they never enter the snapshot anyway).
+# Tunnel kinds ("tun", "ip6tnl") are deliberately absent HERE because they are
+# handled by the dedicated VPN filter below (_excluded_as_vpn_interface), which the
+# PROVIZIO_DDS_ALLOW_VPN_INTERFACES override flows through.
 _LINUX_EXCLUDED_KINDS = frozenset(
     {"bridge", "veth", "dummy", "vxlan", "macvlan", "ipvlan"}
 )
+
+
+# VPN / overlay-tunnel identification. Kept out of the DDS transports by default —
+# see include/provizio/dds/detail/vpn_interfaces.h for the full rationale, in
+# short: Fast-DDS announces an address on every interface it can bind, a writer
+# sends every sample to ALL of a matched reader's announced locators, so two hosts
+# that share a LAN and are both on a VPN exchange every sample twice — once over
+# the LAN and once through the tunnel, which on a metered cellular uplink is
+# charged for. A VPN can never be the path that *establishes* DDS communication
+# (discovery is link-local multicast and no VPN carries multicast), so excluding
+# one only ever removes a duplicate.
+#
+# Classification is by interface identity, never by address range: 100.64.0.0/10
+# would catch Tailscale, but it is the RFC 6598 carrier-NAT range that a cellular
+# uplink — and therefore a peer's real LAN interface behind such a router —
+# legitimately holds. Mirrors src/vpn_interfaces.cpp.
+#
+# Distinctive vendor words, matched ANYWHERE in the string. They are long and
+# specific enough that a physical NIC's name or description cannot contain one,
+# which is what makes free substring matching safe here — and necessary, since
+# Windows reports things like "OpenVPN TAP-Windows6" and "Tailscale Tunnel" where
+# the identifying word is not at the start.
+_VPN_VENDOR_NEEDLES = (
+    "tailscale",  # Tailscale
+    "wireguard",  # WireGuard (incl. the WireGuard NT Windows adapter)
+    "openvpn",  # OpenVPN
+    "zerotier",  # ZeroTier
+)
+
+# Generic tunnel conventions, matched only as a PREFIX. Anchoring matters: as free
+# substrings these are short enough to appear inside an unrelated vendor string —
+# "NETGEAR WG111v3 Wireless USB Adapter" contains "wg" — and a false positive is
+# the worst outcome this feature can produce, since it would drop ALL DDS traffic
+# on a real interface, where a false negative merely leaves the duplicate traffic
+# this exists to remove. Prefix form still covers every convention in use: tun0,
+# tap0, utun3, ipsec1, wg0, and Windows' own "TAP-Windows Adapter V9" /
+# "Tunnel adapter ...".
+_VPN_NAME_PREFIXES = (
+    "utun",  # macOS user-space tunnel (VPN, IPsec)
+    "ipsec",  # IPsec / strongSwan
+    "tun",  # OpenVPN & friends, L3; also "Tunnel adapter ..." on Windows
+    "tap",  # OpenVPN & friends, L2; also "TAP-Windows ..." on Windows
+    "wg",  # WireGuard device convention
+    # The two kernel tunnels macOS names itself. Linux's equivalents (ipip, sit, gre) are
+    # caught by their rtnetlink kind instead; macOS reports no kind, so the name is the only
+    # signal there is. They must be classified here and not only dropped from the address
+    # snapshot: the snapshot drops exactly what the transports refuse to bind, and an
+    # interface excluded from one but bound by the other is the disagreement the snapshot
+    # contract says must never happen.
+    "gif",  # generic IPv4/IPv6-in-IP tunnel (gif0)
+    "stf",  # 6to4 tunnel (stf0)
+)
+
+# Tunnel forms as Windows' own strings spell them, matched as a PREFIX of a
+# driver-supplied description. Whole words, unlike the device conventions above: that
+# is what lets them be applied to a vendor string at all (see _is_vpn_description --
+# a description beginning "WG111v3" is a NETGEAR radio, not a WireGuard device).
+_VPN_DESCRIPTION_PREFIXES = (
+    "tap-windows",  # OpenVPN's TAP driver: "TAP-Windows Adapter V9"
+    "tunnel adapter",  # Windows' own naming: "Tunnel adapter Teredo"
+)
+
+# IFLA_INFO_KIND values that denote an overlay or tunnel device. The kind is the
+# reliable half of the signal on Linux: it survives renaming (a wireguard device
+# called office0) and covers tunnels that follow no naming convention (xfrm, vti).
+_LINUX_VPN_KINDS = frozenset(
+    {
+        "tun",
+        "wireguard",
+        "xfrm",
+        "vti",
+        "vti6",
+        "ipip",
+        "ip6tnl",
+        "gre",
+        "gretap",
+        "ip6gre",
+        "sit",
+    }
+)
+
+# "zt" is deliberately absent from the lists above: as a two-letter substring it
+# would match far too much of a vendor string, so ZeroTier's device convention is
+# matched only as a name prefix plus its eight-character node-derived suffix
+# (ztppmkbrz2), which no physical NIC name collides with.
+_ZEROTIER_NAME_PREFIX = "zt"
+_ZEROTIER_NAME_SUFFIX_LENGTH = 8
+
+_ALLOW_VPN_INTERFACES_ENV = "PROVIZIO_DDS_ALLOW_VPN_INTERFACES"
+_ALLOW_VPN_KEYWORDS = ("1", "true", "yes", "on", "all")
+# Values documented as leaving the default in place. Recognised explicitly rather than left
+# to match nothing -- see _allow_vpn_override.
+_ALLOW_VPN_INERT_VALUES = frozenset({"0", "false", "off", "no"})
+_allow_vpn_cache: "Optional[Tuple[bool, FrozenSet[str]]]" = None
+_allow_vpn_lock = threading.Lock()
+
+
+def _lower_ascii(text: str) -> str:
+    """Lower-case ASCII letters only, leaving every other code point alone.
+
+    ``str.lower()`` is Unicode-aware and can even change a string's length, which would
+    make the classifier and the allow list disagree with src/vpn_interfaces.cpp'
+    to_lower_ascii on a non-ASCII Windows friendly name. These are contractual mirrors,
+    so the folding has to match."""
+    return "".join(
+        chr(ord(char) + 32) if "A" <= char <= "Z" else char for char in text
+    )
+
+
+def _split_comma_separated(raw: str) -> List[str]:
+    """Entries of a comma-separated environment value, ASCII whitespace trimmed off each
+    and empty ones dropped, so that ``"br0, virbr2"`` behaves like ``"br0,virbr2"`` and a
+    trailing comma contributes no unmatchable name.
+
+    Shared by every PROVIZIO_DDS_* list this module reads, and trimming exactly the ASCII
+    set that ``split_comma_separated`` in src/detail/env_utils.h trims -- ``str.strip()``
+    would also remove Unicode whitespace, which is the kind of quiet difference that makes
+    two contractual mirrors disagree about one host's configuration."""
+    trimmed = (entry.strip(" \t\r\n") for entry in raw.split(","))
+    return [entry for entry in trimmed if entry]
+
+
+def _is_zerotier_device_name(lowered: str) -> bool:
+    """Whether a lower-cased name is a ZeroTier device (zt + 8 alphanumerics)."""
+    if len(lowered) != len(_ZEROTIER_NAME_PREFIX) + _ZEROTIER_NAME_SUFFIX_LENGTH:
+        return False
+    if not lowered.startswith(_ZEROTIER_NAME_PREFIX):
+        return False
+    # ASCII [0-9a-z] only, exactly as src/vpn_interfaces.cpp checks it: str.isalnum()
+    # would additionally accept non-ASCII digits and letters, and the two
+    # implementations are contractual mirrors.
+    return all(
+        "0" <= char <= "9" or "a" <= char <= "z"
+        for char in lowered[len(_ZEROTIER_NAME_PREFIX):]
+    )
+
+
+def _is_vpn_interface_name(name: str) -> bool:
+    """Whether an interface name looks like a VPN / overlay tunnel endpoint.
+
+    Matched against the name the platform reports: the device name on POSIX
+    (tailscale0, wg0, utun3), and the adapter's friendly name or description on
+    Windows, where the device name is a GUID and carries no hint.
+
+    Deliberately NOT matched: ``ppp`` (a PPP link is a real WAN uplink — cellular
+    modems and DSL — not an overlay), bridges (br0 / br-lan can be the only
+    interface a vehicle PC carries DDS on) and container plumbing (docker0,
+    veth*), whose traffic is genuinely local and free."""
+    lowered = _lower_ascii(name)
+    if _is_zerotier_device_name(lowered):
+        return True
+    if any(needle in lowered for needle in _VPN_VENDOR_NEEDLES):
+        return True
+    return lowered.startswith(_VPN_NAME_PREFIXES)
+
+
+def _is_vpn_product_name(name: str) -> bool:
+    """Whether a string names a VPN *product* — the vendor half of
+    :func:`_is_vpn_interface_name`, without the generic tun / tap / wg prefixes.
+
+    For strings a user can rename, which on Windows means the adapter's friendly name.
+    Renaming a real NIC to something starting with one of those prefixes ("WG-LAN")
+    would otherwise drop it from the transports and take all of that host's DDS traffic
+    with it. Mirrors is_vpn_product_name in src/vpn_interfaces.cpp."""
+    lowered = _lower_ascii(name)
+    return any(needle in lowered for needle in _VPN_VENDOR_NEEDLES)
+
+
+def _is_vpn_description(description: str) -> bool:
+    """Whether a driver-supplied adapter description names a tunnel.
+
+    A third question, between the other two, and Windows' alone: a description is a
+    vendor string rather than a device name, so the short conventions
+    :func:`_is_vpn_interface_name` anchors -- tun, tap, wg -- match real hardware on it.
+    NETGEAR's WG series is the example that matters: a description reading "WG111v3
+    54Mbps Wireless USB 2.0 Adapter" begins with "wg", and taking it for a tunnel would
+    blocklist that host's only NIC and every address on it.
+
+    Matched instead: a VPN vendor's name anywhere in the string, plus the two forms
+    Windows itself uses to describe a tunnel, which are whole words no model number
+    begins with. Mirrors is_vpn_description in src/vpn_interfaces.cpp."""
+    lowered = _lower_ascii(description)
+    if any(needle in lowered for needle in _VPN_VENDOR_NEEDLES):
+        return True
+    return lowered.startswith(_VPN_DESCRIPTION_PREFIXES)
+
+
+def _is_vpn_interface_kind(kind: str) -> bool:
+    """Whether an rtnetlink IFLA_INFO_KIND identifies a VPN / tunnel device.
+    Physical Ethernet and Wi-Fi report no kind, so an empty kind never matches."""
+    return bool(kind) and kind in _LINUX_VPN_KINDS
+
+
+def _allow_vpn_override() -> "Tuple[bool, FrozenSet[str]]":
+    """``(allow_all, allowed_names)`` parsed from PROVIZIO_DDS_ALLOW_VPN_INTERFACES.
+
+    Read exactly once per process, like every other PROVIZIO_DDS_* resolution, so
+    the transports, the change-detection snapshot and every rebuilt participant
+    agree for the process' lifetime. Names come back lower-cased, because that is
+    how the classifier they have to match compared them."""
+    global _allow_vpn_cache
+    with _allow_vpn_lock:
+        if _allow_vpn_cache is not None:
+            return _allow_vpn_cache
+        raw = os.environ.get(_ALLOW_VPN_INTERFACES_ENV, "")
+        allow_all = False
+        names = set()
+        for entry in _split_comma_separated(raw):
+            lowered_entry = _lower_ascii(entry)
+            if lowered_entry in _ALLOW_VPN_KEYWORDS:
+                allow_all = True
+            elif lowered_entry in _ALLOW_VPN_INERT_VALUES:
+                # Documented as leaving the default in place, so dropped rather than kept as
+                # names that happen to match nothing: kept, they would have
+                # take_unmatched_vpn_allow_override_names report a deliberately inert
+                # setting as a typo on every host with a tunnel up.
+                pass
+            else:
+                # Everything that is neither a blanket keyword nor one of the inert
+                # values above is an interface name.
+                #
+                # Stored lower-cased, and compared against a lower-cased name below:
+                # the classifier that decided this was a tunnel lower-cases too, and on
+                # Windows the identity it classified is the adapter's friendly name or
+                # description ("Tailscale", "WireGuard Tunnel"). Matching the raw
+                # strings would make PROVIZIO_DDS_ALLOW_VPN_INTERFACES=tailscale
+                # classify the adapter as a VPN and then fail to re-admit it — an escape
+                # hatch that silently does nothing.
+                names.add(lowered_entry)
+        _allow_vpn_cache = (allow_all, frozenset(names))
+        return _allow_vpn_cache
+
+
+# Which PROVIZIO_DDS_ALLOW_VPN_INTERFACES names have actually re-admitted an interface,
+# and whether the mismatch between those and the names given has been reported. Kept apart
+# from _allow_vpn_cache, which is immutable once parsed: this is what the classifier learns
+# as it runs, and it is the only evidence that a name given means anything on this host.
+_matched_vpn_override_names: "Set[str]" = set()
+_unmatched_vpn_override_reported = False
+_matched_vpn_override_lock = threading.Lock()
+
+
+def take_unmatched_vpn_allow_override_names() -> "Tuple[str, ...]":
+    """The ``PROVIZIO_DDS_ALLOW_VPN_INTERFACES`` names that have re-admitted nothing,
+    lower-cased and sorted; empty when every name given has matched an interface this
+    process classified as a tunnel, when the variable names none, or when it was set to a
+    blanket keyword.
+
+    Exists because such a name is silent otherwise. ``PROVIZIO_DDS_ALLOW_VPN_INTERFACES=
+    tailscale`` on a host whose device is ``tailscale0`` -- or a Windows adapter named
+    under its device identity rather than the friendly name the classifier saw -- leaves
+    the tunnel excluded for the life of the process, exactly as if the variable had never
+    been set, and the deployment that needed DDS over the tunnel silently does not get it.
+
+    "Matched" means the name re-admitted an interface that WAS classified as a tunnel,
+    which is the only thing the variable can do; a name that matches a real but ordinary
+    interface counts as unmatched, since naming it changes nothing either way.
+
+    Takes: the names come back at most once per process, so a caller need not latch. Only a
+    call that returns something spends that, so a host where every name matched leaves the
+    report available for whichever participant later finds one that did not. Ask only where
+    the answer is actionable, i.e. AFTER an enumeration that classified this host's
+    interfaces and only where the exclusion actually excluded something; asking first would
+    report every name as unmatched, because none of them has been offered an interface yet.
+    Mirrors take_unmatched_vpn_allow_override_names in src/vpn_interfaces.cpp."""
+    global _unmatched_vpn_override_reported
+    allow_all, allowed_names = _allow_vpn_override()
+    if allow_all or not allowed_names:
+        return ()  # Nothing named, or everything allowed: no name can be wrong.
+    with _matched_vpn_override_lock:
+        unmatched = tuple(sorted(allowed_names - _matched_vpn_override_names))
+        if not unmatched or _unmatched_vpn_override_reported:
+            return ()
+        _unmatched_vpn_override_reported = True
+    return unmatched
+
+
+def _excluded_as_vpn_interface(name: str, platform_says_vpn: bool = False) -> bool:
+    """Whether an interface must be kept out of the DDS transports (and out of
+    change detection) as a VPN endpoint.
+
+    PROVIZIO_DDS_ALLOW_VPN_INTERFACES is the only knob that re-admits a tunnel:
+    naming one in PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES does not, because
+    that would put an interface back into change detection whose addresses the
+    transports still refuse to bind. Names are matched case-insensitively, on the
+    same terms the classifier used."""
+    if not platform_says_vpn and not _is_vpn_interface_name(name):
+        return False
+    allow_all, allowed_names = _allow_vpn_override()
+    if allow_all:
+        return False
+    lowered = _lower_ascii(name)
+    if lowered not in allowed_names:
+        return True
+    # Recorded because the opposite -- a name that never matches anything -- is otherwise
+    # indistinguishable from the variable not being set at all, and that is exactly what a
+    # typo produces (see take_unmatched_vpn_allow_override_names). Recorded here rather
+    # than at parse time because only the classifier knows the identities this host
+    # actually has: the same name means different things on different machines, and on
+    # Windows the identity compared is an adapter's friendly name or description rather
+    # than a device name.
+    with _matched_vpn_override_lock:
+        _matched_vpn_override_names.add(lowered)
+    return False
 
 
 _EXTRA_INTERFACES_ENV = "PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES"
@@ -439,9 +795,12 @@ _extra_interfaces_lock = threading.Lock()
 def _force_included_interfaces() -> FrozenSet[str]:
     """Interface names force-included via
     ``PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES`` (comma-separated, e.g.
-    ``"br0,virbr2"``). Such an interface bypasses every name / kind / adapter-type
-    exclusion, but still has to be operationally up, carry a non-link-local
-    address, and not be loopback.
+    ``"br0,virbr2"``). Such an interface bypasses the name / kind / adapter-type
+    exclusions, but still has to be operationally up, carry a non-link-local
+    address, and not be loopback — and it does NOT bypass the VPN filter, because
+    re-admitting a tunnel there would put an interface back into change detection
+    whose addresses the transports still refuse to bind
+    (``PROVIZIO_DDS_ALLOW_VPN_INTERFACES`` is the knob for that).
 
     The escape hatch exists because the exclusions are heuristics: a host whose
     primary NIC *is* a bridge (``br0`` on a vehicle PC) would otherwise have its
@@ -464,7 +823,7 @@ def _force_included_interfaces() -> FrozenSet[str]:
     with _extra_interfaces_lock:
         if _extra_interfaces_cache is None:
             raw = os.environ.get(_EXTRA_INTERFACES_ENV, "")
-            _extra_interfaces_cache = frozenset(entry.strip() for entry in raw.split(",") if entry.strip())
+            _extra_interfaces_cache = frozenset(_split_comma_separated(raw))
         return _extra_interfaces_cache
 
 
@@ -492,9 +851,31 @@ _IFLA_INFO_KIND = 1
 # to name-prefix filtering (an empty kind map), exactly as on any other error.
 _NETLINK_RECV_TIMEOUT_SEC = 2.0
 
+# Bound on datagrams discarded as not-from-the-kernel. The timeout above only fires
+# while the socket is IDLE, so a CAP_NET_ADMIN process writing to this socket's netlink port
+# keeps recvmsg() returning data and the discard would spin forever, holding up the
+# registration that is waiting on the dump. A real dump is a handful of datagrams, so
+# any host reaches NLMSG_DONE long before this; exceeding it means someone else is
+# filling the socket, and bailing out degrades to name-prefix filtering exactly as
+# every other failure here does. Mirrors src/address_snapshot_linux.cpp's
+# max_foreign_datagrams.
+_MAX_FOREIGN_NETLINK_DATAGRAMS = 64
+
 
 def _align4(n: int) -> int:
     return (n + 3) & ~3
+
+
+def _no_link_kinds() -> Dict[int, str]:
+    """What every exit that could not produce an authoritative kind map returns, so the
+    report cannot be missed by a branch added later -- and so the fallback to name-prefix
+    matching is never silent (see :func:`report_interface_kind_lookup_failed`).
+
+    Empty rather than partial for the reason the recv loop gives: a half-parsed dump
+    misclassifies virtual interfaces as "no kind" instead of leaving them to the names.
+    Mirrors ``no_link_kinds`` in src/address_snapshot_linux.cpp."""
+    report_interface_kind_lookup_failed()
+    return {}
 
 
 def _fetch_link_kinds_linux() -> Dict[int, str]:
@@ -519,10 +900,29 @@ def _fetch_link_kinds_linux() -> Dict[int, str]:
     try:
         sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_ROUTE)
     except (OSError, AttributeError):
-        return {}
+        return _no_link_kinds()
 
     sock.settimeout(_NETLINK_RECV_TIMEOUT_SEC)
 
+    # Bound explicitly so this socket's port id is known (getsockname below), which is
+    # what lets every reply be checked against THIS request from THIS socket. Note what
+    # the bind does not buy: port id 0 asks for the same autobind the implicit bind
+    # performs, so the port id is no less guessable than before — and rtnetlink is
+    # registered without NL_CFG_F_NONROOT_SEND, so an unprivileged process cannot unicast
+    # to another socket's port id at all (sendto() to a non-zero port id returns EPERM).
+    # The checks below are therefore about correctness rather than defence: a reply that
+    # answers someone else's dump, or that did not come from the kernel, must not be
+    # parsed as if it described this host's links — and a CAP_NET_ADMIN process that could
+    # forge one could simply create a real wireguard device instead. Mirrors
+    # src/address_snapshot_linux.cpp.
+    try:
+        sock.bind((0, 0))
+        local_port_id = sock.getsockname()[0]
+    except OSError:
+        sock.close()
+        return _no_link_kinds()
+
+    request_sequence = 1
     kinds: Dict[int, str] = {}
     # Only a dump terminated by a clean NLMSG_DONE is authoritative. A dump cut
     # short by NLMSG_ERROR, a truncated datagram, or a recv timeout would leave
@@ -540,7 +940,7 @@ def _fetch_link_kinds_linux() -> Dict[int, str]:
             32,
             _RTM_GETLINK,
             _NLM_F_REQUEST | _NLM_F_DUMP,
-            1,
+            request_sequence,
             0,
             socket.AF_UNSPEC,
             0,
@@ -556,8 +956,20 @@ def _fetch_link_kinds_linux() -> Dict[int, str]:
         # than the buffer; a silently truncated datagram would drop links on
         # hosts with very many interfaces.
         stop = False
+        foreign_datagrams = 0
         while not stop:
-            buf, _ancdata, msg_flags, _addr = sock.recvmsg(16 * 1024)
+            buf, _ancdata, msg_flags, addr = sock.recvmsg(16 * 1024)
+            # Checked before the emptiness test, so a zero-length datagram cannot reach
+            # the break without having passed it, and failing CLOSED on an address the
+            # kernel did not give us — matching the C++ side, which requires the source to
+            # be exactly a sockaddr_nl. Only the kernel (port id 0) may answer; anything
+            # else is discarded rather than parsed — see the bind() above.
+            if not addr or addr[0] != 0:
+                foreign_datagrams += 1
+                if foreign_datagrams > _MAX_FOREIGN_NETLINK_DATAGRAMS:
+                    # Silent: falls back to name-prefix filtering, which is correct.
+                    break
+                continue
             if not buf:
                 break
             if msg_flags & socket.MSG_TRUNC:
@@ -565,9 +977,24 @@ def _fetch_link_kinds_linux() -> Dict[int, str]:
                 break
             offset = 0
             while offset + 16 <= len(buf):
-                nlmsg_len, nlmsg_type, _flags, _seq, _pid = struct.unpack_from("=IHHII", buf, offset)
+                nlmsg_len, nlmsg_type, _flags, seq, port_id = struct.unpack_from(
+                    "=IHHII", buf, offset
+                )
                 if nlmsg_len < 16 or offset + nlmsg_len > len(buf):
                     break
+                # Step to the next message before parsing this one, and read the body off
+                # message_start: that way no branch below can strand the cursor by
+                # skipping the step, which is what hung the Windows unicast walk. The
+                # C++ side gets the same guarantee from NLMSG_NEXT in a for-increment.
+                message_start = offset
+                message_end = offset + nlmsg_len
+                offset += _align4(nlmsg_len)
+                # Belongs to THIS request from THIS socket. With the source-port check
+                # above, this is what keeps a reply that answers someone else's dump — or
+                # that is addressed to another socket's port id — from being parsed as if
+                # it described this host's links.
+                if seq != request_sequence or port_id != local_port_id:
+                    continue
                 if nlmsg_type == _NLMSG_DONE:
                     dump_complete = True
                     stop = True
@@ -578,14 +1005,14 @@ def _fetch_link_kinds_linux() -> Dict[int, str]:
                     break
                 if nlmsg_type == _RTM_NEWLINK:
                     # ifinfomsg starts immediately after nlmsghdr (16 B).
-                    ifinfo_offset = offset + 16
-                    if ifinfo_offset + 16 <= offset + nlmsg_len:
+                    ifinfo_offset = message_start + 16
+                    if ifinfo_offset + 16 <= message_end:
                         _family, _pad, _itype, ifindex, _iflags, _change = struct.unpack_from(
                             "=BBHiII", buf, ifinfo_offset
                         )
                         # Walk top-level rtattrs after the ifinfomsg.
                         rta_offset = ifinfo_offset + 16
-                        rta_end = offset + nlmsg_len
+                        rta_end = message_end
                         kind = ""
                         while rta_offset + 4 <= rta_end:
                             rta_len, rta_type = struct.unpack_from("=HH", buf, rta_offset)
@@ -609,7 +1036,6 @@ def _fetch_link_kinds_linux() -> Dict[int, str]:
                                 break
                             rta_offset += _align4(rta_len)
                         kinds[ifindex] = kind
-                offset += _align4(nlmsg_len)
     except OSError:
         # Includes socket.timeout: a stalled kernel reply must not be treated
         # as a complete dump. dump_complete stays False → empty map below.
@@ -617,7 +1043,7 @@ def _fetch_link_kinds_linux() -> Dict[int, str]:
     finally:
         sock.close()
 
-    return kinds if dump_complete else {}
+    return kinds if dump_complete else _no_link_kinds()
 
 
 def _linux_kind_excluded(kind: str) -> bool:
@@ -760,6 +1186,23 @@ _IFF_RUNNING_VALUE = 0x40
 _IFF_LOOPBACK_VALUE = 0x8
 
 
+def _iter_linked_nodes(head: Any, next_field: str) -> "Iterator[Any]":
+    """Yield every node of a singly linked list the OS handed us, starting at ``head``
+    and stopping at the first null pointer. A null ``head`` yields nothing.
+
+    Stepping to the next node belongs here rather than in the caller's loop body:
+    a body that skips a node with ``continue`` would otherwise have to remember to
+    step first, and one that forgot stranded the cursor and spun on the same node
+    forever. ``next_field`` names the node's pointer-to-next member, which differs
+    between the lists this walks (``ifa_next`` from getifaddrs, ``Next`` from
+    GetAdaptersAddresses)."""
+    cursor = head
+    while cursor:
+        node = cursor.contents
+        yield node
+        cursor = getattr(node, next_field)
+
+
 def _prefix_length_from_netmask(netmask_ptr) -> int:
     """CIDR prefix length of a ``getifaddrs`` netmask, e.g. 24 for 255.255.255.0.
 
@@ -823,12 +1266,28 @@ def _load_libc():
     return ctypes.CDLL("libc.so.6", use_errno=True)
 
 
-def _capture_snapshot_posix() -> AddressSnapshot:
-    try:
-        libc = _load_libc()
-    except OSError as ex:
-        _emit_log(LogLevel.WARNING, f"network monitor: libc dlopen failed ({ex}); empty snapshot")
-        return frozenset()
+def _iter_posix_interface_addresses(
+    include_loopback: bool = False,
+) -> "Iterator[Tuple[str, str, str, int]]":
+    """Yield ``(name, kind, addr_text, prefix_length)`` for every interface address
+    the kernel reports that Fast-DDS could bind a locator to.
+
+    Applies only the *operational* filters — non-loopback (unless ``include_loopback``,
+    which :func:`allowed_interfaces` needs because Fast-DDS gives loopback a sender socket
+    of its own), IFF_RUNNING, IPv4/IPv6, no IPv6 link-local — and leaves every policy
+    filter to the callers, which want
+    different ones: the snapshot drops container plumbing and tunnels, while
+    :func:`vpn_interface_blocklist_entries` wants exactly the tunnels. Sharing the walk is
+    what keeps the two from drifting apart on which addresses exist in the first
+    place. ``kind`` is the rtnetlink IFLA_INFO_KIND on Linux and always empty on
+    macOS. Mirrors ``enumerate_interface_addresses`` in
+    src/address_snapshot_linux.cpp.
+
+    Raises ``OSError`` when the interfaces cannot be read at all, rather than yielding
+    nothing: an empty result is a legitimate reading, so a failure that looked like one
+    would be taken for every address disappearing (see
+    :func:`_try_capture_address_snapshot`)."""
+    libc = _load_libc()
 
     getifaddrs = libc.getifaddrs
     getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(_Ifaddrs))]
@@ -840,15 +1299,17 @@ def _capture_snapshot_posix() -> AddressSnapshot:
 
     head = ctypes.POINTER(_Ifaddrs)()
     if getifaddrs(ctypes.byref(head)) != 0:
-        return frozenset()
+        # On macOS this is a sysctl(NET_RT_IFLIST) size-then-fetch pair that can lose a
+        # race with a routing-table change, so the failure is a live possibility rather
+        # than a formality.
+        errno_value = ctypes.get_errno()
+        raise OSError(errno_value, f"getifaddrs failed: {os.strerror(errno_value)}")
 
     is_macos = sys.platform == "darwin"
-    name_excluded = _macos_name_excluded if is_macos else _linux_name_excluded
 
-    # On Linux, also exclude virtual / container / tunnel kinds by their
-    # IFLA_INFO_KIND attribute — mirrors src/address_snapshot_linux.cpp.
-    # if_nametoindex maps each ifa entry's name to the ifindex key in the
-    # kind map.
+    # On Linux the interface's IFLA_INFO_KIND attribute is what identifies virtual /
+    # container / tunnel devices — mirrors src/address_snapshot_linux.cpp.
+    # if_nametoindex maps each ifa entry's name to the ifindex key in the kind map.
     kinds_by_index: Dict[int, str] = _fetch_link_kinds_linux() if not is_macos else {}
     if_nametoindex = None
     if kinds_by_index:
@@ -859,33 +1320,25 @@ def _capture_snapshot_posix() -> AddressSnapshot:
         except (AttributeError, OSError):
             if_nametoindex = None
 
-    force_included = _force_included_interfaces()
-
-    result: set = set()
     try:
-        cur = head
-        while cur:
-            entry = cur.contents
-            name = entry.ifa_name.decode("ascii", errors="replace") if entry.ifa_name else ""
+        for entry in _iter_linked_nodes(head, "ifa_next"):
+            # surrogateescape, not "replace": a non-ASCII device name must round-trip to
+            # the bytes Fast-DDS compares, and U+FFFD placeholders could never match them.
+            name = (
+                entry.ifa_name.decode("ascii", errors="surrogateescape")
+                if entry.ifa_name
+                else ""
+            )
             flags = entry.ifa_flags
-            if (flags & _IFF_LOOPBACK_VALUE) != 0 or (flags & _IFF_RUNNING_VALUE) == 0:
-                cur = entry.ifa_next
+            if (flags & _IFF_LOOPBACK_VALUE) != 0 and not include_loopback:
+                continue
+            if (flags & _IFF_RUNNING_VALUE) == 0:
                 continue
             if not name:
-                cur = entry.ifa_next
                 continue
-            # A force-included interface skips the name / kind heuristics but not the
-            # loopback, carrier and link-local checks.
-            is_force_included = name in force_included
-            if not is_force_included and name_excluded(name):
-                cur = entry.ifa_next
-                continue
-            if not is_force_included and if_nametoindex is not None:
-                idx = if_nametoindex(entry.ifa_name)
-                kind = kinds_by_index.get(int(idx), "")
-                if _linux_kind_excluded(kind):
-                    cur = entry.ifa_next
-                    continue
+            kind = ""
+            if if_nametoindex is not None:
+                kind = kinds_by_index.get(int(if_nametoindex(entry.ifa_name)), "")
             if entry.ifa_addr:
                 family = entry.ifa_addr.contents.sa_family
                 addr_text: Optional[str] = None
@@ -896,15 +1349,165 @@ def _capture_snapshot_posix() -> AddressSnapshot:
                     sin6 = ctypes.cast(entry.ifa_addr, ctypes.POINTER(_SockaddrIn6)).contents
                     addr_text = socket.inet_ntop(_AF_INET6, bytes(sin6.sin6_addr.s6_addr))
                     if addr_text and _is_link_local_ipv6(addr_text):
-                        cur = entry.ifa_next
                         continue
                 if addr_text:
-                    result.add((name, addr_text, _prefix_length_from_netmask(entry.ifa_netmask)))
-            cur = entry.ifa_next
+                    yield (
+                        name,
+                        kind,
+                        addr_text,
+                        _prefix_length_from_netmask(entry.ifa_netmask),
+                    )
     finally:
         freeifaddrs(head)
 
+
+# Whether every participant in this process managed to apply the VPN exclusion to its
+# transports. Set once and never cleared, and read by the snapshot policy below.
+#
+# A tunnel this library kept the transports off cannot move any locator, so its churn must
+# not rebuild anything -- that is the whole point of dropping it from the snapshot. But
+# where the exclusion could NOT be applied (the caller owns the transports through their
+# own XML, through FASTDDS_BUILTIN_TRANSPORTS or through descriptors they configured, the
+# generated-profile ceiling refused one, or this host's interfaces could not be read when
+# the participant was configured) DDS binds and announces the tunnel after all,
+# and dropping it here would leave a re-auth or a reconnect with a dead locator that no
+# rebuild replaces. The two filters disagreeing about one interface is the one outcome
+# neither may produce. Mirrors report_vpn_exclusion_not_applied /
+# vpn_exclusion_applies_to_transports in src/vpn_interfaces.cpp.
+#
+# A plain module-level bool rather than a lock: it is written once, with the same value,
+# and a read that races a write can only see the stale True, whose cost is one unnecessary
+# rebuild -- the safe direction, and the same one-way conservatism the C++ latch has.
+_vpn_exclusion_not_applied = False
+
+
+def report_vpn_exclusion_not_applied() -> None:
+    """Record that a participant could NOT apply the VPN exclusion to its transports, so
+    nothing in this process may assume a tunnel is unbound."""
+    global _vpn_exclusion_not_applied
+    _vpn_exclusion_not_applied = True
+
+
+def vpn_exclusion_applies_to_transports() -> bool:
+    """Whether the VPN exclusion is believed to reach the transports of every participant
+    in this process -- i.e. :func:`report_vpn_exclusion_not_applied` was never called."""
+    return not _vpn_exclusion_not_applied
+
+
+# Whether an interface classification has run without the platform's own interface-kind
+# information since the last time anyone asked. On Linux that information is the rtnetlink
+# IFLA_INFO_KIND, which is what keeps the classification working for a tunnel renamed away
+# from the conventional prefixes (a WireGuard device called office0); when the dump cannot
+# be issued or does not complete, the classifier falls back to names and such a device is
+# taken for ordinary hardware, so DDS binds and announces it.
+#
+# Recorded rather than logged where it happens, and taken by whoever reports it, for the
+# same reason the unmatched override names are: the enumeration runs deep inside a
+# participant creation, and the report belongs with the other transport-configuration
+# lines. Re-armable, unlike the one-way latch above: this describes one enumeration rather
+# than a property of the process. Mirrors report_interface_kind_lookup_failed /
+# take_interface_kind_lookup_failure_report in src/vpn_interfaces.cpp.
+_interface_kind_lookup_failed = False
+
+
+def report_interface_kind_lookup_failed() -> None:
+    """Record that an interface classification ran without the platform's own
+    interface-kind information, so every verdict it produced came from names alone."""
+    global _interface_kind_lookup_failed
+    _interface_kind_lookup_failed = True
+
+
+def take_interface_kind_lookup_failure_report() -> bool:
+    """Whether an interface classification has run on names alone since this was last
+    asked. Answers ``True`` at most once per occurrence, so the caller need not latch."""
+    global _interface_kind_lookup_failed
+    failed = _interface_kind_lookup_failed
+    _interface_kind_lookup_failed = False
+    return failed
+
+
+def _snapshot_policy_excludes_posix(name: str, kind: str) -> bool:
+    """Whether the snapshot drops a POSIX interface on *policy* grounds: the VPN
+    filter, the name / kind heuristics, and the force-include escape hatch that
+    bypasses them. The operational filters (loopback, carrier, address family,
+    link-local) belong to the walk, which applies them before asking this.
+
+    Its own function for the same two reasons the C++
+    ``snapshot_policy_excludes_interface`` is: the policy is then stated exactly once,
+    so this filter and ``vpn_interface_blocklist_entries`` cannot come to disagree
+    about one interface, and it can be tested for a tunnel on a host that has none up.
+    """
+    platform_says_vpn = _is_vpn_interface_kind(kind)
+
+    # Only where the exclusion actually reached the transports -- see
+    # _vpn_exclusion_not_applied for why a tunnel DDS ended up binding must stay watched.
+    may_drop_tunnels = vpn_exclusion_applies_to_transports()
+
+    # A VPN interface is excluded before anything else and regardless of
+    # force-inclusion: the transports refuse to bind it (see
+    # vpn_interface_blocklist_entries), so its address churn — a Tailscale re-auth, a
+    # tunnel reconnect — can no longer change any locator, and rebuilding every
+    # participant over it would be pure disruption.
+    # Every address family, unlike the IPv4-only blocklist in
+    # _vpn_blocklist_entries_posix: that restriction is about what a UDPv4 transport
+    # can be told to block, which has no bearing on what is worth rebuilding for. A
+    # tunnel's IPv6 address is exactly as unable to change a locator as its IPv4 one,
+    # so a rotated fd7a:: address must not trigger a rebuild either.
+    if may_drop_tunnels and _excluded_as_vpn_interface(name, platform_says_vpn):
+        return True
+
+    # Reached for a tunnel only when PROVIZIO_DDS_ALLOW_VPN_INTERFACES re-admitted it,
+    # and the heuristics below must not then drop it again: "utun" is in the macOS
+    # prefix list, so consulting it for an allowed utunN would leave change detection
+    # ignoring an interface the transports do bind — the one disagreement between the
+    # two filters that must never happen, and one no runner without a live tunnel
+    # would notice.
+    if platform_says_vpn or _is_vpn_interface_name(name):
+        return False
+
+    # A force-included interface skips the name / kind heuristics but not the
+    # loopback, carrier and link-local checks applied by the walk.
+    if name in _force_included_interfaces():
+        return False
+
+    name_excluded = (
+        _macos_name_excluded if sys.platform == "darwin" else _linux_name_excluded
+    )
+    return name_excluded(name) or _linux_kind_excluded(kind)
+
+
+def _capture_snapshot_posix() -> AddressSnapshot:
+    result: set = set()
+    for name, kind, addr_text, prefix_length in _iter_posix_interface_addresses():
+        if _snapshot_policy_excludes_posix(name, kind):
+            continue
+        result.add((name, addr_text, prefix_length))
+
     return frozenset(result)
+
+
+def _vpn_blocklist_entries_posix() -> "FrozenSet[str]":
+    """POSIX backend of :func:`vpn_interface_blocklist_entries`."""
+    entries = set()
+    for name, kind, addr_text, _ in _iter_posix_interface_addresses():
+        # IPv4 only, deliberately: this library configures SHM + UDPv4, and a UDPv4
+        # transport enumerates no IPv6 interface — so an IPv6 entry, or the name of a
+        # tunnel with no IPv4 address, could never match anything it binds, while ANY
+        # non-empty blocklist still forces whitelist mode and netmask filtering on (and
+        # with it the loss of peers reachable only through a gateway). Mirrors
+        # src/address_snapshot_linux.cpp.
+        if ":" not in addr_text and _excluded_as_vpn_interface(
+            name, _is_vpn_interface_kind(kind)
+        ):
+            # Both forms — see vpn_interface_blocklist_entries for why the device name
+            # matters alongside the address. A non-ASCII name is carried by its addresses
+            # alone: it would have to go through the generated XML profile, where a
+            # surrogate byte is not representable, so the whole document would be rejected
+            # and nothing at all would be excluded.
+            if name.isascii():
+                entries.add(name)
+            entries.add(addr_text)
+    return frozenset(entries)
 
 
 # Windows — GetAdaptersAddresses via iphlpapi --------------------------------
@@ -926,6 +1529,11 @@ _IF_TYPE_ETHERNET_CSMACD = 6
 _IF_TYPE_SOFTWARE_LOOPBACK = 24
 _IF_TYPE_PPP = 23
 _IF_TYPE_IEEE80211 = 71
+# IF_TYPE_TUNNEL — the adapter type Windows reports for encapsulation interfaces
+# (Tailscale, WireGuard NT, Teredo / ISATAP), i.e. the platform's own VPN signal.
+_IF_TYPE_TUNNEL = 131
+# IpDadStatePreferred — the only DAD state whose address is usable, per iptypes.h.
+_IP_DAD_STATE_PREFERRED = 4
 _KEPT_IF_TYPES = (_IF_TYPE_ETHERNET_CSMACD, _IF_TYPE_PPP, _IF_TYPE_IEEE80211)
 
 
@@ -936,81 +1544,102 @@ def _description_excluded_win(description: str) -> bool:
     return False
 
 
-def _capture_snapshot_windows() -> AddressSnapshot:
-    # The Windows path uses ctypes against iphlpapi.GetAdaptersAddresses.
-    # We deliberately keep the struct definitions minimal — only the fields
-    # we read are declared. Padding to match the actual layout is achieved
-    # by declaring opaque byte arrays for the skipped regions.
-    try:
-        iphlpapi = ctypes.windll.iphlpapi  # type: ignore[attr-defined]
-    except (AttributeError, OSError):
-        return frozenset()
+# Windows adapter-enumeration ctypes layouts. Defined ONCE at module scope, not inside
+# the walk that uses them: a ctypes.Structure subclass is a heavyweight object and
+# ctypes.POINTER() memoises a pointer type per class forever, so re-declaring them on
+# every call would grow the interpreter's object count for the life of the process —
+# visible as a leak once the walk runs per participant creation, which it now does.
+# Only the fields we read are declared; skipped regions are opaque byte arrays. The
+# sockaddr layouts shared with the POSIX path are fine here too (same binary layout on
+# Windows); IP_ADAPTER_ADDRESSES is the large one, laid out only as far as the fields
+# this module reads.
 
-    # Sockaddr layouts shared with the POSIX path are fine here too (same
-    # binary layout on Windows). What's different is IP_ADAPTER_ADDRESSES,
-    # which is large; we lay out only the fields we need and skip the rest
-    # via byte arrays computed by offset.
 
-    SOCKET_ADDRESS_size = ctypes.sizeof(ctypes.c_void_p) + ctypes.sizeof(ctypes.c_int)
-
-    class SOCKET_ADDRESS(ctypes.Structure):
-        _fields_ = [
-            ("lpSockaddr", ctypes.POINTER(_Sockaddr)),
-            ("iSockaddrLength", ctypes.c_int),
-        ]
-
-    class IP_ADAPTER_UNICAST_ADDRESS(ctypes.Structure):
-        pass
-
-    # The whole struct is declared through OnLinkPrefixLength, which the snapshot
-    # needs for the prefix length. The enum-typed fields (PrefixOrigin, SuffixOrigin,
-    # DadState) are c_int, the lifetimes are c_ulong, and OnLinkPrefixLength is the
-    # trailing UINT8 — matching iptypes.h. We don't filter on DadState in Python, the
-    # same simplification the POSIX path takes.
-    IP_ADAPTER_UNICAST_ADDRESS._fields_ = [
-        ("Length", ctypes.c_ulong),
-        ("Flags", ctypes.c_ulong),
-        ("Next", ctypes.POINTER(IP_ADAPTER_UNICAST_ADDRESS)),
-        ("Address", SOCKET_ADDRESS),
-        ("PrefixOrigin", ctypes.c_int),
-        ("SuffixOrigin", ctypes.c_int),
-        ("DadState", ctypes.c_int),
-        ("ValidLifetime", ctypes.c_ulong),
-        ("PreferredLifetime", ctypes.c_ulong),
-        ("LeaseLifetime", ctypes.c_ulong),
-        ("OnLinkPrefixLength", ctypes.c_ubyte),
+class _WinSocketAddress(ctypes.Structure):
+    _fields_ = [
+        ("lpSockaddr", ctypes.POINTER(_Sockaddr)),
+        ("iSockaddrLength", ctypes.c_int),
     ]
 
-    class IP_ADAPTER_ADDRESSES(ctypes.Structure):
-        pass
 
-    IP_ADAPTER_ADDRESSES._fields_ = [
-        ("Length", ctypes.c_ulong),
-        ("IfIndex", ctypes.c_ulong),
-        ("Next", ctypes.POINTER(IP_ADAPTER_ADDRESSES)),
-        ("AdapterName", ctypes.c_char_p),
-        ("FirstUnicastAddress", ctypes.POINTER(IP_ADAPTER_UNICAST_ADDRESS)),
-        ("FirstAnycastAddress", ctypes.c_void_p),
-        ("FirstMulticastAddress", ctypes.c_void_p),
-        ("FirstDnsServerAddress", ctypes.c_void_p),
-        ("DnsSuffix", ctypes.c_wchar_p),
-        ("Description", ctypes.c_wchar_p),
-        ("FriendlyName", ctypes.c_wchar_p),
-        ("PhysicalAddress", ctypes.c_ubyte * 8),
-        ("PhysicalAddressLength", ctypes.c_ulong),
-        ("Flags", ctypes.c_ulong),
-        ("Mtu", ctypes.c_ulong),
-        ("IfType", ctypes.c_ulong),
-        ("OperStatus", ctypes.c_int),
-        # Remaining fields elided — Python only reads what's above.
-    ]
+class _WinIpAdapterUnicastAddress(ctypes.Structure):
+    pass
 
-    GAA_FLAG_SKIP_ANYCAST = 0x2
-    GAA_FLAG_SKIP_MULTICAST = 0x4
-    GAA_FLAG_SKIP_DNS_SERVER = 0x8
-    AF_UNSPEC = 0
-    ERROR_BUFFER_OVERFLOW = 111
-    NO_ERROR = 0
+# The whole struct is declared through OnLinkPrefixLength, which the snapshot
+# needs for the prefix length. The enum-typed fields (PrefixOrigin, SuffixOrigin,
+# DadState) are c_int, the lifetimes are c_ulong, and OnLinkPrefixLength is the
+# trailing UINT8 — matching iptypes.h. DadState IS filtered on this path (see the walk
+# below), matching src/address_snapshot_windows.cpp; the POSIX paths cannot, because
+# getifaddrs reports no DAD state at all.
+_WinIpAdapterUnicastAddress._fields_ = [
+    ("Length", ctypes.c_ulong),
+    ("Flags", ctypes.c_ulong),
+    ("Next", ctypes.POINTER(_WinIpAdapterUnicastAddress)),
+    ("Address", _WinSocketAddress),
+    ("PrefixOrigin", ctypes.c_int),
+    ("SuffixOrigin", ctypes.c_int),
+    ("DadState", ctypes.c_int),
+    ("ValidLifetime", ctypes.c_ulong),
+    ("PreferredLifetime", ctypes.c_ulong),
+    ("LeaseLifetime", ctypes.c_ulong),
+    ("OnLinkPrefixLength", ctypes.c_ubyte),
+]
+
+
+class _WinIpAdapterAddresses(ctypes.Structure):
+    pass
+
+_WinIpAdapterAddresses._fields_ = [
+    ("Length", ctypes.c_ulong),
+    ("IfIndex", ctypes.c_ulong),
+    ("Next", ctypes.POINTER(_WinIpAdapterAddresses)),
+    ("AdapterName", ctypes.c_char_p),
+    ("FirstUnicastAddress", ctypes.POINTER(_WinIpAdapterUnicastAddress)),
+    ("FirstAnycastAddress", ctypes.c_void_p),
+    ("FirstMulticastAddress", ctypes.c_void_p),
+    ("FirstDnsServerAddress", ctypes.c_void_p),
+    ("DnsSuffix", ctypes.c_wchar_p),
+    ("Description", ctypes.c_wchar_p),
+    ("FriendlyName", ctypes.c_wchar_p),
+    ("PhysicalAddress", ctypes.c_ubyte * 8),
+    ("PhysicalAddressLength", ctypes.c_ulong),
+    ("Flags", ctypes.c_ulong),
+    ("Mtu", ctypes.c_ulong),
+    ("IfType", ctypes.c_ulong),
+    ("OperStatus", ctypes.c_int),
+    # Remaining fields elided — Python only reads what's above.
+]
+
+_GAA_FLAG_SKIP_ANYCAST = 0x2
+_GAA_FLAG_SKIP_MULTICAST = 0x4
+_GAA_FLAG_SKIP_DNS_SERVER = 0x8
+_WIN_AF_UNSPEC = 0
+_WIN_ERROR_BUFFER_OVERFLOW = 111
+_WIN_NO_ERROR = 0
+
+
+def _iter_windows_adapter_addresses(
+    include_loopback: bool = False,
+) -> "Iterator[Tuple[str, str, str, int, str, int]]":
+    """Yield ``(name, friendly, description, if_type, addr_text, prefix_length)`` for
+    every adapter address Fast-DDS could bind a locator to.
+
+    Applies only the *operational* filters (adapter up, not loopback, IPv4/IPv6, no
+    IPv6 link-local) and leaves policy to the callers — the Windows counterpart of
+    :func:`_iter_posix_interface_addresses`, and for the same reason.
+
+    The Windows path uses ctypes against iphlpapi.GetAdaptersAddresses. We
+    deliberately keep the struct definitions minimal — only the fields we read are
+    declared. Padding to match the actual layout is achieved by declaring opaque
+    byte arrays for the skipped regions.
+
+    ``include_loopback`` admits the software loopback adapter, which the snapshot and the
+    blocklist never want (a force-included interface still cannot be loopback) and
+    :func:`allowed_interfaces` always does, exactly as the POSIX walk's flag of the same
+    name works.
+    """
+    # Raised, not swallowed into an empty walk — see _try_capture_address_snapshot.
+    iphlpapi = ctypes.windll.iphlpapi  # type: ignore[attr-defined]
 
     iphlpapi.GetAdaptersAddresses.argtypes = [
         ctypes.c_ulong,  # Family
@@ -1025,70 +1654,362 @@ def _capture_snapshot_windows() -> AddressSnapshot:
     buffer = ctypes.create_string_buffer(buf_size.value)
     for _ in range(3):
         ret = iphlpapi.GetAdaptersAddresses(
-            AF_UNSPEC,
-            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+            _WIN_AF_UNSPEC,
+            _GAA_FLAG_SKIP_ANYCAST | _GAA_FLAG_SKIP_MULTICAST | _GAA_FLAG_SKIP_DNS_SERVER,
             None,
             ctypes.cast(buffer, ctypes.c_void_p),
             ctypes.byref(buf_size),
         )
-        if ret == ERROR_BUFFER_OVERFLOW:
+        if ret == _WIN_ERROR_BUFFER_OVERFLOW:
             buffer = ctypes.create_string_buffer(buf_size.value)
             continue
         break
-    if ret != NO_ERROR:
-        return frozenset()
+    if ret != _WIN_NO_ERROR:
+        raise OSError(f"GetAdaptersAddresses failed with error {ret}")
 
-    force_included = _force_included_interfaces()
-
-    result: set = set()
-    adapter = ctypes.cast(buffer, ctypes.POINTER(IP_ADAPTER_ADDRESSES))
-    while adapter:
-        a = adapter.contents
+    for adapter_data in _iter_linked_nodes(
+        ctypes.cast(buffer, ctypes.POINTER(_WinIpAdapterAddresses)), "Next"
+    ):
         # OperStatus is Windows' operational (carrier-aware) state, the counterpart of
         # POSIX IFF_RUNNING: a disconnected adapter reports down and is dropped here.
-        # Loopback is excluded unconditionally, BEFORE the force-include bypass below —
-        # matching the POSIX IFF_LOOPBACK check and the documented contract that a
-        # force-included interface still cannot be loopback.
-        if a.OperStatus == _IF_OPER_STATUS_UP and a.IfType != _IF_TYPE_SOFTWARE_LOOPBACK:
-            friendly = a.FriendlyName or ""
-            description = a.Description or ""
-            name = a.AdapterName.decode("ascii", errors="replace") if a.AdapterName else friendly
-            # Match a force-include on either the GUID-ish AdapterName or the friendly
-            # name — a user cannot reasonably be expected to know the former.
-            is_force_included = name in force_included or friendly in force_included
-            passes_heuristics = (
-                a.IfType in _KEPT_IF_TYPES
-                and not _description_excluded_win(friendly)
-                and not _description_excluded_win(description)
+        # Loopback is excluded unless asked for, matching the POSIX walk's IFF_LOOPBACK
+        # check: the snapshot and the blocklist never want it (a force-included interface
+        # still cannot be loopback), the allowlist always does -- Windows is the one
+        # platform where this library never selects shared memory, so the loopback sender
+        # socket IS the same-host path there.
+        if adapter_data.OperStatus == _IF_OPER_STATUS_UP and (
+            include_loopback or adapter_data.IfType != _IF_TYPE_SOFTWARE_LOOPBACK
+        ):
+            friendly = adapter_data.FriendlyName or ""
+            description = adapter_data.Description or ""
+            name = (
+                adapter_data.AdapterName.decode("ascii", errors="replace")
+                if adapter_data.AdapterName
+                else friendly
             )
-            if is_force_included or passes_heuristics:
-                uni = a.FirstUnicastAddress
-                while uni:
-                    u = uni.contents
-                    sa = u.Address.lpSockaddr
-                    if sa:
-                        family = sa.contents.sa_family
-                        addr_text: Optional[str] = None
-                        if family == _AF_INET:
-                            sin = ctypes.cast(sa, ctypes.POINTER(_SockaddrIn)).contents
-                            addr_text = socket.inet_ntop(_AF_INET, bytes(sin.sin_addr))
-                        elif family == _AF_INET6:
-                            sin6 = ctypes.cast(sa, ctypes.POINTER(_SockaddrIn6)).contents
-                            addr_text = socket.inet_ntop(_AF_INET6, bytes(sin6.sin6_addr.s6_addr))
-                            if addr_text and _is_link_local_ipv6(addr_text):
-                                addr_text = None
-                        if addr_text:
-                            # OnLinkPrefixLength is already a CIDR prefix length, so
-                            # unlike the POSIX path there is no netmask to convert.
-                            result.add((name, addr_text, int(u.OnLinkPrefixLength)))
-                    uni = u.Next
-        adapter = a.Next
+            for unicast in _iter_linked_nodes(adapter_data.FirstUnicastAddress, "Next"):
+                if unicast.DadState != _IP_DAD_STATE_PREFERRED:
+                    continue  # tentative / deprecated / duplicate
+                sa = unicast.Address.lpSockaddr
+                if sa:
+                    family = sa.contents.sa_family
+                    addr_text: Optional[str] = None
+                    if family == _AF_INET:
+                        sin = ctypes.cast(sa, ctypes.POINTER(_SockaddrIn)).contents
+                        addr_text = socket.inet_ntop(_AF_INET, bytes(sin.sin_addr))
+                    elif family == _AF_INET6:
+                        sin6 = ctypes.cast(sa, ctypes.POINTER(_SockaddrIn6)).contents
+                        addr_text = socket.inet_ntop(_AF_INET6, bytes(sin6.sin6_addr.s6_addr))
+                        if addr_text and _is_link_local_ipv6(addr_text):
+                            addr_text = None
+                    if addr_text:
+                        # OnLinkPrefixLength is already a CIDR prefix length, so
+                        # unlike the POSIX path there is no netmask to convert.
+                        yield (
+                            name,
+                            friendly,
+                            description,
+                            int(adapter_data.IfType),
+                            addr_text,
+                            int(unicast.OnLinkPrefixLength),
+                        )
+
+
+def _adapter_is_vpn_win(friendly: str, description: str, if_type: int) -> bool:
+    """Whether an adapter is a VPN / tunnel endpoint: an IF_TYPE_TUNNEL adapter, one
+    whose driver-supplied description names a tunnel, or one whose friendly name names a
+    VPN product. The GUID-ish AdapterName carries no hint on Windows, which is why the
+    human-readable fields are what get classified."""
+    # Neither string gets the device-name classifier, and for the same reason: both are
+    # prose. A user can rename the friendly name ("WG-LAN" on an Ethernet adapter), and a
+    # description is the driver's own vendor string, where a model number can begin with
+    # the very letters a device convention anchors on -- a NETGEAR WG-series radio
+    # describes itself "WG111v3 54Mbps Wireless USB 2.0 Adapter". _is_vpn_description
+    # still catches what the description exists to catch: OpenVPN's "TAP-Windows Adapter
+    # V9". See src/address_snapshot_windows.cpp.
+    return (
+        if_type == _IF_TYPE_TUNNEL
+        or _is_vpn_description(description)
+        or _is_vpn_product_name(friendly)
+    )
+
+
+def _excluded_as_vpn_adapter_win(
+    name: str, friendly: str, description: str, if_type: int
+) -> bool:
+    """VPN exclusion for a Windows adapter, honouring the override against any of the
+    three identities Windows reports for it: the GUID-ish adapter name, the friendly
+    name, and the driver-supplied description.
+
+    All three, because any of them can be both what classified the adapter and what a
+    user would name it by -- an adapter matched on its description alone
+    ("TAP-Windows Adapter V9" on a NIC called "Ethernet 3") has no other identity the
+    variable could name. Mirrors ``excluded_as_vpn_adapter`` in
+    src/address_snapshot_windows.cpp."""
+    if not _adapter_is_vpn_win(friendly, description, if_type):
+        return False
+    return (
+        _excluded_as_vpn_interface(friendly, platform_says_vpn=True)
+        and _excluded_as_vpn_interface(name, platform_says_vpn=True)
+        and _excluded_as_vpn_interface(description, platform_says_vpn=True)
+    )
+
+
+def _snapshot_policy_excludes_windows(
+    name: str, friendly: str, description: str, if_type: int
+) -> bool:
+    """Windows counterpart of :func:`_snapshot_policy_excludes_posix`."""
+    # A VPN adapter is excluded before anything else and regardless of
+    # force-inclusion — see the matching comment in _snapshot_policy_excludes_posix, and
+    # _vpn_exclusion_not_applied for why this only holds where the exclusion reached the
+    # transports at all.
+    if vpn_exclusion_applies_to_transports() and _excluded_as_vpn_adapter_win(
+        name, friendly, description, if_type
+    ):
+        return True
+
+    # Reached for a tunnel only when the override re-admitted it, and the adapter-type
+    # gate below must not then drop it again: IF_TYPE_TUNNEL is none of Ethernet /
+    # Wi-Fi / PPP, so consulting that gate for an allowed tunnel would leave change
+    # detection ignoring an interface the transports do bind. The description gate is
+    # skipped for the same reason -- "Tunnel adapter ..." is exactly what such an
+    # adapter is called.
+    if _adapter_is_vpn_win(friendly, description, if_type):
+        return False
+
+    # Match a force-include on either the GUID-ish AdapterName or the friendly
+    # name — a user cannot reasonably be expected to know the former.
+    force_included = _force_included_interfaces()
+    if name in force_included or friendly in force_included:
+        return False
+
+    if if_type not in _KEPT_IF_TYPES:
+        return True
+
+    return _description_excluded_win(friendly) or _description_excluded_win(description)
+
+
+def _capture_snapshot_windows() -> AddressSnapshot:
+    result: set = set()
+    for (
+        name,
+        friendly,
+        description,
+        if_type,
+        addr_text,
+        prefix_length,
+    ) in _iter_windows_adapter_addresses():
+        if _snapshot_policy_excludes_windows(name, friendly, description, if_type):
+            continue
+        result.add((name, addr_text, prefix_length))
     return frozenset(result)
+
+
+def _vpn_blocklist_entries_windows() -> "FrozenSet[str]":
+    """Windows backend of :func:`vpn_interface_blocklist_entries`."""
+    entries = set()
+    for (
+        name,
+        friendly,
+        description,
+        if_type,
+        addr_text,
+        _,
+    ) in _iter_windows_adapter_addresses():
+        # IPv4 only, and the adapter's name only alongside an IPv4 address of its own —
+        # see the rationale in _vpn_blocklist_entries_posix and
+        # src/address_snapshot_windows.cpp.
+        if ":" in addr_text:
+            continue
+        if _excluded_as_vpn_adapter_win(name, friendly, description, if_type):
+            # The GUID-ish AdapterName is what Fast-DDS compares a blocklist entry to as
+            # IPFinder::info_IP::dev, and unlike an address it cannot later belong to a
+            # real interface. Falls back to the friendly name when Windows reported no
+            # AdapterName, matching the C++ side.
+            device_name = name or friendly
+            if device_name:
+                entries.add(device_name)
+            entries.add(addr_text)
+    return frozenset(entries)
+
+
+# Whether the last real read of this host's interfaces failed, rather than finding no
+# tunnel. The two are the same empty set, and a caller about to REPLACE entries it applied
+# earlier has to tell them apart: re-deriving from a failed read would unblock a tunnel
+# that is still up, on exactly the rebuild a network change triggered.
+#
+# Module-level state rather than a second return value because tests substitute
+# :func:`vpn_interface_blocklist_entries` and :func:`allowed_interfaces` wholesale; a
+# substitution never touches this, so it stays False and a substituted set reads as a
+# successful one, which is what those tests mean. Mirrors the enumeration_failed
+# out-parameter on the C++ side -- and, like an out-parameter, it is PER THREAD: two
+# participants being created concurrently each read the host for themselves, and a
+# process-wide flag would let one thread's successful read clear another thread's failure
+# between that thread's read and its check, making it conclude the host simply has no
+# tunnel and skip telling change detection that its transports may bind one.
+_read_failures = threading.local()
+
+
+# Per-thread cache behind :func:`vpn_interface_blocklist_entries`, active only inside a
+# :func:`scoped_vpn_blocklist_cache` block. One network event rebuilds every
+# recovery-enabled participant in the process, and each rebuild otherwise re-runs a full
+# getifaddrs walk plus a full netlink RTM_GETLINK dump to answer the same question about
+# the same host at the same instant; this collapses that to one reading, which also means
+# every participant rebuilt for one event is configured from the same view of the host.
+#
+# Thread-local on purpose, exactly as the C++ scoped_vpn_blocklist_cache is: a participant
+# being constructed on another thread is not part of this event and must read the host for
+# itself. Nesting is counted so an inner scope does not release an outer one's cache.
+_blocklist_cache = threading.local()
+
+
+@contextlib.contextmanager
+def scoped_vpn_blocklist_cache() -> "Iterator[None]":
+    """Collapse the host enumeration behind :func:`vpn_interface_blocklist_entries` to at
+    most one for the duration of the block, on this thread only.
+
+    Mirrors ``provizio::dds::detail::scoped_vpn_blocklist_cache``."""
+    depth = getattr(_blocklist_cache, "depth", 0)
+    _blocklist_cache.depth = depth + 1
+    try:
+        yield
+    finally:
+        _blocklist_cache.depth -= 1
+        if _blocklist_cache.depth == 0:
+            _blocklist_cache.entries = None
+
+
+def blocklist_read_failed() -> bool:
+    """Whether the last :func:`vpn_interface_blocklist_entries` call on this thread failed
+    to read the host, as opposed to finding no VPN interface."""
+    return bool(getattr(_read_failures, "blocklist", False))
+
+
+def allowed_interfaces_read_failed() -> bool:
+    """Whether the last :func:`allowed_interfaces` call on this thread failed to read the
+    host, as opposed to finding nothing left once the tunnels are excluded. Per thread,
+    like :func:`blocklist_read_failed` and for the same reason."""
+    return bool(getattr(_read_failures, "allowed", False))
+
+
+def vpn_interface_blocklist_entries() -> "FrozenSet[str]":
+    """Everything the DDS transports should be handed as their interface blocklist
+    for the host's excluded VPN interfaces: each one's device name AND each of its
+    addresses.
+
+    Both forms, because Fast-DDS matches a blocklist entry against either the device
+    name (``IPFinder::info_IP::dev`` — ``ifa_name`` on POSIX, ``AdapterName`` on
+    Windows) or the address. The name is the stable identity; the address form alone
+    would carry a hazard the name does not, since an address a tunnel has released
+    can later be handed to a real interface. Empty when the host has no VPN interface
+    up, or when PROVIZIO_DDS_ALLOW_VPN_INTERFACES allows them all. Mirrors
+    ``detail::vpn_interface_blocklist_entries`` in the C++ library.
+
+    Unreadable interfaces yield no entries rather than an error: unlike the change
+    detection — where the walk raises and :func:`_try_capture_address_snapshot` translates
+    it — here the answer is only ever "which tunnels to keep out", and raising would take a
+    failed syscall all the way out of make_domain_participant.
+
+    Yielding nothing is not the same as deciding to exclude nothing, though, and an empty
+    reading means opposite things here too: :func:`blocklist_read_failed` is what tells the
+    two apart, and the participant reads it to keep whatever exclusion it already had and
+    to tell change detection that its transports may be binding a tunnel after all. The C++
+    side draws the same line, reporting the failure through the ``enumeration_failed``
+    out-parameter of ``detail::vpn_interface_blocklist_entries`` rather than by throwing."""
+    if getattr(_blocklist_cache, "depth", 0) != 0:
+        cached = getattr(_blocklist_cache, "entries", None)
+        if cached is not None:
+            return cached
+    try:
+        entries = (
+            _vpn_blocklist_entries_windows()
+            if sys.platform == "win32"
+            else _vpn_blocklist_entries_posix()
+        )
+        _read_failures.blocklist = False
+        if getattr(_blocklist_cache, "depth", 0) != 0:
+            # Successful readings only. Caching a failure would hand every participant
+            # rebuilt for this event the same wrong answer -- "this host has no tunnels" --
+            # where reading again might well succeed.
+            _blocklist_cache.entries = entries
+        return entries
+    except Exception:
+        # Not logged here, for three reasons the C++ enumeration shares (it never logs): the
+        # participant already reports a failed read, once per participant rather than on
+        # every rebuild; a second line would duplicate it; and this runs under both lifecycle
+        # locks, where the caller's log callback may not be invoked (see set_log_callback).
+        _read_failures.blocklist = True
+        return frozenset()
+
+
+def _is_loopback_address(address: str) -> bool:
+    """Whether an address text names the loopback interface: 127.0.0.0/8 or ``::1``."""
+    return address.startswith("127.") or address == "::1"
+
+
+def allowed_interfaces(blocked: "Collection[str]") -> "List[Tuple[str, bool]]":
+    """The interfaces Fast-DDS will let the transports use once ``blocked`` is excluded,
+    as ``(address, is_loopback)`` pairs.
+
+    Loopback is INCLUDED, and that is the whole point: any non-empty interface list puts
+    UDPv4 into whitelist mode, where every interface that is not blocked gets an output
+    socket of its own -- loopback among them, since nothing blocks it. That socket can
+    reach no other host, so unless it is netmask-filtered every unicast datagram costs it
+    a failed sendto and a Fast-DDS warning. IPv4 only: a UDPv4 transport can neither bind
+    an IPv6-only interface nor own a sender socket for it.
+
+    Unreadable interfaces answer an empty list AND set :func:`allowed_interfaces_read_failed`,
+    which the caller must check before writing anything: a blocklist without an allowlist
+    puts UDPv4 into whitelist mode with none of the per-interface netmask filters the
+    allowlist carries, so every remaining interface sends its own copy of every unicast
+    datagram -- the duplication this feature exists to remove, moved from the tunnel onto
+    the LAN -- and an allowlist matching nothing is no better, since Fast-DDS fills an empty
+    whitelist with a sentinel that allows nothing at all. The caller therefore leaves the
+    transports alone, as the C++ ``refresh_vpn_interface_blocklist`` does when
+    ``vpn_allowed_interfaces`` reports failure. Mirrors ``vpn_allowed_interfaces`` in
+    src/vpn_interfaces.cpp."""
+    blocked_set = frozenset(blocked)
+    found: "List[Tuple[str, bool]]" = []
+    seen: set = set()
+    try:
+        if sys.platform == "win32":
+            walk = (
+                (name, addr)
+                for name, _friendly, _description, _if_type, addr, _prefix in (
+                    _iter_windows_adapter_addresses(include_loopback=True)
+                )
+            )
+        else:
+            walk = (
+                (name, addr)
+                for name, _kind, addr, _prefix in _iter_posix_interface_addresses(
+                    include_loopback=True
+                )
+            )
+        for name, address in walk:
+            if ":" in address:
+                continue  # IPv6: no UDPv4 sender socket can exist for it.
+            if name in blocked_set or address in blocked_set:
+                continue
+            if address in seen:
+                continue
+            seen.add(address)
+            found.append((address, _is_loopback_address(address)))
+    except Exception:
+        _read_failures.allowed = True
+        return []
+    _read_failures.allowed = False
+    return found
 
 
 # ---------------------------------------------------------------------------
 # Listener drain — detach + wait for in-flight callbacks
 # ---------------------------------------------------------------------------
+
+
+# How long a drain waits before reporting that it is still waiting. Purely
+# diagnostic: it does not bound the total wait (see ListenerDrain.detach_and_drain).
+_DRAIN_STALL_WARNING_SEC = 5.0
 
 
 class ListenerDrain:
@@ -1104,11 +2025,18 @@ class ListenerDrain:
     to fall to zero.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, stall_warning_period: float = _DRAIN_STALL_WARNING_SEC) -> None:
+        """``stall_warning_period`` is how long the drain waits before reporting that it
+        is still waiting, and how long between repeats of that report. Purely diagnostic:
+        it never bounds the total wait (see :meth:`detach_and_drain`). Every shipped
+        endpoint takes the default; the argument exists so a test can observe the
+        reporting without spending the default period per line, exactly as the C++
+        listener_drain constructor's does."""
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._in_flight = 0
         self._detached = False
+        self._stall_warning_period = stall_warning_period
 
     def enter(self) -> bool:
         """Record entry to a callback. Returns ``True`` if the callback body
@@ -1144,11 +2072,82 @@ class ListenerDrain:
     def detach_and_drain(self) -> None:
         """Block until every in-flight callback has returned. MUST NOT be
         called while holding the participant's lifecycle lock — see the
-        module docstring for the rationale."""
+        module docstring for the rationale.
+
+        Waits in bounded slices with an unbounded total: the contract is still
+        "until every in-flight callback has returned", but a callback that never
+        returns (one blocked on a lock the caller holds, or one creating an
+        endpoint during a reset — both forbidden) would otherwise hang here
+        forever with nothing in the log to say why. The slice only decides how
+        soon that is reported; it never ends the wait early, because proceeding
+        while a callback is still running would tear the Fast-DDS entity down
+        underneath it. Mirrors detach_and_drain in
+        include/provizio/dds/detail/listener_drain.h."""
         with self._cv:
+            # Stored once, before the wait, exactly as the C++ side does: repeating it in
+            # the loop would silently re-detach if reattach() ever raced this drain.
             self._detached = True
-            while self._in_flight > 0:
-                self._cv.wait()
+
+        # Reported once when the stall starts and again on every slice after it, because one
+        # line cannot say whether the stall is over: the wait is unbounded and the caller
+        # holds the registration lock throughout, so an operator who sees a single warning
+        # cannot tell a stall that cleared from one still going hours later. The slice is
+        # long enough that a wedged process produces a line a few times a minute.
+        stalled_slices = 0
+        # The real elapsed time, because the completion line below must report what the reset
+        # actually cost. Deriving it from the slice count would undercount by however far
+        # into the final slice the drain finished -- a stall cleared 2.5 s into its second
+        # slice would be reported as 5 s rather than 7.5 s.
+        stall_started = time.monotonic()
+        # An absolute deadline, not a fresh slice per wakeup, so the first report lands one
+        # period after the drain began however many times the condition is notified —
+        # matching wait_for(lock, period, pred) on the C++ side. Re-armed after each report,
+        # which is what turns the one line into a heartbeat.
+        warn_at = time.monotonic() + self._stall_warning_period
+        while True:
+            drained = False
+            in_flight = 0
+            with self._cv:
+                if self._in_flight == 0:
+                    drained = True
+                else:
+                    remaining = warn_at - time.monotonic()
+                    self._cv.wait(
+                        timeout=remaining if remaining > 0 else self._stall_warning_period
+                    )
+                    in_flight = self._in_flight
+                    drained = in_flight == 0
+
+            # Every _emit_log below runs with the condition released: it calls the user's
+            # log callback, which is documented as free to re-enter provizio APIs, and
+            # holding this primitive's condition across that would silently add it to that
+            # contract.
+            if drained:
+                if stalled_slices:
+                    # Only where a stall was reported: the log needs an end as well as a
+                    # beginning, or the last warning stands as the final word on a reset
+                    # that in fact completed.
+                    _emit_log(
+                        LogLevel.WARNING,
+                        f"listener drain completed after "
+                        f"{time.monotonic() - stall_started:.1f} s; the reset is no "
+                        f"longer blocked.",
+                    )
+                return
+
+            if time.monotonic() < warn_at:
+                continue
+
+            stalled_slices += 1
+            warn_at = time.monotonic() + self._stall_warning_period
+            _emit_log(
+                LogLevel.WARNING,
+                f"listener drain has been waiting for {in_flight} in-flight "
+                f"callback(s) for over {self._stall_warning_period * stalled_slices:g} s. A "
+                f"callback that never returns blocks the network-recovery reset (and "
+                f"endpoint teardown) indefinitely: callbacks must not block and must not "
+                f"create publishers / subscribers / services.",
+            )
 
     def reattach(self) -> None:
         with self._lock:
@@ -1362,6 +2361,35 @@ def _resolve_safety_net_period() -> float:
     return float(value)
 
 
+def _log_missing_baseline(snapshot: AddressSnapshot) -> None:
+    """Report that the first readable interface list is being treated as all-new.
+
+    Reached only when the read at construction failed, so there is no baseline -- and, with
+    it, no knowing what the participants actually bound to. An interface may have come up
+    while the list was unreadable, so every address now visible counts as new: that rebuilds
+    once, where quietly adopting them would lose the rebuild permanently (an adopted address
+    is no longer a gain against any later snapshot). Mirrors
+    network_recovery_coordinator::adopt_first_readable_snapshot.
+
+    One deliberate difference from that mirror, and the only one: the C++ side counts the
+    empty-first-readable-list case as a skipped reset, because it reaches its decision
+    function to do so. Here the caller's own "changed?" comparison absorbs the case before
+    any handler runs, so ``skipped_reset_count`` does not move. Nothing but a test can
+    observe it -- no rebuild happens on either side -- which is why the counters are left
+    as they are rather than routing an empty set through the handler just to increment one.
+    """
+    if not snapshot:
+        # Nothing to bind, so nothing to rebuild for; the comparison in the caller reduces
+        # to "unchanged" on its own.
+        return
+    _emit_log(
+        LogLevel.INFO,
+        "network monitor: no interface baseline to compare against (the list could not be "
+        f"read at startup), so all {len(snapshot)} interface address(es) now visible are "
+        "treated as new",
+    )
+
+
 class _PollingNetworkMonitor:
     """Fallback monitor: polls :func:`_capture_address_snapshot` on an interval
     and reports a burst whenever the result changes from the last observed value.
@@ -1388,12 +2416,20 @@ class _PollingNetworkMonitor:
         self._poll_interval_sec = poll_interval_sec
         self._stop_event = threading.Event()
         # Initial snapshot is captured BEFORE the worker thread starts so
-        # the first observation has a baseline to diff against.
-        self._last_snapshot: AddressSnapshot = _capture_address_snapshot()
+        # the first observation has a baseline to diff against. An unreadable interface list
+        # leaves NO baseline (None) rather than failing construction — and, importantly, rather
+        # than an empty one: the empty set is a real state some hosts genuinely have (a
+        # container whose only device is a filtered-out veth), so seeding it would make the
+        # first readable snapshot look like every address arriving at once and rebuild every
+        # participant for nothing. Not free either, despite happening early: the rebuild would
+        # land on the next successful read, seconds later, by which time endpoints are carrying
+        # traffic. The first readable snapshot is adopted as the baseline instead.
+        self._last_snapshot: Optional[AddressSnapshot] = _try_capture_address_snapshot()
         self._thread = threading.Thread(target=self._run, name="provizio_dds.network_monitor", daemon=True)
         self._thread.start()
 
-    def initial_snapshot(self) -> AddressSnapshot:
+    def initial_snapshot(self) -> Optional[AddressSnapshot]:
+        """The baseline, or ``None`` while the interface list has never been readable."""
         return self._last_snapshot
 
     def is_alive(self) -> bool:
@@ -1419,11 +2455,16 @@ class _PollingNetworkMonitor:
                 self._on_safety_net_tick()
             except Exception as ex:
                 _emit_log(LogLevel.ERROR, f"network monitor: safety-net tick raised ({ex})")
-        try:
-            new_snapshot = _capture_address_snapshot()
-        except Exception as ex:
-            _emit_log(LogLevel.WARNING, f"network monitor: snapshot capture failed ({ex})")
-            return
+        new_snapshot = _try_capture_address_snapshot()
+        if new_snapshot is None:
+            return  # Unreadable interfaces are not a change — see the helper.
+        if self._last_snapshot is None:
+            # Stand in the empty set for THIS comparison, so everything visible reads as new
+            # and rebuilds. Deliberately not what __init__ stores -- see there -- because the
+            # difference between "unknown" and "no addresses" is what makes this rebuild, while
+            # a genuinely empty list below still reduces to "unchanged" and rebuilds nothing.
+            _log_missing_baseline(new_snapshot)
+            self._last_snapshot = frozenset()
         if new_snapshot != self._last_snapshot:
             old = self._last_snapshot
             self._last_snapshot = new_snapshot
@@ -1507,7 +2548,9 @@ class _NetlinkNetworkMonitor:
         self._stop_r = self._stop_w = -1
         try:
             self._sock.bind((0, self._GROUPS))
-            self._last_known: AddressSnapshot = _capture_address_snapshot()
+            # An unreadable interface list leaves NO baseline rather than failing construction,
+            # and specifically not an empty one — see the matching comment in the polling monitor.
+            self._last_known: Optional[AddressSnapshot] = _try_capture_address_snapshot()
             # Self-pipe to wake the select() loop for a clean shutdown (mirrors the
             # C++ eventfd). Closing the socket from another thread is not a reliable
             # way to unblock a blocked recv/select on every kernel.
@@ -1523,7 +2566,8 @@ class _NetlinkNetworkMonitor:
                     os.close(fd)
             raise
 
-    def initial_snapshot(self) -> AddressSnapshot:
+    def initial_snapshot(self) -> Optional[AddressSnapshot]:
+        """The baseline, or ``None`` while the interface list has never been readable."""
         return self._last_known
 
     def is_alive(self) -> bool:
@@ -1564,19 +2608,22 @@ class _NetlinkNetworkMonitor:
             except Exception as ex:
                 _emit_log(LogLevel.ERROR, f"network monitor: safety-net tick raised ({ex})")
 
-        try:
-            new_snapshot = _capture_address_snapshot()
-        except Exception as ex:
-            _emit_log(LogLevel.WARNING, f"network monitor: snapshot capture failed ({ex})")
-            return
+        new_snapshot = _try_capture_address_snapshot()
+        if new_snapshot is None:
+            return  # Unreadable interfaces are not a change — see the helper.
+        if self._last_known is None:
+            # See the polling monitor: the empty set stands in for "unknown" here so the first
+            # readable list rebuilds instead of being silently absorbed.
+            _log_missing_baseline(new_snapshot)
+            self._last_known = frozenset()
         if new_snapshot == self._last_known:
             # Deliberately silent: this runs on a timer for the life of the process.
             return
 
         _emit_log(
             LogLevel.INFO,
-            "network monitor: change found by the periodic safety-net check — no kernel event "
-            f"reported it ({len(self._last_known)} → {len(new_snapshot)} interface address(es))",
+            "network monitor: change found by the periodic safety-net check -- no kernel event "
+            f"reported it ({len(self._last_known)} -> {len(new_snapshot)} interface address(es))",
         )
         try:
             self._on_event(self._last_known, new_snapshot, None)
@@ -1586,7 +2633,9 @@ class _NetlinkNetworkMonitor:
 
     def _run(self) -> None:
         pending = False
-        burst_start: AddressSnapshot = frozenset()
+        # None means "no burst-start snapshot", which is exactly what a missing baseline
+        # amounts to as well, so the two collapse into one value.
+        burst_start: Optional[AddressSnapshot] = None
         first_event_mono = 0.0
         last_event_mono = 0.0
 
@@ -1685,10 +2734,13 @@ class _NetlinkNetworkMonitor:
                     # Burst START snapshot — capture immediately, before a quick
                     # flap can revert. capture_address_snapshot() is slow; while it
                     # runs the kernel buffers further events for the next iteration.
-                    try:
-                        burst_start = _capture_address_snapshot()
-                    except Exception:
-                        burst_start = self._last_known
+                    # An unreadable list leaves the burst with the last known set as its
+                    # start, which makes the transient test below a no-op rather than
+                    # reporting every address as having returned during the burst. With no
+                    # baseline yet that yields None, which the coordinator already reads as
+                    # "no burst-start snapshot" — the same no-op by a different route.
+                    captured_start = _try_capture_address_snapshot()
+                    burst_start = captured_start if captured_start is not None else self._last_known
                 last_event_mono = now
                 continue
 
@@ -1703,20 +2755,25 @@ class _NetlinkNetworkMonitor:
                 last_event_mono + self._quiet <= time.monotonic()
                 or first_event_mono + _MAX_DEBOUNCE_SEC <= time.monotonic()
             ):
-                try:
-                    end_snapshot = _capture_address_snapshot()
-                except Exception as ex:
-                    _emit_log(LogLevel.WARNING, f"network monitor: snapshot capture failed ({ex})")
+                end_snapshot = _try_capture_address_snapshot()
+                if end_snapshot is None:
+                    # Unreadable interfaces are not a change — see the helper. The burst is
+                    # dropped; the safety-net tick re-checks once a read succeeds.
                     pending = False
-                    burst_start = frozenset()
+                    burst_start = None
                     continue
+                if self._last_known is None:
+                    # See the polling monitor: with no baseline the empty set stands in, so this
+                    # burst reads as every visible address being new and rebuilds.
+                    _log_missing_baseline(end_snapshot)
+                    self._last_known = frozenset()
                 try:
                     self._on_event(self._last_known, end_snapshot, burst_start)
                 except Exception as ex:
                     _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
                 self._last_known = end_snapshot
                 pending = False
-                burst_start = frozenset()
+                burst_start = None
 
     def _close_socket(self, expected: "Optional[socket.socket]" = None) -> None:
         """Drop the netlink socket, leaving the loop running on its periodic check.
@@ -1981,12 +3038,28 @@ class _NetworkRecoveryCoordinator:
                 )
             return
 
+        # NO snapshot read gates this pass, deliberately, and that is the whole point of
+        # the retry: it re-attempts a rebuild that already failed, against whatever the host
+        # looks like now, and needs to know nothing about what changed. Gating it on a read
+        # would let an unreadable interface list silently cancel it -- the counter would
+        # never move, so the bound would never be reached, so the exhaustion warning would
+        # never fire, and a participant left torn down by a failed rebuild could stay dead
+        # for as long as the reads kept failing, with nothing logged. That failure is not
+        # hypothetical on macOS, where getifaddrs is a sysctl(NET_RT_IFLIST) size-then-fetch
+        # pair that can lose a race with a routing-table change.
+        #
+        # Matching the C++ counterpart: safety_net_tick runs apply_reset(retry_only) before
+        # it reads a snapshot at all, and hands participants no snapshot when it does
+        # (trigger_network_recovery_reset takes none). The hooks here ignore both arguments
+        # too -- they are passed only because this side's signature carries them -- so an
+        # empty set stands in for them rather than a read that could fail.
+        snapshot: AddressSnapshot = frozenset()
+
         self._consecutive_retry_passes += 1
         # Silent: retrying is internal; only exhausting every attempt is reported (below).
         with self._idle_lock:
             self._reset_in_progress = True
         try:
-            snapshot = _capture_address_snapshot()
             for hook in retry:
                 try:
                     hook(snapshot, snapshot)
@@ -2009,33 +3082,52 @@ class _NetworkRecoveryCoordinator:
                           burst_start: Optional[AddressSnapshot] = None) -> None:
         """Decide whether a settled burst warrants a participant rebuild.
 
-        Resets when the end-state changed (``new != old``) OR — for event-driven
-        backends that supply it — when the burst-START snapshot differed from
-        ``old`` even though the end-state is unchanged. The latter is a transient
-        flap (a DDS-relevant address left and returned within the quiet period):
-        the end-state looks the same but the Fast-DDS sockets bound to that
-        address were torn down while it was gone and must be rebuilt. Mirrors the
-        C++ ``network_recovery_coordinator::run_reset``.
-        """
-        end_changed = new != old
-        transient_changed = burst_start is not None and burst_start != old
+        Rebuilds when the host has GAINED an address to bind: one that is not in
+        ``old``, or — for event-driven backends that supply ``burst_start`` — one that
+        is here now but was missing when the burst opened. The second case is a
+        transient flap (a DDS-relevant address left and returned within the quiet
+        period): the end-state looks unchanged but the Fast-DDS sockets bound to that
+        address were torn down while it was gone and must be rebuilt.
 
-        if not end_changed and not transient_changed:
-            # Genuine no-op (or container/veth/link-local churn, which is filtered
-            # out of both snapshots). Bump under _idle_lock to match reset_count so
-            # a test sampling the counter has a happens-before edge to this write.
-            # Silent: a burst that changed nothing is a non-event.
+        Addresses merely going away do NOT rebuild: nothing can be bound to what is
+        gone, and tearing down endpoints that still work over the remaining interfaces
+        buys nothing. The smaller set is adopted instead, so a later return reads as a
+        gain and rebuilds then — which is the moment a rebuild can achieve something.
+
+        Mirrors the C++ ``network_recovery_coordinator::run_reset``.
+        """
+        added = len(new - old)
+        removed = len(old - new)
+        returned = 0 if burst_start is None else len(new - burst_start)
+
+        if added == 0 and returned == 0:
+            if removed == 0:
+                # Genuine no-op (or container/veth/link-local churn, which is filtered
+                # out of both snapshots). Bump under _idle_lock to match reset_count so
+                # a test sampling the counter has a happens-before edge to this write.
+                # Silent: a burst that changed nothing is a non-event.
+                with self._idle_lock:
+                    self.skipped_reset_count += 1
+                return
+
+            # Loss only — see the docstring. The cost of waiting is that this participant
+            # keeps announcing a locator that no longer answers until the next real
+            # change, which is cheaper than dropping every in-flight sample now.
+            _emit_log(
+                LogLevel.INFO,
+                f"network change detected: +0 / -{removed} interface address(es) "
+                f"({len(old)} -> {len(new)}); not rebuilding for a loss alone -- will "
+                f"rebuild if address(es) return",
+            )
             with self._idle_lock:
                 self.skipped_reset_count += 1
             return
 
-        if end_changed:
-            added = len(new - old)
-            removed = len(old - new)
+        if added != 0 or removed != 0:
             _emit_log(
                 LogLevel.INFO,
                 f"network change detected: +{added} / -{removed} interface address(es) "
-                f"({len(old)} → {len(new)}); resetting recovery-enabled participants",
+                f"({len(old)} -> {len(new)}); resetting recovery-enabled participants",
             )
         else:
             _emit_log(
@@ -2060,11 +3152,17 @@ class _NetworkRecoveryCoordinator:
         # been GC'd since registration — those entries are dropped here.
         live = self._live_hooks()
 
-        for hook in live:
-            try:
-                hook(old, new)
-            except Exception as ex:
-                _emit_log(LogLevel.ERROR, f"participant reset failed: {ex}")
+        # One reading of the host for the whole pass: each hook rebuilds a participant,
+        # and each rebuild re-resolves the VPN exclusion. Without this every one of them
+        # pays a fresh getifaddrs walk and netlink dump to answer the same question about
+        # the same instant -- and they could answer it differently, which would leave one
+        # event's participants configured from two views of the host.
+        with scoped_vpn_blocklist_cache():
+            for hook in live:
+                try:
+                    hook(old, new)
+                except Exception as ex:
+                    _emit_log(LogLevel.ERROR, f"participant reset failed: {ex}")
 
         # No completion line: the change was already announced, and a failure logs its own error.
 
@@ -2103,9 +3201,17 @@ class _NetworkRecoveryCoordinator:
         interface manipulation needed: the end-state is the current real snapshot
         and the (synthetic) burst-start differs from it."""
 
-        snapshot = _capture_address_snapshot()
-        burst_start = frozenset(snapshot) | {("provizio_test_transient_if", "203.0.113.7", 24)}  # TEST-NET-3
-        self._on_network_event(snapshot, snapshot, burst_start)
+        # The synthetic address is present in the end-state (and therefore in `old`, so
+        # the end-state is unchanged) and ABSENT from the burst-start: that is the shape
+        # that needs a rebuild — it went away and came back, so whatever was bound to it
+        # died in between. The reverse shape (an extra address at burst start, gone by the
+        # end) is an address that appeared and vanished inside the window; nothing was ever
+        # bound to it, so it needs no rebuild. Synthetic rather than real so the case works
+        # on a host with no addresses at all, e.g. a CI container.
+        synthetic = ("provizio_test_transient_if", "203.0.113.7", 24)  # TEST-NET-3
+        end_state = frozenset(_capture_address_snapshot()) | {synthetic}
+        burst_start = end_state - {synthetic}
+        self._on_network_event(end_state, end_state, burst_start)
 
     def run_safety_net_tick_for_test(self) -> bool:
         """Test-only: run one safety-net tick synchronously — reopen a dead monitor

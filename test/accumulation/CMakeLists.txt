@@ -82,4 +82,4 @@ endforeach()
 
 # Scale every test TIMEOUT in this directory (localization_filter + accumulation) when a sanitizer is
 # active (no-op otherwise).
-provizio_dds_scale_test_timeouts()
+provizio_dds_finalize_tests()

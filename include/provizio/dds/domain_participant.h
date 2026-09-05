@@ -16,6 +16,7 @@
 #define DDS_DOMAIN_PARTICIPANT
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -25,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -35,6 +37,7 @@
 #include <fastdds/dds/topic/qos/TopicQos.hpp>
 
 #include "provizio/dds/common.h"
+#include "provizio/dds/logging.h"
 #include "provizio/dds/network_recovery.h"
 #include "provizio/dds/topic.h"
 
@@ -102,10 +105,11 @@ namespace provizio::dds
     /**
      * @brief Network transport selection for a @c domain_participant.
      *
-     * Controls only whether shared memory is used in addition to UDP. The enlarged UDP
-     * socket buffers that make reliable delivery of large samples (camera frames, point
-     * clouds) work are applied in BOTH modes — they matter for any cross-host UDP path
-     * regardless of shared memory.
+     * Selects which transports carry the domain and, for @c localhost_only, which network
+     * interfaces they may use. The enlarged UDP socket buffers that make reliable delivery
+     * of large samples (camera frames, point clouds) work are applied in EVERY mode — a
+     * multi-MB sample fragments into many datagrams whichever interface carries it,
+     * loopback included.
      */
     enum class transport_mode : std::uint8_t
     {
@@ -117,6 +121,46 @@ namespace provizio::dds
         /// publishers), where cross-major shared-memory negotiation degrades large-sample
         /// throughput.
         udp_only = 1,
+        /// Same-host only: shared memory wherever the platform allows it, plus UDPv4
+        /// confined to the loopback interface. For a domain whose peers are all processes on
+        /// this host — a relay feeding a local recorder, say — shared memory carries the
+        /// samples, and confining UDP to loopback keeps the domain off every other
+        /// interface: it binds, joins multicast on and announces over @c 127.0.0.1 alone, so
+        /// no announcement of its reaches the LAN and no sample of its leaves the host.
+        /// Discovery is additionally given @c 127.0.0.1 as a unicast initial peer, so it does
+        /// not depend on loopback multicast, and participants on another host are refused at
+        /// the discovery layer (Fast-DDS' @c FILTER_DIFFERENT_HOST), so a remote announcement
+        /// that still arrives cannot become a peer.
+        ///
+        /// What the mode is NOT: a privilege boundary. It substitutes the host for the
+        /// network as the limit of reachability, and on the host itself it is deliberately
+        /// open — any local process that joins the domain is a peer, whether or not it asks
+        /// for this mode, and Fast-DDS' shared-memory segments are world-readable
+        /// (@c 0644 under @c /dev/shm), so any local user can read the samples. Use it to
+        /// keep a domain off the wire, not to keep it from other users of the machine.
+        ///
+        /// It governs only the transports this library configures. Where the caller owns
+        /// them — an XML profile of theirs, @c FASTDDS_BUILTIN_TRANSPORTS, or descriptors set
+        /// through @c DomainParticipantFactory — there is nothing here to confine, and
+        /// confining them is theirs to do. A participant that ends up unconfined is reported
+        /// rather than silently left so: the constructor reads the transport configuration
+        /// back off the participant it created and warns if the containment this mode
+        /// promises is not there (@c warn_if_transport_mode_not_applied). Transports of the
+        /// caller's that are already restricted to loopback deliver exactly what was asked
+        /// for and are left in silence.
+        ///
+        /// UDP is kept ALONGSIDE shared memory rather than replaced by it. Shared-memory
+        /// registration fails once the host's shared-memory space is exhausted, and a
+        /// participant confined to this host with no second transport would then have none
+        /// at all; loopback UDP is what keeps it talking. That reasoning holds on Linux as
+        /// much as anywhere else, so this mode never selects shared memory exclusively.
+        ///
+        /// Such a participant also takes no part in network auto-recovery, whatever
+        /// @c network_recovery_mode it is given: no interface change can invalidate a
+        /// loopback locator, so there is nothing to recover from, and a reset would cost its
+        /// peers a rediscovery for nothing. Nor is the VPN interface exclusion applied to
+        /// it — there is no tunnel in a locator set that holds only 127.0.0.1.
+        localhost_only = 2,
     };
 
     class PROVIZIO_DDS_API domain_participant
@@ -254,7 +298,8 @@ namespace provizio::dds
          * @param transport Network transport selection (see @c transport_mode). Defaults
          * to @c transport_mode::automatic (platform default: SHM+UDP on Linux, UDP-only on
          * Windows/macOS). Pass @c transport_mode::udp_only to disable shared memory on all
-         * platforms (e.g. when bridging mismatched Fast-DDS major versions).
+         * platforms (e.g. when bridging mismatched Fast-DDS major versions), or
+         * @c transport_mode::localhost_only to confine the domain to this host.
          */
         domain_participant(DomainId_t domain_id = 0,
                            network_recovery_mode recovery_mode = network_recovery_mode::env_var_controlled,
@@ -508,10 +553,180 @@ namespace provizio::dds
         /// from @c trigger_network_recovery_reset.
         eprosima::fastdds::dds::DomainParticipant *create_fastdds_participant();
 
+        /// @brief Re-point the stored transports' interface blocklist at the host's
+        /// current VPN / tunnel addresses, so this participant neither binds nor
+        /// announces a locator on one (see detail/vpn_interfaces.h for why that
+        /// matters), and turn their netmask filter on for as long as that blocklist is
+        /// non-empty. Called immediately before every participant creation, not once in
+        /// the constructor: a tunnel can come up, go down or change address while the
+        /// process runs, and a rebuild triggered by a real network change must bind the
+        /// interface set that exists at that moment. A no-op when the transports came
+        /// from an XML profile or from FASTDDS_BUILTIN_TRANSPORTS — then no descriptor
+        /// of ours exists to configure, and the caller has taken over transport
+        /// configuration wholesale, or when the transports are confined to loopback
+        /// (@c transport_mode::localhost_only) — a locator set that holds nothing but
+        /// 127.0.0.1 has no tunnel to exclude in the first place, and where such a
+        /// participant turns out NOT to be confined,
+        /// @c warn_if_transport_mode_not_applied is what reports it.
+        void refresh_vpn_interface_blocklist();
+
+        /// @brief Report a @c transport_mode this participant did not end up honouring,
+        /// tested against the configuration it actually holds rather than against who
+        /// configured it: a caller's own XML profile may confine its transports to loopback,
+        /// or leave shared memory out, and a participant that came out as the selection
+        /// asked for is nothing to warn about, whoever built it. Silent for
+        /// @c transport_mode::automatic, which asks for nothing, and silent on every reset
+        /// -- called once, from the constructor, on a configuration no later rebuild changes.
+        /// @c noexcept: it is the last fallible statement of the constructor after the Fast-DDS
+        /// participant exists, and a diagnostic that threw there would leave that participant
+        /// alive with a destroyed listener (see the definition). The work is in
+        /// @c warn_if_transport_mode_not_applied_unchecked; this swallows.
+        void warn_if_transport_mode_not_applied() noexcept;
+        void warn_if_transport_mode_not_applied_unchecked();
+
+        /// @brief Restrict the socket transports this library built to the loopback
+        /// interface, which is what makes @c transport_mode::localhost_only same-host-only:
+        /// Fast-DDS then binds and announces UDP locators on loopback alone, so nothing
+        /// reaches another host and no remote peer can reach this one. Shared memory is
+        /// untouched — it has no interfaces, and it is already confined to this host.
+        /// Called once, from the constructor, on the descriptors @c setup_transports just
+        /// appended; it needs no per-rebuild repeat because those descriptors are cached
+        /// and reused for the lifetime of the participant.
+        void confine_own_socket_transports_to_loopback();
+
+        /// @brief How long a participant-listener swap waits for an in-flight callback.
+        /// Finite by necessity rather than by policy -- see @c detach_participant_listener.
+        static std::chrono::seconds listener_swap_timeout() noexcept;
+
+        /// @brief Detach the participant listener, bounded, before Fast-DDS detaches it
+        /// unbounded. @c noexcept because it runs from the destructor.
+        ///
+        /// @param defer_diagnostic Whether the timeout warning must be stashed rather than
+        /// emitted here. The destructor holds no lock and passes @c false; the network-recovery
+        /// reset path holds @c registration_mutex and @c reset_mutex EXCLUSIVELY and passes
+        /// @c true, because @c logging.h promises a callback may publish onto a DDS topic --
+        /// and @c publisher_handle::publish takes @c reset_mutex shared, which on the same
+        /// thread that already holds it exclusively is a recursive shared acquire: undefined for
+        /// @c std::shared_mutex and an @c EDEADLK abort on glibc. Deferring is sound here in a
+        /// way it is not for the listener-drain warning, because this stall is bounded by
+        /// @c listener_swap_timeout() rather than unbounded, so the message is late but never lost.
+        void detach_participant_listener(bool defer_diagnostic) noexcept;
+
+        /// @brief Stash @p message, to be emitted at @p level by
+        /// @c flush_pending_vpn_blocklist_log, under @c pending_vpn_blocklist_log_mutex.
+        /// The one route for ANY diagnostic produced while a lifecycle lock is held -- the VPN
+        /// exclusion reports it was named for, and every report of the reset path (a
+        /// participant that could not be recreated, a type or an endpoint that could not be
+        /// rebuilt): logging.h promises a log callback may publish onto a DDS topic, and
+        /// publishing takes the lifecycle lock. One writer for every producer so the
+        /// synchronisation cannot be forgotten at a new call site.
+        void stash_vpn_blocklist_log(log_level level, std::string message);
+
+        /// @brief Emit the reports stashed by @c stash_vpn_blocklist_log, if any. MUST be
+        /// called with no participant lock held: it invokes the caller's log callback, which
+        /// is free to re-enter provizio APIs that take the lifecycle lock. @c noexcept because
+        /// it is called from a scope-exit guard during a reset: a throwing log callback must
+        /// not turn a diagnostic into a terminate.
+        void flush_pending_vpn_blocklist_log() noexcept;
+
         DomainId_t domain_id;
         bool recovery_enabled;
+        /// Last VPN / tunnel blocklist this participant logged, so an unchanged set is
+        /// reported once rather than on every creation and every recovery rebuild.
+        /// Touched only from create_fastdds_participant (from the constructor, or from
+        /// a reset that holds reset_mutex), so it needs no synchronisation of its own.
+        std::vector<std::string> last_logged_vpn_blocklist;
+        /// Reports produced under the participant's locks -- by refresh_vpn_interface_blocklist
+        /// and by the reset path -- and emitted by flush_pending_vpn_blocklist_log once they
+        /// are released.
+        /// Guarded, unlike its siblings here: those are touched only under the reset lock,
+        /// while these are deliberately read after that lock has been released, so two
+        /// concurrent resets of the same participant (a caller's
+        /// trigger_network_recovery_reset racing the coordinator's) would otherwise move
+        /// from and clear the same strings.
+        ///
+        /// A list rather than a single message: one refresh can have two independent things
+        /// to say -- which interfaces it excluded, and that a name given in
+        /// PROVIZIO_DDS_ALLOW_VPN_INTERFACES re-admitted none of them -- and the second is
+        /// worth saying precisely on the pass that produces the first.
+        std::vector<std::pair<log_level, std::string>> pending_vpn_blocklist_logs;
+        /// Guards @c pending_vpn_blocklist_logs, and nothing else. A leaf: never held while
+        /// calling out to the log callback or to Fast-DDS.
+        std::mutex pending_vpn_blocklist_log_mutex;
+        /// Whether this participant has already reported that it is NOT excluding VPN /
+        /// tunnel interfaces — because the caller owns the transport configuration, because
+        /// a netmask filter of OFF rules the exclusion out, or because the host's interfaces
+        /// could not be read at all (see refresh_vpn_interface_blocklist). Without the
+        /// report, an operator watching a metered uplink pay for duplicated traffic has
+        /// nothing anywhere to explain why the exclusion did not apply.
+        ///
+        /// One latch for all four lines because they say the same thing to the same reader,
+        /// and a participant can only ever produce one of them: the first two conditions are
+        /// fixed for the participant's life and return before any enumeration, so a
+        /// participant that reaches an enumeration failure is one neither of them applies
+        /// to. Once per participant rather than once per refresh, so a rebuilt participant
+        /// on a host whose reading keeps failing does not repeat it on every network event.
+        bool vpn_exclusion_skip_reported{false};
+        /// Whether this participant switched netmask filtering ON to suppress the duplicate
+        /// unicast sends whitelist mode would otherwise produce (see
+        /// refresh_vpn_interface_blocklist). Kept because it changes what the participant
+        /// can reach — a peer outside every local subnet, reachable only through a router,
+        /// stops receiving unicast — which is worth saying once, in the same line that
+        /// reports the exclusion.
+        bool netmask_filtering_applied{false};
+        /// The blocklist entries this participant actually appended last time, and
+        /// therefore the only ones the next refresh may remove. Recorded per append rather
+        /// than from the computed set: an entry already present is deliberately not
+        /// re-added, and recording it as ours anyway would have the next refresh delete
+        /// somebody else's entry. Same single-threaded access as
+        /// last_logged_vpn_blocklist.
+        std::unordered_set<std::string> last_applied_vpn_blocklist;
+        /// Allowlist entries this participant appended, so a later refresh removes exactly
+        /// those and leaves any the caller wrote. The allowlist exists to carry a netmask
+        /// filter per interface -- ON for loopback, which can reach no other host, and only
+        /// where it collapses real duplicates for the rest (see refresh_vpn_interface_blocklist).
+        std::unordered_set<std::string> last_applied_vpn_allowlist;
+        /// The transport descriptors this library created (whatever @c setup_transports
+        /// appended in the constructor), and the only ones @c
+        /// refresh_vpn_interface_blocklist may modify. @c setup_transports appends to
+        /// @c user_transports rather than replacing it, so a descriptor a caller
+        /// configured — including one from @c load_XML_profiles_file called directly,
+        /// which no environment probe can detect — sits in the same vector, is shared
+        /// process-wide through @c get_default_participant_qos, and must be left exactly
+        /// as the caller set it. The descriptors themselves rather than their addresses,
+        /// so "is this one ours?" is a question about the object and needs no argument
+        /// about when the vector holding it is reassigned.
+        std::unordered_set<std::shared_ptr<eprosima::fastdds::rtps::TransportDescriptorInterface>>
+            own_transport_descriptors;
         eprosima::fastdds::dds::DomainParticipantQos cached_qos;
         bool used_xml_profile{false};
+        /// Whether the transport descriptors in `cached_qos` are the caller's rather than
+        /// this library's — true for FASTDDS_DEFAULT_PROFILES_FILE and for a
+        /// DEFAULT_FASTDDS_PROFILES.xml that Fast-DDS auto-loads from the working
+        /// directory. Wider than `used_xml_profile`, which gates only the QoS this
+        /// library configures for itself; rewriting a blocklist the caller declared is a
+        /// different kind of damage, so it gets its own answer.
+        bool xml_profile_owns_transports{false};
+        /// Whether Fast-DDS built the transports from @c FASTDDS_BUILTIN_TRANSPORTS instead
+        /// of this library building them — read ONCE, in the constructor, at the same moment
+        /// @c setup_transports either ran or did not.
+        ///
+        /// Answered once because the answer has to stay the one the descriptors were built
+        /// under. Re-reading the variable per refresh would let a value set later in the
+        /// process — a Python participant in a mixed application does exactly that, via
+        /// @c os.environ.setdefault — turn a participant whose descriptors this library owns
+        /// and has already written blocklist entries into into one that takes the
+        /// caller-owns early return, so those entries would never be erased again. A tunnel
+        /// address left blocked after the tunnel is gone drops genuine traffic if the OS
+        /// hands that address to a real interface.
+        bool env_owns_transports{false};
+        /// The transport selection this participant was constructed with. Kept because the
+        /// choice outlives the constructor: @c refresh_vpn_interface_blocklist is called from
+        /// @c create_fastdds_participant, which has no access to the constructor's parameter,
+        /// and has to know whether the transports it is looking at are confined to loopback,
+        /// where there is no tunnel to exclude. (Not for the reset path — a loopback-confined
+        /// participant never takes part in auto-recovery, so it never rebuilds.)
+        transport_mode configured_transport_mode{transport_mode::automatic};
 
         // Shared by every operation that touches `participant` and by reset.
         std::shared_mutex reset_mutex;
@@ -674,7 +889,8 @@ namespace provizio::dds
      * fires for. Ignored when @p initial_discovery_callback is empty. Defaults
      * to @c endpoint_kind::data_writer.
      * @param transport Network transport selection (see @c transport_mode); defaults to
-     * @c transport_mode::automatic. Pass @c transport_mode::udp_only to disable shared memory.
+     * @c transport_mode::automatic. Pass @c transport_mode::udp_only to disable shared memory,
+     * or @c transport_mode::localhost_only to confine the domain to this host.
      * @return std::shared_ptr<domain_participant>
      * @see https://en.cppreference.com/w/cpp/memory/shared_ptr
      * @see

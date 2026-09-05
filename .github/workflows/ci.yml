@@ -249,8 +249,6 @@ jobs:
       PROVIZIO_DDS_CTEST_EXCLUDE: ${{ matrix.build_type == 'Debug' && 'reliability' || '' }}
     steps:
       - uses: actions/checkout@v4
-      # Remove any stale venv left by build-cache-python-arm on shared self-hosted runners
-      # (jetson-18.04 and jetson-20.04 share /tmp on the same physical machine).
       - run: rm -rf /tmp/provizio_dds.venv
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
       - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}

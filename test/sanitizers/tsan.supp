@@ -2,11 +2,21 @@
 # Deadlock detection stays ENABLED — only the specific false positives below are suppressed.
 #
 # --- Data races ---
-# No race: suppressions. Local validation found ZERO data races with none active, and any pattern
-# broad enough to cover Fast-DDS internals would also silence a real race in provizio_dds's own
-# listener callbacks (they run on Fast-DDS-owned threads, so their stacks always contain Fast-DDS
-# frames). If a genuinely Fast-DDS-internal race ever appears, add a symbol-specific `race:` entry for
-# that exact function — never a namespace- or library-wide pattern.
+# Only symbol-specific entries, for races that are genuinely Fast-DDS-internal: any pattern broad
+# enough to cover Fast-DDS internals would also silence a real race in provizio_dds's own listener
+# callbacks (they run on Fast-DDS-owned threads, so their stacks always contain Fast-DDS frames).
+# Never a namespace- or library-wide pattern.
+#
+# Fast-DDS 3.6.2: StatefulWriter::intraprocess_heartbeat (the ReaderProxy's initial heartbeat,
+# on the timer thread) reads ReaderLocator::local_reader_ without the writer mutex, while
+# ReaderLocator::stop() resets it under that mutex from matched_reader_remove on a receive
+# thread when the remote participant goes away -- the header documents the member as always
+# protected by the writer's mutex, and the heartbeat is the one path that does not hold it.
+# Intraprocess only (same-process publisher and subscriber), seen from
+# discovered_endpoints_reset_does_not_spin tearing participants down. No provizio_dds frame on
+# either stack. Fixed upstream by eProsima/Fast-DDS#6422 (milestone v3.6.3.0), which takes the
+# mutex around that read: drop this entry when FAST_DDS_VERSION moves past 3.6.2.
+race:eprosima::fastdds::rtps::StatefulWriter::intraprocess_heartbeat
 #
 # --- Lock-order inversions (potential deadlocks) ---
 # provizio_dds holds its participant lifecycle lock `reset_mutex` in SHARED (read) mode across calls
