@@ -23,8 +23,17 @@ deadlock from a slow machine.
 
 ``test/CMakeLists.txt``'s ``provizio_dds_finalize_tests`` already puts
 ``PROVIZIO_DDS_TEST_DEADLINE_SEC`` in every test's environment, a few seconds inside its
-own TIMEOUT; ``run_parallel.py`` reads it and dumps its children's thread states. The
-single-process Python tests had no equivalent -- this is it.
+own TIMEOUT; ``run_parallel.py`` reads it and dumps its children's thread states. This is
+the equivalent for a Python test process, and ``test/python/CMakeLists.txt`` starts every
+one of them through it::
+
+    python -q -X faulthandler -m provizio_test_deadline ./the_test.py [args...]
+
+which arms the dump and then runs the script as ``__main__``. The launcher form exists so
+that no test has to remember to call :func:`arm` -- ``python_callback_exceptions_on_data``
+had not, and its one hang in CI (45 s for a 0.6 s test) reported nothing at all. A test
+that installs its own ``faulthandler`` watchdog replaces this dump (``faulthandler`` keeps
+one timer) and must re-arm it afterwards, as ``python_network_recovery_test`` does.
 
 Reports and nothing else. The verdict stays CTest's, because a test whose own budget runs
 close to its TIMEOUT is slow rather than stuck, and killing it here would turn a slow
@@ -104,3 +113,23 @@ def arm() -> bool:
     # exit=False: report, never decide. See the module docstring.
     faulthandler.dump_traceback_later(remaining, repeat=False, exit=False, file=sys.stderr)
     return True
+
+
+def _run_as_launcher() -> None:
+    """``python -m provizio_test_deadline <script.py> [args...]``: arm, then run the script.
+
+    The script runs as ``__main__`` with ``sys.argv`` rebased onto it, so it cannot tell it
+    was not started directly; its ``sys.exit`` propagates as the process exit code.
+    """
+    if len(sys.argv) < 2:
+        sys.stderr.write("usage: python -m provizio_test_deadline <script.py> [args...]\n")
+        sys.exit(2)
+    import runpy
+
+    sys.argv = sys.argv[1:]
+    arm()
+    runpy.run_path(sys.argv[0], run_name="__main__")
+
+
+if __name__ == "__main__":
+    _run_as_launcher()

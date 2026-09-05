@@ -82,6 +82,13 @@ function(provizio_dds_finalize_tests)
         # below: the five tests registered with no TIMEOUT read no deadline today, but a
         # deadline added to one of them tomorrow would inherit that same silent 1.
         list(APPEND _provizio_dds_env "PROVIZIO_DDS_TEST_TIMEOUT_SCALE=${PROVIZIO_DDS_TEST_TIMEOUT_SCALE}")
+        # A test's stdout is a pipe, which Python block-buffers, and CTest's SIGKILL on a
+        # TIMEOUT takes the buffer with it: everything a hung Python test printed before it
+        # stuck is lost. Unbuffered, the lines arrive as they are printed, so a timed-out
+        # test's output block shows how far it got. The C++ tests get the same from
+        # test/detail/unbuffered_test_output.cpp; run_parallel.py already sets this for the
+        # children it launches, and it means nothing to a non-Python test.
+        list(APPEND _provizio_dds_env "PYTHONUNBUFFERED=1")
         # A deadline, on the other hand, only means something as a fraction of a TIMEOUT:
         # with no TIMEOUT there is nothing for a test to report itself ahead of.
         if(_provizio_dds_to)

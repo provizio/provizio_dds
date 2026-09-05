@@ -58,7 +58,12 @@ ADDR_LINK=203.0.113.5     # TEST-NET-3, RFC 5737 — never routable
 ADDR_BOND=203.0.113.6
 # Scaled like the ctest TIMEOUT around this script (provizio_dds_finalize_tests exports the
 # factor), so a sanitizer build does not turn a slow rebuild into a reported miss.
-AWAIT_TIMEOUT=$((40 * ${PROVIZIO_DDS_TEST_TIMEOUT_SCALE:-1}))
+SCALE="${PROVIZIO_DDS_TEST_TIMEOUT_SCALE:-1}"
+if ! [[ "$SCALE" =~ ^[1-9][0-9]*$ ]]; then
+    echo "PROVIZIO_DDS_TEST_TIMEOUT_SCALE must be a positive integer, got '$SCALE'" >&2
+    exit 1
+fi
+AWAIT_TIMEOUT=$((40 * SCALE))
 
 # Run privileged helpers directly when root, else via non-interactive sudo.
 if [ "$(id -u)" = "0" ]; then
