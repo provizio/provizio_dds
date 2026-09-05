@@ -649,6 +649,18 @@ else(HAS_BIN_CACHE)
             COMMAND ${CMAKE_COMMAND}
                 "-DHOST_HPP=<SOURCE_DIR>/src/cpp/utils/Host.hpp"
                 -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
+            # Make ResourceEvent::unregister_timer wait only for the callback of the timer being
+            # unregistered, not for the whole timer thread to go idle. As shipped, a thread that
+            # holds an endpoint mutex and destroys or recreates a TimedEvent deadlocks with any
+            # timer callback that wants that mutex -- the participant-lease reaper does -- and
+            # the test process hangs until CTest kills it (eProsima/Fast-DDS#6502, open; caught
+            # with both stacks on macos-15-intel and reproduced on Linux). Idempotent and
+            # self-checking like the two scripts above; see resource_event_per_timer_wait.cmake
+            # for the analysis. Drop it once upstream fixes #6502.
+            COMMAND ${CMAKE_COMMAND}
+                "-DRESOURCE_EVENT_H=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.h"
+                "-DRESOURCE_EVENT_CPP=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.cpp"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
