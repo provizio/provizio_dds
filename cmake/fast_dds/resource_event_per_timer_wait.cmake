@@ -25,11 +25,11 @@
 # WriterProxy::stop() "to avoid deadlock when waiting for event (requiring mutex) to finish"
 # -- but no caller can release every lock a foreign callback might want.
 #
-# The fix keeps exactly the guarantee the two callers rely on and drops the rest:
+# The fix keeps exactly the guarantee the callers rely on and drops the rest:
 #   - TimedEvent::~TimedEvent deletes the event right after unregister_timer returns, so the
 #     event's own callback must not be running then;
-#   - WriterProxy::stop() calls recreate_timer() when the event is BUSY precisely to wait for
-#     that event's in-flight callback ("TimedEvent being performed, wait for it to finish").
+#   - WriterProxy::stop() calls recreate_timer() when the proxy is BUSY to wait for the
+#     in-flight callback ("TimedEvent being performed, wait for it to finish").
 # So the execution thread records which timer it is running (executing_timer_), and
 # unregister_timer waits for that field to stop naming the event being unregistered -- and
 # for nothing else. For that to be safe, the timer collections must be consistently
@@ -41,6 +41,14 @@
 # lock. unregister_timer erases at once, under mutex_, then waits only if its event is the one
 # executing. Nothing about when callbacks run, or how often, changes.
 #
+# One caller leaned on the old, wider wait: WriterProxy owns two timers and its stop() waited
+# on initial_acknack_ alone, "it does not matter which of the two events is the one on
+# execution" -- true only while unregister_timer waited for the whole pass. With the wait
+# narrowed to one event, stop() would return while a heartbeat_response_ callback is still
+# running and clear() the proxy under it (a StatefulReader::send_acknack reading the proxy's
+# cleared locators and sequence sets), so WriterProxy.cpp is patched too: stop() recreates
+# both timers, which is exactly what the old wait fenced for it, and no more.
+#
 # This runs as the Fast-DDS ExternalProject PATCH_COMMAND after host_id_without_interfaces.cmake.
 # Like the other two scripts it is:
 #   - Idempotent: re-running it on already patched files is a no-op.
@@ -48,11 +56,15 @@
 #     FAILs loudly rather than silently building a library without the fix.
 # A FAST_DDS_VERSION bump must re-check it; once upstream fixes #6502, drop it.
 #
+# Nothing is written until every anchor in every file has been found, so a failed run leaves
+# the sources pristine rather than half patched.
+#
 # Invoked as:
 #   cmake -DRESOURCE_EVENT_H=<path-to-ResourceEvent.h>
-#         -DRESOURCE_EVENT_CPP=<path-to-ResourceEvent.cpp> -P resource_event_per_timer_wait.cmake
+#         -DRESOURCE_EVENT_CPP=<path-to-ResourceEvent.cpp>
+#         -DWRITER_PROXY_CPP=<path-to-WriterProxy.cpp> -P resource_event_per_timer_wait.cmake
 
-foreach(_var IN ITEMS RESOURCE_EVENT_H RESOURCE_EVENT_CPP)
+foreach(_var IN ITEMS RESOURCE_EVENT_H RESOURCE_EVENT_CPP WRITER_PROXY_CPP)
     if(NOT DEFINED ${_var})
         message(FATAL_ERROR "resource_event_per_timer_wait.cmake: ${_var} must be defined")
     endif()
@@ -61,7 +73,8 @@ foreach(_var IN ITEMS RESOURCE_EVENT_H RESOURCE_EVENT_CPP)
     endif()
 endforeach()
 
-set(_marker "executing_timer_")
+# Every replacement below carries this tag in a comment; a file that has it is already patched.
+set(_marker "[provizio_dds]")
 
 # Replace ONE exact block in ${_contents}, failing loudly if it is not present verbatim.
 function(_provizio_replace_or_fail _file _what _anchor _patched)
@@ -79,6 +92,7 @@ endfunction()
 # ---------------------------------------------------------------------------------------------
 # ResourceEvent.h
 # ---------------------------------------------------------------------------------------------
+function(_provizio_patch_resource_event_h _out)
 file(READ "${RESOURCE_EVENT_H}" _contents)
 string(FIND "${_contents}" "${_marker}" _already_pos)
 if(NOT _already_pos EQUAL -1)
@@ -143,13 +157,14 @@ else()
     }
 ]==])
 
-    file(WRITE "${RESOURCE_EVENT_H}" "${_contents}")
-    message(STATUS "resource_event_per_timer_wait: patched ResourceEvent.h")
+    set(${_out} "${_contents}" PARENT_SCOPE)
 endif()
+endfunction()
 
 # ---------------------------------------------------------------------------------------------
 # ResourceEvent.cpp
 # ---------------------------------------------------------------------------------------------
+function(_provizio_patch_resource_event_cpp _out)
 file(READ "${RESOURCE_EVENT_CPP}" _contents)
 string(FIND "${_contents}" "${_marker}" _already_pos)
 if(NOT _already_pos EQUAL -1)
@@ -502,5 +517,62 @@ _provizio_replace_or_fail("${RESOURCE_EVENT_CPP}" "init_thread" [==[
     resize_collections();
 ]==])
 
-file(WRITE "${RESOURCE_EVENT_CPP}" "${_contents}")
-message(STATUS "resource_event_per_timer_wait: patched ResourceEvent.cpp")
+set(${_out} "${_contents}" PARENT_SCOPE)
+endfunction()
+
+# ---------------------------------------------------------------------------------------------
+# WriterProxy.cpp
+# ---------------------------------------------------------------------------------------------
+function(_provizio_patch_writer_proxy_cpp _out)
+file(READ "${WRITER_PROXY_CPP}" _contents)
+string(FIND "${_contents}" "${_marker}" _already_pos)
+if(NOT _already_pos EQUAL -1)
+    message(STATUS "resource_event_per_timer_wait: WriterProxy.cpp already patched -- no-op")
+    return()
+endif()
+
+_provizio_replace_or_fail("${WRITER_PROXY_CPP}" "WriterProxy::stop" [==[
+    if ((prev_code = state_.exchange(StateCode::STOPPED)) == StateCode::BUSY)
+    {
+        // TimedEvent being performed, wait for it to finish.
+        // It does not matter which of the two events is the one on execution, but we must wait on initial_acknack_ as
+        // it could be restarted if only cancelled while its callback is being triggered.
+        initial_acknack_->recreate_timer();
+    }
+]==] [==[
+    if ((prev_code = state_.exchange(StateCode::STOPPED)) == StateCode::BUSY)
+    {
+        // TimedEvent being performed, wait for it to finish.
+        // [provizio_dds] ResourceEvent::unregister_timer waits for the callback of the event being
+        // unregistered only (eProsima/Fast-DDS#6502), no longer for the timer thread's whole pass, so
+        // recreating initial_acknack_ alone would not fence a heartbeat_response_ callback in flight:
+        // recreate both. initial_acknack_ has to be recreated rather than cancelled as it could be
+        // restarted if only cancelled while its callback is being triggered.
+        initial_acknack_->recreate_timer();
+        heartbeat_response_->recreate_timer();
+    }
+]==])
+
+set(${_out} "${_contents}" PARENT_SCOPE)
+endfunction()
+
+# ---------------------------------------------------------------------------------------------
+# Check every anchor first, then write: a missing one fails the configure with all three files
+# still pristine.
+# ---------------------------------------------------------------------------------------------
+_provizio_patch_resource_event_h(_patched_resource_event_h)
+_provizio_patch_resource_event_cpp(_patched_resource_event_cpp)
+_provizio_patch_writer_proxy_cpp(_patched_writer_proxy_cpp)
+
+if(DEFINED _patched_resource_event_h)
+    file(WRITE "${RESOURCE_EVENT_H}" "${_patched_resource_event_h}")
+    message(STATUS "resource_event_per_timer_wait: patched ResourceEvent.h")
+endif()
+if(DEFINED _patched_resource_event_cpp)
+    file(WRITE "${RESOURCE_EVENT_CPP}" "${_patched_resource_event_cpp}")
+    message(STATUS "resource_event_per_timer_wait: patched ResourceEvent.cpp")
+endif()
+if(DEFINED _patched_writer_proxy_cpp)
+    file(WRITE "${WRITER_PROXY_CPP}" "${_patched_writer_proxy_cpp}")
+    message(STATUS "resource_event_per_timer_wait: patched WriterProxy.cpp")
+endif()
