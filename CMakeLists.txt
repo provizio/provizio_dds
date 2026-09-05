@@ -654,12 +654,15 @@ else(HAS_BIN_CACHE)
             # holds an endpoint mutex and destroys or recreates a TimedEvent deadlocks with any
             # timer callback that wants that mutex -- the participant-lease reaper does -- and
             # the test process hangs until CTest kills it (eProsima/Fast-DDS#6502, open; caught
-            # with both stacks on macos-15-intel and reproduced on Linux). Idempotent and
-            # self-checking like the two scripts above; see resource_event_per_timer_wait.cmake
-            # for the analysis. Drop it once upstream fixes #6502.
+            # with both stacks on macos-15-intel and reproduced on Linux). WriterProxy::stop()
+            # relied on the wide wait to fence both of its timers, so it is adjusted alongside.
+            # Idempotent and self-checking like the two scripts above; see
+            # resource_event_per_timer_wait.cmake for the analysis. Drop it once upstream fixes
+            # #6502.
             COMMAND ${CMAKE_COMMAND}
                 "-DRESOURCE_EVENT_H=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.h"
                 "-DRESOURCE_EVENT_CPP=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.cpp"
+                "-DWRITER_PROXY_CPP=<SOURCE_DIR>/src/cpp/rtps/reader/WriterProxy.cpp"
                 -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
