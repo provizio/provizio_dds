@@ -47,7 +47,7 @@ endif()
 
 foreach(_case defaults env_override env_invalid localhost_only localhost_only_not_applied_warns
         localhost_only_caller_confinement_decides_warning udp_only_shared_memory_decides_warning
-        localhost_only_round_trip)
+        localhost_only_round_trip dynamic_port_range_domain_warns)
     add_test(NAME transport_tuning_${_case}
              COMMAND "$<TARGET_FILE:transport_tuning_test>" ${_case}
              WORKING_DIRECTORY "$<TARGET_FILE_DIR:transport_tuning_test>")

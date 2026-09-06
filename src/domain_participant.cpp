@@ -66,6 +66,77 @@ namespace provizio::dds
 {
     namespace
     {
+        // Fast-DDS's well-known port mapping (the RTPS defaults, PortParameters): domain d owns UDP ports
+        // 7400 + 250 * d .. + 249. provizio_dds never changes these; an XML profile could, in which case
+        // the numbers below describe the default mapping rather than that profile's.
+        constexpr std::uint32_t rtps_port_base = 7400;
+        constexpr std::uint32_t rtps_domain_gain = 250;
+
+        // Only highest_port is shared by both arms below; the per-platform defaults stay inside
+        // the arm that uses them, or clang's -Wunused-const-variable (an error under this
+        // project's -Werror, and invisible to gcc) fires on whichever one this platform does
+        // not reference.
+        constexpr std::uint32_t highest_port = 65535;
+
+        /**
+         * @brief This host's dynamic (ephemeral) port range -- the ports the OS hands out to any socket
+         * that binds without asking for one, and on Windows also the ones Hyper-V / WinNAT reserve.
+         *
+         * The IANA range from 49152 to 65535 on Windows and macOS. On Linux both ends come from one
+         * sysctl (net.ipv4.ip_local_port_range, "32768 60999" by default), read here so a host that
+         * tuned it is judged by what it actually does.
+         *
+         * Read ONCE and validated as a pair. Two independent reads let a caller see a start from the
+         * file and an end from the fallback -- a range the host never had, and on
+         * "70000 80000" a start ABOVE its own end. Validating together means a reading is either
+         * usable in full or not used at all. Mirrored by _linux_dynamic_port_range in
+         * python/provizio_dds.py, which applies the same bounds.
+         *
+         * @return The first and last port of the range.
+         */
+        std::pair<std::uint32_t, std::uint32_t> dynamic_port_range()
+        {
+#if defined(_WIN32) || defined(__APPLE__)
+            constexpr std::uint32_t iana_dynamic_port_start = 49152;
+            return {iana_dynamic_port_start, highest_port};
+#else
+            constexpr std::uint32_t linux_default_port_range_start = 32768;
+            std::ifstream range{"/proc/sys/net/ipv4/ip_local_port_range"};
+            std::uint32_t first = 0;
+            std::uint32_t last = 0;
+            // first > 0 rejects a nonsense lower bound; first <= last rejects an inverted pair; and
+            // last <= highest_port rejects both a too-large end and, because extraction into an
+            // unsigned wraps a leading '-', anything negative.
+            if (range >> first >> last && first > 0 && first <= last && last <= highest_port)
+            {
+                return {first, last};
+            }
+            return {linux_default_port_range_start, highest_port};
+#endif
+        }
+
+        /**
+         * @brief The highest DDS domain whose UDP ports all stay below this OS's dynamic port range: 100 on
+         * Linux with the default range, 166 on Windows and macOS.
+         *
+         * A domain above it is not an error -- Fast-DDS moves a participant whose port is taken to the next
+         * one -- but it does so silently, and peers that look for the participant by unicast initial peers
+         * probe the ports its domain and participant index imply, so a participant that has moved far enough
+         * is never found. That is a hazard the caller cannot observe, hence the warning at construction.
+         *
+         * @param range_start The first port of the dynamic range, see dynamic_port_range().
+         * @return The domain id, or -1 when even domain 0 lies inside the range (nothing a domain choice can
+         * fix; a host with net.ipv4.ip_local_port_range starting at 1024, say).
+         */
+        std::int64_t highest_domain_below_dynamic_ports(const std::uint32_t range_start)
+        {
+            if (range_start <= rtps_port_base)
+            {
+                return -1;
+            }
+            return static_cast<std::int64_t>((range_start - rtps_port_base) / rtps_domain_gain) - 1;
+        }
+
         // ---- Auto-discovery (SPDP) tuning --------------------------------------------------------
         //
         // Participant discovery announcements are multicast best-effort, so some are lost on a busy
@@ -877,6 +948,34 @@ namespace provizio::dds
         // at all, so the two answers cannot disagree.
         // NOLINTNEXTLINE(concurrency-mt-unsafe): startup-only probe, as everywhere else here
         env_owns_transports = std::getenv("FASTDDS_BUILTIN_TRANSPORTS") != nullptr;
+
+        const auto [range_start, range_end] = dynamic_port_range();
+        const std::uint64_t domain_first_port =
+            static_cast<std::uint64_t>(rtps_port_base) + static_cast<std::uint64_t>(rtps_domain_gain) * domain_id;
+        const std::uint64_t domain_last_port = domain_first_port + rtps_domain_gain - 1;
+        // 64-bit throughout, so a domain id large enough to overflow the 32-bit product does not
+        // wrap into a plausible-looking port pair in the message below.
+        const bool overlaps_dynamic_range = domain_last_port >= range_start && domain_first_port <= range_end;
+        if (overlaps_dynamic_range && highest_domain_below_dynamic_ports(range_start) >= 0)
+        {
+            // Worth a line at every creation on such a domain, because what it warns of leaves no
+            // other trace: a taken port costs nothing visible at creation, only a peer that never
+            // appears. The advice is cross-platform on purpose -- 100 is the Linux limit and holds
+            // everywhere -- so a domain chosen on one OS keeps working on the others. Skipped when
+            // even domain 0 is inside the range (the -1 above): then no domain choice helps and the
+            // advice would be wrong.
+            const std::uint64_t first_port = domain_first_port;
+            log_warning() << "DDS domain " << domain_id << " maps to UDP ports " << first_port << "-"
+                          << (first_port + rtps_domain_gain - 1)
+                          << " (Fast-DDS's default port mapping), overlapping this OS's dynamic port range ("
+                          << range_start << "-" << range_end
+                          << "), where any of them may already be taken (Windows reserves whole blocks of "
+                             "them for Hyper-V). A participant whose port is taken moves to another one silently; "
+                             "peers that look for it by unicast initial peers may then never find it, and even "
+                             "with multicast discovery its ports keep colliding with the OS's own use. Prefer a "
+                             "domain of 100 or below, whose ports stay out of the dynamic range on every platform "
+                             "(see Choosing a domain id in DETAILS.md).";
+        }
 
         auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
         if (!used_xml_profile)  // Unless configured via the XML profile

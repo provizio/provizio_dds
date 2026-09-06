@@ -25,6 +25,7 @@ freshly created participant. Each subcommand is its own ctest entry so
 per-case failure stays isolated, mirroring python_discovery_tuning_test.py."""
 
 import os
+import threading
 import sys
 import traceback
 
@@ -101,6 +102,112 @@ def test_env_override():
     )
 
 
+def test_dynamic_port_range_domain_warns():
+    """A domain whose UDP ports fall in the OS's dynamic port range is a discovery hazard the
+    caller cannot see -- a taken port moves the participant to another one silently, where
+    peers probing by unicast initial peers never look (see "Choosing a domain id" in
+    DETAILS.md) -- so creating a participant on one says so, and creating one below the range
+    does not. The boundary is per OS: 100/101 on Linux, 166/167 on Windows and macOS. Mirrors
+    the C++ transport_tuning dynamic_port_range_domain_warns case."""
+    warnings = []
+    lock = threading.Lock()
+
+    def recorder(level, message):
+        if level == provizio_dds.LogLevel.WARNING:
+            with lock:
+                warnings.append(message)
+
+    def warned_for(domain):
+        with lock:
+            warnings.clear()
+        participant = provizio_dds.make_domain_participant(domain, provizio_dds.NetworkRecoveryMode.OFF)
+        del participant
+        prefix = f"DDS domain {domain} maps to UDP ports "
+        with lock:
+            return any(m.startswith(prefix) and "dynamic port range" in m for m in warnings)
+
+    highest_port = 65535
+    rtps_port_base = 7400
+    rtps_domain_gain = 250
+    if sys.platform in ("win32", "darwin"):
+        last_safe = 166
+        # The IANA range, which these two genuinely run to the top of -- so no domain sits
+        # above it. Both bounds are set in BOTH branches: mid_range_domain below needs the
+        # start as well as the end, and setting it only in the else branch is a NameError on
+        # the platform that skips it rather than anything a Linux run can see.
+        range_start = 49152
+        range_end = highest_port
+    else:
+        # The library reads net.ipv4.ip_local_port_range; judge it by the same numbers.
+        range_start = 32768
+        range_end = highest_port
+        try:
+            with open("/proc/sys/net/ipv4/ip_local_port_range", encoding="ascii") as sysctl:
+                first, last = (int(field) for field in sysctl.read().split()[:2])
+            if 0 < first <= last <= highest_port:
+                range_start, range_end = first, last
+        except (OSError, ValueError, IndexError):
+            pass
+        if range_start < rtps_port_base + rtps_domain_gain:
+            # The library returns -1 for any range starting below rtps_port_base +
+            # rtps_domain_gain (not merely at or below the base): domain 0's own ports already
+            # reach into it. This arithmetic goes negative across that whole window. Judge it
+            # the same way rather than creating a participant on domain -1.
+            print(
+                "dynamic_port_range_domain_warns: SKIP (this host's dynamic range starts at "
+                f"{range_start}, at or below the RTPS port base -- no domain choice helps)"
+            )
+            return
+        last_safe = (range_start - rtps_port_base) // rtps_domain_gain - 1
+
+    # A second in-range domain, well past the boundary -- derived from the range rather than
+    # hard-coded. 200 was hard-coded here and is only in-range on a host whose ephemeral range
+    # happens to span its ports (7400 + 250*200 = 57400-57649): with 32768-50000, or
+    # 60000-65535, domain 200 correctly does not warn and the assertion failed on correct
+    # behaviour.
+    mid_range_domain = last_safe + 1 + ((range_end - range_start) // rtps_domain_gain) // 2
+
+    # The OTHER edge, and the one nothing covered: the range has a TOP. Linux's default stops
+    # at 60999, so domains from 215 up map entirely above it and are the safest a 16-bit port
+    # can be -- yet "at or above range_start" warned about every one of them. Skipped where the
+    # range really does run to 65535 (Windows, macOS, or a host that tuned it that way): there
+    # is no such domain to test, and 200 above already covers the in-range case there.
+    first_above = (range_end - rtps_port_base) // rtps_domain_gain + 1
+    range_has_a_top = (
+        range_end < highest_port
+        and rtps_port_base + rtps_domain_gain * (first_above + 1) - 1 <= highest_port
+    )
+
+    provizio_dds.set_log_callback(recorder)
+    try:
+        quiet_on_default = not warned_for(DOMAIN)
+        quiet_on_last_safe = not warned_for(last_safe)
+        warns_on_first_unsafe = warned_for(last_safe + 1)
+        warns_high = warned_for(mid_range_domain)
+        quiet_above_range = not range_has_a_top or not warned_for(first_above)
+    finally:
+        provizio_dds.set_log_callback(None)
+    expect(quiet_on_default, f"no warning on domain {DOMAIN}")
+    expect(quiet_on_last_safe, f"no warning on domain {last_safe}")
+    expect(warns_on_first_unsafe, f"warning on domain {last_safe + 1}")
+    expect(warns_high, f"warning on domain {mid_range_domain}")
+    expect(
+        quiet_above_range,
+        f"no warning on domain {first_above} (entirely above the range)"
+        if range_has_a_top
+        else "no domain above the range on this host (n/a)",
+    )
+    above = (
+        f"quiet above the range (domain {first_above})"
+        if range_has_a_top
+        else "quiet above the range (n/a, range runs to 65535)"
+    )
+    print(
+        f"dynamic_port_range_domain_warns: {'PASS' if not _failures else 'FAIL'} "
+        f"(quiet on {DOMAIN} and {last_safe}, warns on {last_safe + 1} and {mid_range_domain}, {above})"
+    )
+
+
 def test_env_invalid():
     """Malformed / out-of-range env values are ignored and the default wins, so
     a typo can never silently disable the fragmentation cap."""
@@ -133,6 +240,7 @@ _SUBCOMMANDS = {
     "defaults": test_defaults,
     "env_override": test_env_override,
     "env_invalid": test_env_invalid,
+    "dynamic_port_range_domain_warns": test_dynamic_port_range_domain_warns,
 }
 
 

@@ -1807,6 +1807,156 @@ class TransportMode(Enum):
     UDP_ONLY = 1
 
 
+# Fast-DDS's well-known port mapping (the RTPS defaults): domain d owns UDP ports
+# 7400 + 250 * d .. + 249. provizio_dds never changes these; an XML profile could, in which
+# case the numbers in the warning describe the default mapping rather than that profile's.
+# Mirrors src/domain_participant.cpp.
+_RTPS_PORT_BASE = 7400
+_RTPS_DOMAIN_GAIN = 250
+
+
+_HIGHEST_PORT = 65535
+# Where the IANA dynamic range starts, and what Windows and macOS actually use.
+_IANA_DYNAMIC_PORT_START = 49152
+# Linux's compiled-in default for net.ipv4.ip_local_port_range, used when the sysctl cannot
+# be read or does not say something a port range can mean.
+_LINUX_DEFAULT_PORT_RANGE_START = 32768
+_LINUX_PORT_RANGE_SYSCTL = "/proc/sys/net/ipv4/ip_local_port_range"
+# The file holds two decimal numbers and a newline -- 12 bytes on any plausible host. Read a
+# bounded prefix rather than the whole file: this is the only reader of the pair that would
+# otherwise consume unbounded memory if the path is not the kernel's file (a masked or
+# bind-mounted /proc in a container, a chroot, a symlink to /dev/zero), where the C++ twin
+# extracts exactly two tokens and stops.
+_PORT_RANGE_READ_BYTES = 64
+# Two whitespace-separated runs of ASCII digits, each with an optional leading '+', and
+# nothing else before them. Shaped to accept exactly what the C++ twin's `istream >>` into a
+# uint32 accepts and no more: \s because >> skips any whitespace including a newline, the
+# optional '+' because >> takes one, and no '-' because a minus must be REJECTED rather than
+# range-checked away (>> wraps it into a huge unsigned, which the bounds below then reject --
+# same verdict by a different route). int() alone would be looser still: it takes "1_0" as 10
+# under PEP 515.
+_PORT_RANGE_PATTERN = re.compile(r"^\s*\+?([0-9]+)\s+\+?([0-9]+)")
+
+
+def _linux_dynamic_port_range() -> "Optional[Tuple[int, int]]":
+    """This host's ``net.ipv4.ip_local_port_range`` as ``(first, last)``, or ``None`` when it
+    cannot be read or does not describe a usable range.
+
+    Both bounds are validated together -- ``0 < first <= last <= 65535`` -- so a caller cannot
+    end up trusting one half of a reading whose other half was nonsense, nor a start above its
+    own end. One read, not two, for the same reason. Mirrors ``dynamic_port_range()`` in
+    src/domain_participant.cpp, which returns the pair and applies the same bounds; the two
+    were separate reads with separate, looser checks on both sides until this was written.
+
+    One deliberate difference remains: this refuses a reading whose last digit sits exactly on
+    the read boundary, where the C++ (whose ``>>`` reads token by token and so needs no cap)
+    would consume it. It takes 55 leading spaces before a real pair to reach that, which is not
+    a file the kernel writes; the cap is worth more than the equivalence, since it is the only
+    thing standing between this and reading an unbounded /proc that is not the kernel's."""
+    try:
+        with open(_LINUX_PORT_RANGE_SYSCTL, encoding="ascii") as sysctl:
+            text = sysctl.read(_PORT_RANGE_READ_BYTES)
+    except (OSError, ValueError):
+        return None
+    match = _PORT_RANGE_PATTERN.match(text)
+    if match is None:
+        return None
+    if match.end() == len(text) == _PORT_RANGE_READ_BYTES:
+        # The second number ends exactly where the read stopped, so it may have been cut in
+        # half -- and a cut number still parses. "<55 spaces>1024 60999" would otherwise yield
+        # 6099, a plausible value that is not what the file says. Refuse the reading instead;
+        # the fallback is the compiled-in default, which is at least true of some host.
+        return None
+    first = int(match.group(1))
+    last = int(match.group(2))
+    if 0 < first <= last <= _HIGHEST_PORT:
+        return first, last
+    return None
+
+
+def _dynamic_port_range_start() -> int:
+    """Where this OS's dynamic (ephemeral) port range begins -- the ports it hands out to any
+    socket that binds without asking for one, and on Windows also the ones Hyper-V / WinNAT
+    reserve. The IANA range from 49152 on Windows and macOS; on Linux a sysctl
+    (net.ipv4.ip_local_port_range, 32768 by default), read here so a host that tuned it is
+    judged by what it actually does."""
+    if sys.platform in ("win32", "darwin"):
+        return _IANA_DYNAMIC_PORT_START
+    port_range = _linux_dynamic_port_range()
+    return port_range[0] if port_range is not None else _LINUX_DEFAULT_PORT_RANGE_START
+
+
+def _dynamic_port_range_end() -> int:
+    """The LAST port of this OS's dynamic range.
+
+    Read as well as the start, because the range has a top and Linux's default one does not
+    reach 65535: /proc/sys/net/ipv4/ip_local_port_range is "32768 60999" on a stock host, so
+    treating the range as "the start and up" warned about every domain from 215 to 231 --
+    whose ports sit ENTIRELY ABOVE the ephemeral range and are therefore the safest a 16-bit
+    port can be. A warning that is factually wrong about the host it is describing is worse
+    than none. Windows and macOS genuinely do run to 65535."""
+    if sys.platform in ("win32", "darwin"):
+        return _HIGHEST_PORT
+    port_range = _linux_dynamic_port_range()
+    return port_range[1] if port_range is not None else _HIGHEST_PORT
+
+
+def _highest_domain_below_dynamic_ports(range_start: int) -> int:
+    """The highest DDS domain whose UDP ports all stay below this OS's dynamic port range:
+    100 on Linux with the default range, 166 on Windows and macOS.
+
+    A domain above it is not an error -- Fast-DDS moves a participant whose port is taken to
+    the next one -- but it does so silently, and peers that look for the participant by
+    unicast initial peers probe the ports its domain and participant index imply, so a
+    participant that has moved far enough is never found. That is a hazard the caller cannot
+    observe, hence the warning at construction. -1 when even domain 0 lies inside the range
+    (nothing a domain choice can fix)."""
+    if range_start <= _RTPS_PORT_BASE:
+        return -1
+    return (range_start - _RTPS_PORT_BASE) // _RTPS_DOMAIN_GAIN - 1
+
+
+def _warn_if_domain_ports_in_dynamic_range(domain_id: int) -> None:
+    """Report, at WARNING, a domain whose ports fall in the OS's dynamic port range.
+
+    Worth a line at every creation on such a domain, because what it warns of leaves no other
+    trace: a taken port costs nothing visible at creation, only a peer that never appears. The
+    advice is cross-platform on purpose -- 100 is the Linux limit and holds everywhere -- so a
+    domain chosen on one OS keeps working on the others. Skipped when even domain 0 is inside
+    the range: then no domain choice helps and the advice would be wrong."""
+    # ONE reading for both ends, as dynamic_port_range() does in C++. Calling the two
+    # accessors here would read the sysctl twice, and a rewrite between them could hand this a
+    # start from the file and an end from the fallback -- a range the host never had. The two
+    # accessors stay for callers that genuinely want one end.
+    port_range = _linux_dynamic_port_range() if sys.platform not in ("win32", "darwin") else None
+    if port_range is not None:
+        range_start, range_end = port_range
+    else:
+        range_start = (
+            _IANA_DYNAMIC_PORT_START
+            if sys.platform in ("win32", "darwin")
+            else _LINUX_DEFAULT_PORT_RANGE_START
+        )
+        range_end = _HIGHEST_PORT
+    highest_safe = _highest_domain_below_dynamic_ports(range_start)
+    first_port = _RTPS_PORT_BASE + _RTPS_DOMAIN_GAIN * domain_id
+    last_port = first_port + _RTPS_DOMAIN_GAIN - 1
+    # An OVERLAP test, not "at or above the start": the range has a top, and a domain whose
+    # ports all sit above it is the safest a 16-bit port can be. Mirrors the C++ check.
+    if highest_safe < 0 or not (last_port >= range_start and first_port <= range_end):
+        return
+    _network_recovery._emit_log(
+        _network_recovery.LogLevel.WARNING,
+        f"DDS domain {domain_id} maps to UDP ports {first_port}-{last_port} "
+        f"(Fast-DDS's default port mapping), overlapping this OS's dynamic port range "
+        f"({range_start}-{range_end}), where any of them may already be taken (Windows reserves whole blocks of them for "
+        f"Hyper-V). A participant whose port is taken moves to another one silently; peers that look "
+        f"for it by unicast initial peers may then never find it, and even with multicast discovery "
+        f"its ports keep colliding with the OS's own use. Prefer a domain of 100 or below, whose ports "
+        f"stay out of the dynamic range on every platform (see Choosing a domain id in DETAILS.md).",
+    )
+
+
 def make_domain_participant(domain_id: int = 0,
                             recovery_mode: "NetworkRecoveryMode" = None,
                             initial_discovery_callback=None,
@@ -2540,6 +2690,7 @@ def make_domain_participant(domain_id: int = 0,
                      initial_discovery_kinds=None, transport=TransportMode.AUTOMATIC):
             self._cleaned_up = False
             self._domain_id = domain_id
+            _warn_if_domain_ports_in_dynamic_range(domain_id)
             # Last VPN / tunnel blocklist this participant logged (see
             # _resolve_transports), so an unchanged set is reported once rather than on
             # every creation and every recovery rebuild.

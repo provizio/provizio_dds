@@ -335,35 +335,88 @@ namespace
             });
         };
 
+        constexpr std::uint32_t highest_port = 65535;
+        constexpr std::uint32_t rtps_port_base = 7400;
+        constexpr std::uint32_t rtps_domain_gain = 250;
 #if defined(_WIN32) || defined(__APPLE__)
         constexpr provizio::dds::DomainId_t last_domain_below_dynamic_ports = 166;
+        // The IANA range, which these two genuinely run to the top of -- so no domain sits
+        // above it. Both bounds are declared in BOTH arms: mid_range_domain below is computed
+        // after the #endif and needs the start as well as the end, and declaring it only here
+        // is a compile error on the platform that skips this arm rather than anything a Linux
+        // build can see.
+        constexpr std::uint32_t range_start = 49152;
+        constexpr std::uint32_t range_end = highest_port;
 #else
-        // The library reads net.ipv4.ip_local_port_range; judge it by the same number, so a host
-        // that tuned the range still sees the boundary land where the library puts it.
+        // The library reads net.ipv4.ip_local_port_range; judge it by the same numbers, so a
+        // host that tuned the range still sees the boundaries land where the library puts them.
         std::uint32_t range_start = 32768;
+        std::uint32_t range_end = highest_port;
         {
             std::ifstream range{"/proc/sys/net/ipv4/ip_local_port_range"};
             std::uint32_t first = 0;
-            if (range >> first && first > 0)
+            std::uint32_t last = 0;
+            if (range >> first >> last && first > 0 && first <= last && last <= highest_port)
             {
                 range_start = first;
+                range_end = last;
             }
         }
+        // The library returns -1 for any range starting below rtps_port_base + rtps_domain_gain
+        // (not merely at or below the base): domain 0's own ports already reach into the range.
+        // This arithmetic underflows an unsigned across that whole window, so judge it the same
+        // way rather than creating a participant on domain 4294967295. A host with
+        // ip_local_port_range starting below 7650 is unusual, not impossible.
+        if (range_start < rtps_port_base + rtps_domain_gain)
+        {
+            provizio::dds::set_log_callback(std::move(previous));
+            std::cout << "dynamic_port_range_domain_warns: SKIP (this host's dynamic range starts at " << range_start
+                      << ", at or below the RTPS port base -- no domain choice helps)\n";
+            return 0;
+        }
         const auto last_domain_below_dynamic_ports =
-            static_cast<provizio::dds::DomainId_t>((range_start - 7400) / 250 - 1);
+            static_cast<provizio::dds::DomainId_t>((range_start - rtps_port_base) / rtps_domain_gain - 1);
 #endif
         const bool quiet_on_default = !warned_for(k_domain);
         const bool quiet_on_last_safe = !warned_for(last_domain_below_dynamic_ports);
         const bool warns_on_first_unsafe = warned_for(last_domain_below_dynamic_ports + 1);
-        const bool warns_high = warned_for(200);
+        // A second in-range domain, well past the boundary -- derived from the range rather
+        // than hard-coded. 200 was hard-coded here and is only in-range on a host whose
+        // ephemeral range happens to span its ports (7400 + 250*200 = 57400-57649): with
+        // 32768-50000, or 60000-65535, domain 200 correctly does not warn and the assertion
+        // failed on correct behaviour.
+        const auto mid_range_domain = static_cast<provizio::dds::DomainId_t>(
+            last_domain_below_dynamic_ports + 1 +
+            (static_cast<std::uint32_t>(range_end - range_start) / rtps_domain_gain) / 2);
+        const bool warns_high = warned_for(mid_range_domain);
+
+        // The OTHER edge, and the one nothing covered: the range has a TOP. Linux's default
+        // stops at 60999, so domains from 215 up map entirely above it and are the safest a
+        // 16-bit port can be -- yet "at or above range_start" warned about every one of them.
+        // Skipped where the range really does run to 65535 (Windows, macOS, or a host that
+        // tuned it that way): there is no such domain to test, and 200 above already covers
+        // the in-range case there.
+        const auto first_domain_above_dynamic_ports =
+            static_cast<provizio::dds::DomainId_t>((range_end - rtps_port_base) / rtps_domain_gain + 1);
+        const bool range_has_a_top =
+            range_end < highest_port &&
+            rtps_port_base + rtps_domain_gain * (static_cast<std::uint32_t>(first_domain_above_dynamic_ports) + 1) -
+                    1 <=
+                highest_port;
+        const bool quiet_above_range = !range_has_a_top || !warned_for(first_domain_above_dynamic_ports);
 
         provizio::dds::set_log_callback(std::move(previous));
 
-        const bool passed = quiet_on_default && quiet_on_last_safe && warns_on_first_unsafe && warns_high;
+        const bool passed =
+            quiet_on_default && quiet_on_last_safe && warns_on_first_unsafe && warns_high && quiet_above_range;
         std::cout << "dynamic_port_range_domain_warns: " << (passed ? "PASS" : "FAIL") << " (quiet on " << k_domain
                   << ": " << quiet_on_default << ", quiet on " << last_domain_below_dynamic_ports << ": "
                   << quiet_on_last_safe << ", warns on " << (last_domain_below_dynamic_ports + 1) << ": "
-                  << warns_on_first_unsafe << ", warns on 200: " << warns_high << ")\n";
+                  << warns_on_first_unsafe << ", warns on " << mid_range_domain << ": " << warns_high
+                  << ", quiet above the range"
+                  << (range_has_a_top ? " (domain " + std::to_string(first_domain_above_dynamic_ports) + ")"
+                                      : " (n/a, range runs to 65535)")
+                  << ": " << quiet_above_range << ")\n";
         return passed ? 0 : 1;
     }
 
@@ -1030,6 +1083,10 @@ int main(int argc, char **argv)
     if (subcommand == "localhost_only_round_trip")
     {
         return test_localhost_only_round_trip();
+    }
+    if (subcommand == "dynamic_port_range_domain_warns")
+    {
+        return test_dynamic_port_range_domain_warns();
     }
     std::cerr << "unknown subcommand: " << subcommand << "\n";
     return 1;

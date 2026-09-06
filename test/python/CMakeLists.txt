@@ -406,7 +406,7 @@ endforeach()
 # per-case failure stays isolated. Every case creates one (or a handful of) participants
 # and only reads its QoS back, so it returns near-instantly.
 set(_PYTHON_TRANSPORT_TUNING_TEST_NAMES)
-foreach(_tt_case defaults env_override env_invalid)
+foreach(_tt_case defaults env_override env_invalid dynamic_port_range_domain_warns)
     add_test(NAME python_transport_tuning_${_tt_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_transport_tuning_test.py ${_tt_case}
