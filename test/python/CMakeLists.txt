@@ -171,6 +171,13 @@ add_test(NAME python_request_response_ignore_async COMMAND
     WORKING_DIRECTORY "${TEST_PATH}"
 )
 
+# Like their C++ mirrors, these two carry a ctest TIMEOUT: it is what arms the deadline dump
+# (provizio_dds_finalize_tests) so a hang reports every thread's stack instead of a bare
+# ***Timeout, and it stays clear of the client's own worst case (3 s settle + 15 + 5 + 15 + 5 +
+# 15) being cut short by the service's 30 s wait.
+set_tests_properties(python_request_response_ignore python_request_response_ignore_async
+    PROPERTIES TIMEOUT 60)
+
 add_test(NAME python_request_response_dual_service COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
     "\"${PYTHON_EXECUTABLE}\" -q -X faulthandler -m provizio_test_deadline ./python_request_response_dual_service.py"

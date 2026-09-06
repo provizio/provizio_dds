@@ -15,12 +15,17 @@
 # limitations under the License.
 
 import random
+import os
 import sys
 import threading
 import time
 
 import provizio_dds
 import provizio_test_domain
+
+# Test budgets are scaled by the factor provizio_dds_finalize_tests exports (5 under a
+# sanitizer build), exactly as the C++ mirrors scale theirs by PROVIZIO_DDS_TEST_TIMEOUT_SCALE.
+_TIMEOUT_SCALE = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
 
 _START_TIME = time.monotonic()
 
@@ -59,7 +64,7 @@ def main() -> int:
     # is about. Waiting instead for the gap BETWEEN requests keeps the regression signal (a client
     # that dies or hangs is still caught, within a bounded time) while being indifferent to how
     # slow the host is. The ctest TIMEOUT bounds the whole run regardless.
-    idle_timeout = 60.0
+    idle_timeout = 60.0 * _TIMEOUT_SCALE
 
     log_prefix = f"python_request_response_reliability_service{test_name_postfix}: "
     service_name = f"provizio_dds_test_request_response_reliability{test_name_postfix}"
