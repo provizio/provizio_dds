@@ -54,6 +54,8 @@
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/subscriber.h"
 
+#include "detail/test_domain.h"
+
 #if defined(__linux__)
 #include <arpa/inet.h>
 #endif
@@ -93,9 +95,9 @@ namespace
     // The case that carries real traffic gets a domain derived from the pid rather than the
     // shared default: on a self-hosted runner domain 0 carries every other suite's
     // participants, and a loopback-confined participant is reachable by all of them because
-    // they are on the same host. 100..127 mirrors the range the request/response suite
-    // already spreads itself over.
-    const auto k_traffic_domain = static_cast<provizio::dds::DomainId_t>(100 + (current_process_id() % 28));
+    // they are on the same host. The band is the one the request/response reliability suite
+    // spreads itself over too; see detail/test_domain.h for its bounds and why.
+    const auto k_traffic_domain = provizio::dds::test::seed_band_domain(current_process_id());
 
     // The expected default (kept in sync with src/domain_participant.cpp and
     // python/provizio_dds.py): one ~1500-byte-MTU link frame per UDP datagram.
@@ -297,6 +299,74 @@ namespace
     }
 
     // Case: a transport selection this library could not deliver is reported, not swallowed.
+    // A domain whose UDP ports fall in the OS's dynamic port range is a discovery hazard the
+    // caller cannot see -- a taken port moves the participant to another one silently, where
+    // peers probing by unicast initial peers never look (see "Choosing a domain id" in
+    // DETAILS.md, and detail/test_domain.h for the CI failures it cost) -- so creating a
+    // participant on one says so, and creating one below the range does not. The boundary is
+    // per OS: 100/101 on Linux, 166/167 on Windows and macOS.
+    int test_dynamic_port_range_domain_warns()
+    {
+        std::vector<std::string> warnings;
+        std::mutex warnings_mutex;
+        auto previous = provizio::dds::set_log_callback(
+            [&warnings, &warnings_mutex](const provizio::dds::log_level level, const std::string_view message) {
+                if (level == provizio::dds::log_level::warning)
+                {
+                    const std::lock_guard<std::mutex> lock{warnings_mutex};
+                    warnings.emplace_back(message);
+                }
+            });
+
+        const auto warned_for = [&warnings, &warnings_mutex](const provizio::dds::DomainId_t domain) {
+            {
+                const std::lock_guard<std::mutex> lock{warnings_mutex};
+                warnings.clear();
+            }
+            {
+                const auto participant =
+                    provizio::dds::make_domain_participant(domain, provizio::dds::network_recovery_mode::off);
+            }
+            const std::lock_guard<std::mutex> lock{warnings_mutex};
+            const std::string expected_prefix = "DDS domain " + std::to_string(domain) + " maps to UDP ports ";
+            return std::any_of(warnings.begin(), warnings.end(), [&expected_prefix](const std::string &message) {
+                return message.rfind(expected_prefix, 0) == 0 &&
+                       message.find("dynamic port range") != std::string::npos;
+            });
+        };
+
+#if defined(_WIN32) || defined(__APPLE__)
+        constexpr provizio::dds::DomainId_t last_domain_below_dynamic_ports = 166;
+#else
+        // The library reads net.ipv4.ip_local_port_range; judge it by the same number, so a host
+        // that tuned the range still sees the boundary land where the library puts it.
+        std::uint32_t range_start = 32768;
+        {
+            std::ifstream range{"/proc/sys/net/ipv4/ip_local_port_range"};
+            std::uint32_t first = 0;
+            if (range >> first && first > 0)
+            {
+                range_start = first;
+            }
+        }
+        const auto last_domain_below_dynamic_ports =
+            static_cast<provizio::dds::DomainId_t>((range_start - 7400) / 250 - 1);
+#endif
+        const bool quiet_on_default = !warned_for(k_domain);
+        const bool quiet_on_last_safe = !warned_for(last_domain_below_dynamic_ports);
+        const bool warns_on_first_unsafe = warned_for(last_domain_below_dynamic_ports + 1);
+        const bool warns_high = warned_for(200);
+
+        provizio::dds::set_log_callback(std::move(previous));
+
+        const bool passed = quiet_on_default && quiet_on_last_safe && warns_on_first_unsafe && warns_high;
+        std::cout << "dynamic_port_range_domain_warns: " << (passed ? "PASS" : "FAIL") << " (quiet on " << k_domain
+                  << ": " << quiet_on_default << ", quiet on " << last_domain_below_dynamic_ports << ": "
+                  << quiet_on_last_safe << ", warns on " << (last_domain_below_dynamic_ports + 1) << ": "
+                  << warns_on_first_unsafe << ", warns on 200: " << warns_high << ")\n";
+        return passed ? 0 : 1;
+    }
+
     // With FASTDDS_BUILTIN_TRANSPORTS set, Fast-DDS builds the transports and none of the
     // descriptors are ours, so localhost_only confines nothing — verified below by there
     // being no descriptor of ours at all. That matters more than a mode being ignored

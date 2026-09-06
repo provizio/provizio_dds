@@ -20,6 +20,7 @@ import sys
 import time
 
 import provizio_dds
+import provizio_test_domain
 
 _START_TIME = time.monotonic()
 
@@ -39,13 +40,11 @@ async def main() -> int:
 
     test_name_postfix = sys.argv[1]
     value = int(sys.argv[2])
-    # Remap to domain IDs 100-127 to avoid exceeding Fast-DDS max (127) and
-    # to prevent multicast discovery state accumulation across rapid
-    # participant create/destroy cycles.
-    _BASE_DOMAIN_ID = 100
-    _DOMAIN_RANGE = 28  # 100..127
+    # A per-iteration domain, derived from the iteration index, so that DDS discovery state
+    # cannot accumulate across rapid participant create/destroy cycles and no other suite
+    # shares the domain. The band, and why it stops at 100, is in provizio_test_domain.py.
     domain_id = (
-        (_BASE_DOMAIN_ID + int(sys.argv[3]) % _DOMAIN_RANGE)
+        provizio_test_domain.seed_band_domain(int(sys.argv[3]))
         if len(sys.argv) > 3
         else 14
     )

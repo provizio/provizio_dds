@@ -26,6 +26,8 @@ add_executable(transport_tuning_test transport_tuning_test.cpp)
 # host. Every other test target here does the same, for the same reason.
 find_package(Threads REQUIRED)
 target_link_libraries(transport_tuning_test PUBLIC provizio_dds provizio_dds_types Threads::Threads)
+# test/ on the include path for detail/test_domain.h (the per-process DDS domain policy).
+target_include_directories(transport_tuning_test PRIVATE "${CMAKE_SOURCE_DIR}/test")
 
 # Per-OS timeouts. Most cases create a participant or two and only read the QoS
 # back, so they return near-instantly. localhost_only_round_trip is the exception:

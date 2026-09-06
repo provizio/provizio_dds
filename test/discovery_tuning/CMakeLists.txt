@@ -20,6 +20,8 @@
 add_executable(discovery_tuning_test discovery_tuning_test.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(discovery_tuning_test PUBLIC provizio_dds provizio_dds_types Threads::Threads)
+# test/ on the include path for detail/test_domain.h (the per-process DDS domain policy).
+target_include_directories(discovery_tuning_test PRIVATE "${CMAKE_SOURCE_DIR}/test")
 
 # Per-OS timeouts. The multi_participant case spins up 2*K participants and waits
 # for the full discovery mesh to converge (its own 60s internal budget); the

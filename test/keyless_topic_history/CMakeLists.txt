@@ -29,6 +29,8 @@ add_executable(keyless_topic_history_test keyless_topic_history_test.cpp)
 # from command line". The siblings here all declare it for the same reason.
 find_package(Threads REQUIRED)
 target_link_libraries(keyless_topic_history_test PUBLIC provizio_dds provizio_dds_types Threads::Threads)
+# test/ on the include path for detail/test_domain.h (the per-process DDS domain policy).
+target_include_directories(keyless_topic_history_test PRIVATE "${CMAKE_SOURCE_DIR}/test")
 
 # Six publishing participants plus a subscribing one all have to discover each other before
 # anything is published, so the ceiling is sized for discovery on a heavily loaded runner

@@ -29,7 +29,6 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -44,6 +43,8 @@
 
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/publisher.h"
+
+#include "detail/test_domain.h"
 
 #include <geometry_msgs/msg/TransformStampedPubSubTypes.hpp>
 #include <nav_msgs/msg/OdometryPubSubTypes.hpp>
@@ -62,18 +63,15 @@ namespace
     // ranges of <= 300 m stay sub-millimetre) while not flaking on float32 rounding.
     constexpr double default_precision = 0.001;
 
-    // All participants in one test process share this domain, chosen once at random within the DDS-safe range and
-    // away from 0. These tests integrate every sample they receive on the topics they subscribe to — including the
-    // default localization-extrinsics topic rt/provizio_extrinsics. Provizio's self-hosted CI includes real radar
-    // boards whose resident software publishes on that standard topic on the default domain; that extrinsics shifts
-    // every accumulated ego pose by a constant and corrupts the tests. Loopback confinement cannot exclude a
-    // publisher on the same board, so a per-process domain is needed to give each test its own discovery space
-    // (it also isolates against any concurrent run on another host).
-    const auto test_domain = [] {
-        std::random_device random_device;
-        std::uniform_int_distribution<int> distribution(1, 200);  // DDS-safe range, excluding domain 0
-        return distribution(random_device);
-    }();
+    // All participants in one test process share this domain, chosen once at random and away from 0. These tests
+    // integrate every sample they receive on the topics they subscribe to — including the default
+    // localization-extrinsics topic rt/provizio_extrinsics. Provizio's self-hosted CI includes real radar boards
+    // whose resident software publishes on that standard topic on the default domain; that extrinsics shifts every
+    // accumulated ego pose by a constant and corrupts the tests. Loopback confinement cannot exclude a publisher on
+    // the same board, so a per-process domain is needed to give each test its own discovery space (it also isolates
+    // against any concurrent run on another host). Which domains are eligible, and why not just 1..200, is in
+    // detail/test_domain.h.
+    const auto test_domain = provizio::dds::test::random_test_domain();
 
     double radians(const double degrees)
     {
@@ -855,8 +853,10 @@ namespace
     template <typename... publisher_handle_types> void wait_until_matched(const publisher_handle_types &...publishers)
     {
         const auto wait_one = [](const auto &publisher) {
+            // The domain is in the message because a match that never comes has one known cause
+            // that depends on it: see detail/test_domain.h.
             check(publisher->get_num_matched_subscribers(match_timeout, std::chrono::milliseconds{0}) > 0,
-                  "accumulation_test: a subscriber failed to match in time");
+                  "accumulation_test: a subscriber failed to match in time on domain " + std::to_string(test_domain));
         };
         (wait_one(publishers), ...);
     }

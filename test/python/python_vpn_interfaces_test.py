@@ -23,13 +23,13 @@ per-case failure stays isolated — and because the override is parsed once per
 process, so a case can set it before anything reads it."""
 
 import os
-import random
 import sys
 import threading
 import traceback
 from typing import Iterator, Tuple
 
 import provizio_dds
+import provizio_test_domain
 from provizio_dds import network_recovery as _network_recovery
 
 # Per process, not fixed: the pub/sub case below puts real traffic on the wire, and this
@@ -41,28 +41,14 @@ from provizio_dds import network_recovery as _network_recovery
 # accumulation_test.py and python_discovery_tuning_test.py, which randomise for the same
 # reason.
 #
-# Drawn ABOVE every domain the rest of the suite pins, rather than from the whole 1-200 range
-# those two use. The suites with a fixed domain are always on it, so an overlap with one of
-# them is not a coincidence between two random draws but a standing collision that some
-# fraction of runs will hit -- and 1-200 covers all of them: 14; 42; 44 (the C++
-# test/vpn_interfaces/ suite, the closest relative of this one and therefore the likeliest to
-# be running beside it); 46; 71; 72; and the 100-127 band that test/transport_tuning and the
-# reliability suites derive a domain from as 100 + (pid % 28) -- a band rather than a walk,
-# and not always even that, since request_response_reliability_single_service passes a literal
-# seed of 200 and so lands on 104 every run.
-#
-# 42 is the one that makes the argument best. It is CROSS_COMPAT_DOMAIN_ID, shared by the
-# eight test/python/cross_compat_*.py scripts, and cross_version_compat_test.py states
-# outright that those run on their own domain and their own topic and service names so that
-# it can execute CONCURRENTLY with the same-version suite. In CI it always runs, because a
-# missing legacy venv there is a hard failure rather than a skip. So the collision it would
-# cause is scheduled by design rather than merely possible.
-#
-# Across this suite's ~25 cases a 1-in-200 per-case chance is roughly 1 in 8 per job, which is
-# exactly the class of rare, unattributable failure the randomisation was added to remove.
-_LOWEST_UNPINNED_DOMAIN = 130
-_HIGHEST_SAFE_DOMAIN = 200
-DOMAIN = random.randint(_LOWEST_UNPINNED_DOMAIN, _HIGHEST_SAFE_DOMAIN)
+# Drawn from the pool provizio_test_domain.py keeps, which leaves out every domain a suite
+# pins (0; 14; 42, the cross-version compatibility scripts, which run CONCURRENTLY with the
+# same-version suite by design; 44, the C++ test/vpn_interfaces/ suite, this one's closest
+# relative; 46; 71; 72) and the seed-derived band of the reliability and transport-tuning
+# suites, so an overlap can only be a coincidence between two random draws and never a
+# standing collision -- and which stops at domain 100, below the OS dynamic port range, for
+# the reason given there.
+DOMAIN = provizio_test_domain.random_test_domain()
 ALLOW_ENV_NAME = "PROVIZIO_DDS_ALLOW_VPN_INTERFACES"
 
 # TEST-NET-3 (RFC 5737), documentation-only: no host carries it, so a case can use

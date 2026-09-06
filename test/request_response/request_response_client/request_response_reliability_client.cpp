@@ -21,6 +21,8 @@
 
 #include "provizio/dds/request_response.h"
 
+#include "detail/test_domain.h"
+
 #include <std_msgs/msg/Int32PubSubTypes.hpp>
 
 namespace
@@ -68,15 +70,12 @@ try
 
     const std::string test_name_postfix = argv[1];  // NOLINT: OK in a unit test
     auto value = std::atoi(argv[2]);                // NOLINT: OK in a unit test
-    // Use per-iteration domain IDs (100-127) to avoid DDS multicast discovery state accumulation across rapid
-    // participant create/destroy cycles (root cause of flaky timeouts on Windows CI).
-    // High range avoids conflicts with other tests; wraps at 127 (max Fast-DDS domain ID).
-    constexpr provizio::dds::DomainId_t base_domain_id = 100;
-    constexpr provizio::dds::DomainId_t domain_range = 28;  // 100..127
+    // A per-iteration domain, derived from the iteration index, so that DDS discovery state cannot accumulate
+    // across rapid participant create/destroy cycles (root cause of flaky timeouts on Windows CI) and so that
+    // no other suite shares the domain. The band, and why it stops at 100, is in detail/test_domain.h.
     const provizio::dds::DomainId_t domain_id =
-        (argc > 3)
-            ? static_cast<provizio::dds::DomainId_t>(base_domain_id + (std::atoi(argv[3]) % domain_range))  // NOLINT
-            : 14;  // NOLINT: OK in a unit test
+        (argc > 3) ? provizio::dds::test::seed_band_domain(std::atoi(argv[3]))  // NOLINT: OK in a unit test
+                   : 14;                                                        // NOLINT: OK in a unit test
 
     const std::string test_log_prefix = "request_response_reliability_client" + test_name_postfix + ": ";
     const std::string service_name{"provizio_dds_test_request_response_reliability" + test_name_postfix};

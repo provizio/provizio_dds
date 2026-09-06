@@ -46,6 +46,8 @@
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/subscriber.h"
 
+#include "detail/test_domain.h"
+
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
 #include <std_msgs/msg/StringPubSubTypes.hpp>
 
@@ -56,19 +58,15 @@ namespace
     using eprosima::fastdds::dds::Duration_t;
 
     constexpr auto k_domain = 0;
-    // The mesh case runs on a per-process domain, picked once at random within the
-    // DDS-safe range and away from 0. These tests must unset FASTDDS_DEFAULT_PROFILES_FILE
-    // to exercise the code-driven discovery tuning, so unlike the rest of the suite they
-    // cannot be confined to loopback; with a fixed domain, concurrent ctest runs on other
-    // self-hosted CI hosts sharing the LAN could cross-match into the mesh and break the
-    // exact "matched == k" assertion. Randomising per process makes such a collision
-    // improbable. The single-participant cases only read back their own QoS, so they are
-    // unaffected by domain sharing.
-    const auto k_mesh_domain = [] {
-        std::random_device random_device;
-        std::uniform_int_distribution<int> distribution(1, 200);  // DDS-safe range, excluding domain 0
-        return distribution(random_device);
-    }();
+    // The mesh case runs on a per-process domain, picked once at random and away from 0.
+    // These tests must unset FASTDDS_DEFAULT_PROFILES_FILE to exercise the code-driven
+    // discovery tuning, so unlike the rest of the suite they cannot be confined to loopback;
+    // with a fixed domain, concurrent ctest runs on other self-hosted CI hosts sharing the
+    // LAN could cross-match into the mesh and break the exact "matched == k" assertion.
+    // Randomising per process makes such a collision improbable. The single-participant
+    // cases only read back their own QoS, so they are unaffected by domain sharing. Which
+    // domains are eligible, and why not just 1..200, is in detail/test_domain.h.
+    const auto k_mesh_domain = provizio::dds::test::random_test_domain();
 
     // The expected de-escalated defaults (kept in sync with
     // src/domain_participant.cpp and python/provizio_dds.py QosDefaults).

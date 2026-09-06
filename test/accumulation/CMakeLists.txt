@@ -19,6 +19,8 @@
 add_executable(accumulation_test accumulation_test.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(accumulation_test PUBLIC provizio_dds provizio_dds_types Threads::Threads)
+# test/ on the include path for detail/test_domain.h (the per-process DDS domain policy).
+target_include_directories(accumulation_test PRIVATE "${CMAKE_SOURCE_DIR}/test")
 
 # The accumulation headers auto-detect Eigen via __has_include at compile time (header-only feature): give this
 # test target Eigen's include path when available, or the explicit disable macro when DISABLE_EIGEN=ON — so this

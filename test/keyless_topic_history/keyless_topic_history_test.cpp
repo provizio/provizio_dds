@@ -49,7 +49,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <set>
 #include <string>
 #include <string_view>
@@ -64,6 +63,8 @@
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/qos_defaults.h"
 #include "provizio/dds/subscriber.h"
+
+#include "detail/test_domain.h"
 
 #include <nav_msgs/msg/OdometryPubSubTypes.hpp>
 
@@ -160,26 +161,21 @@ namespace
         return factory->set_library_settings(settings) == eprosima::fastdds::dds::RETCODE_OK;
     }
 
-    // Highest DDS domain id this test will pick. Domains are chosen at random within
-    // 1..this, which stays inside the DDS-safe span and off domain 0.
-    constexpr int k_highest_test_domain = 200;
-
     /**
      * @brief A DDS domain chosen at random, once per process.
      *
      * CI runners are loaded and run many jobs at once, and every participant on a domain
      * hears every other one on it. A per-process domain gives each test run its own
      * discovery space, so a neighbouring job's traffic can neither be counted as one of
-     * this test's samples nor crowd out its discovery. Range 1..200 stays inside the
-     * DDS-safe span and off domain 0, where resident software lives.
+     * this test's samples nor crowd out its discovery. Off domain 0, where resident software
+     * lives; which other domains are eligible, and why not just 1..200, is in
+     * detail/test_domain.h.
      *
      * @return The domain id for this process.
      */
     provizio::dds::DomainId_t random_domain()
     {
-        std::random_device entropy;
-        std::uniform_int_distribution<int> domains{1, k_highest_test_domain};
-        return static_cast<provizio::dds::DomainId_t>(domains(entropy));
+        return provizio::dds::test::random_test_domain();
     }
 
     /**

@@ -30,16 +30,17 @@ import time
 import traceback
 
 import provizio_dds
+import provizio_test_domain
 
 DOMAIN = 0
-# The mesh case runs on a per-process domain, picked once at random within the
-# DDS-safe range and away from 0. These tests must unset FASTDDS_DEFAULT_PROFILES_FILE
-# to exercise the code-driven discovery tuning, so unlike the rest of the suite they
-# cannot be confined to loopback; with a fixed domain, concurrent ctest runs on other
-# self-hosted CI hosts sharing the LAN could cross-match into the mesh and break the
-# exact "matched == K" assertion. Randomising per process makes such a collision
-# improbable.
-MESH_DOMAIN = random.randint(1, 200)  # DDS-safe range, excluding domain 0
+# The mesh case runs on a per-process domain, picked once at random and away from 0.
+# These tests must unset FASTDDS_DEFAULT_PROFILES_FILE to exercise the code-driven
+# discovery tuning, so unlike the rest of the suite they cannot be confined to loopback;
+# with a fixed domain, concurrent ctest runs on other self-hosted CI hosts sharing the
+# LAN could cross-match into the mesh and break the exact "matched == K" assertion.
+# Randomising per process makes such a collision improbable. Which domains are eligible,
+# and why not just 1..200, is in provizio_test_domain.py.
+MESH_DOMAIN = provizio_test_domain.random_test_domain()
 
 # The expected de-escalated defaults (kept in sync with the C++
 # test/discovery_tuning/ suite, src/domain_participant.cpp and the

@@ -22,6 +22,8 @@
 
 #include "provizio/dds/request_response.h"
 
+#include "detail/test_domain.h"
+
 #include <std_msgs/msg/Int32PubSubTypes.hpp>
 
 namespace
@@ -63,15 +65,12 @@ int main(int argc, char *argv[])
     const std::string test_name_postfix = argv[1];  // NOLINT: OK in a unit test
     auto expected_value = std::atoi(argv[2]);       // NOLINT: OK in a unit test
     auto num_iterations = std::atoi(argv[3]);       // NOLINT: OK in a unit test
-    // Use per-iteration domain IDs (100-127) to avoid DDS multicast discovery state accumulation across rapid
-    // participant create/destroy cycles (root cause of flaky timeouts on Windows CI).
-    // High range avoids conflicts with other tests; wraps at 127 (max Fast-DDS domain ID).
-    constexpr provizio::dds::DomainId_t base_domain_id = 100;
-    constexpr provizio::dds::DomainId_t domain_range = 28;  // 100..127
+    // A per-iteration domain, derived from the iteration index, so that DDS discovery state cannot accumulate
+    // across rapid participant create/destroy cycles (root cause of flaky timeouts on Windows CI) and so that
+    // no other suite shares the domain. The band, and why it stops at 100, is in detail/test_domain.h.
     const provizio::dds::DomainId_t domain_id =
-        (argc > 4)
-            ? static_cast<provizio::dds::DomainId_t>(base_domain_id + (std::atoi(argv[4]) % domain_range))  // NOLINT
-            : 14;  // NOLINT: OK in a unit test
+        (argc > 4) ? provizio::dds::test::seed_band_domain(std::atoi(argv[4]))  // NOLINT: OK in a unit test
+                   : 14;                                                        // NOLINT: OK in a unit test
     // Deadline on IDLENESS, not on total time. This service is a passive responder: its job is
     // to notice a client that has STOPPED, not to cap how long a slow machine may take to work
     // through the iterations. The former budget (num_iterations * 3 + 30) was sized at almost

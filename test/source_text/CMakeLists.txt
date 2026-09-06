@@ -21,6 +21,15 @@ add_test(NAME runtime_text_is_ascii COMMAND
 )
 set_tests_properties(runtime_text_is_ascii PROPERTIES TIMEOUT 60)
 
+# Cross-language parity of the test-domain policy: test/detail/test_domain.h against
+# test/python/provizio_test_domain.py. Here rather than under test/python because it reads
+# the two sources and needs no bindings, and because the C++ suites it guards are built
+# whether or not the Python ones are.
+add_test(NAME test_domain_parity COMMAND
+    "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_domain_parity.py" "${CMAKE_SOURCE_DIR}"
+)
+set_tests_properties(test_domain_parity PROPERTIES TIMEOUT 60)
+
 # Scale this directory's test timeouts under a sanitizer, and let a stuck test report
 # itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
 provizio_dds_finalize_tests()
