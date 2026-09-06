@@ -15,17 +15,24 @@
 #
 # Cross-version compat request client. Mirrors
 # test/python/python_request_response_client.py but on a dedicated DDS
-# domain + service name so the test can safely run in parallel with the
-# same-version test suite (which uses domain 14 for request/response).
+# domain + service name (see the constants below) so the test can safely run
+# in parallel with the same-version test suite and with other copies of itself.
 
 import asyncio
+import os
 import sys
 import provizio_dds
 
 log_prefix = "cross_compat_request_client: "
 
-CROSS_COMPAT_DOMAIN_ID = 42
-CROSS_COMPAT_SERVICE_NAME = "provizio_dds_cross_compat_service"
+# The driver (cross_version_compat_test.py) gives every run of this test its own domain and its
+# own topic / service names, because CI runs four copies of it on jetson runners that share a
+# LAN within seconds of each other, and the halves that are not confined to loopback used to
+# meet -- see the comment on _CHILD_ENV there. Falls back to the historical fixed values when
+# this script is run by hand.
+CROSS_COMPAT_DOMAIN_ID = int(os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_DOMAIN", "42"))
+CROSS_COMPAT_NAME_SUFFIX = os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_SUFFIX", "")
+CROSS_COMPAT_SERVICE_NAME = "provizio_dds_cross_compat_service" + CROSS_COMPAT_NAME_SUFFIX
 
 
 class Timeout:

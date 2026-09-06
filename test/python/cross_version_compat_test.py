@@ -61,11 +61,12 @@ Required environment:
     a hard failure — silent skip there would erase the wire-interop
     matrix this test exists to enforce.
 
-Parallelism note: the cross_compat/*.py scripts run on DDS domain 42 and
-use their own topic + service names so this test can execute concurrently
-with the same-version suite (which uses domain 0 for pub/sub and domain
-14 for request/response). That keeps the heavy request_response_reliability
-tests from gating the cross-version verification.
+Parallelism note: the cross_compat/*.py scripts run on a domain and under topic
+and service names this driver picks per process (see _CHILD_ENV) so this test can
+execute concurrently with the same-version suite (which uses domain 0 for pub/sub
+and domain 14 for request/response) and with the copies of itself that CI runs on
+the neighbouring runners. That keeps the heavy request_response_reliability tests
+from gating the cross-version verification.
 
 The current-build python interpreter is `sys.executable`. The cross_compat
 scripts are sibling to this file, so they import provizio_dds from
@@ -74,11 +75,14 @@ the current-version process, the venv install for the legacy one.
 """
 
 import os
+import random
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+import provizio_test_domain
 
 
 LEGACY_ENV_VAR = "PROVIZIO_DDS_LEGACY_PYTHON"
@@ -169,7 +173,31 @@ def _kill_quietly(proc: subprocess.Popen) -> None:
 # nothing at all from B, even though A had received every correct response back from it and so
 # proved B had served them. Same reason the C++ log emitter and the reliable_pub_sub verdicts
 # flush rather than trusting exit to do it.
-_CHILD_ENV = {**os.environ, "PYTHONUNBUFFERED": "1"}
+# The legacy half never saw the loopback profile. It bundles Fast-DDS 2.14, which reads
+# FASTRTPS_DEFAULT_PROFILES_FILE; Fast-DDS 3 renamed that to FASTDDS_DEFAULT_PROFILES_FILE and
+# ignores the old name, and the suite exports only the new one (.github/workflows/test.sh). So
+# every 1.10.1 participant here loaded no profile at all and bound every interface, announcing
+# on the LAN, while its 2.x partner was confined to 127.0.0.1. CI runs this test on four
+# Python-enabled jetson runners that share that LAN, within seconds of each other, on a fixed
+# domain with fixed topic and service names -- so those unconfined halves met. It is on record:
+# in one run this test's legacy service processed requests (-15 and 75) that its own client
+# never sent, and the response its client was waiting for never arrived. Exporting the 2.x name
+# under the 2.x spelling as well confines both halves to this host, which is the fix; the
+# per-process domain and name suffix below are what keep two copies apart on ONE host, where
+# loopback confinement would not. Both are exported rather than derived in the children because
+# the two halves must agree on them, and one of them is a different library version reading the
+# same script; the domain comes from the shared pool for the reason provizio_test_domain.py
+# gives.
+_CROSS_COMPAT_DOMAIN = provizio_test_domain.random_test_domain()
+_CROSS_COMPAT_SUFFIX = f"_{random.randint(0, 2**32 - 1)}"
+_XML_PROFILE = os.environ.get("FASTDDS_DEFAULT_PROFILES_FILE", "")
+_CHILD_ENV = {
+    **os.environ,
+    "PYTHONUNBUFFERED": "1",
+    "PROVIZIO_DDS_CROSS_COMPAT_DOMAIN": str(_CROSS_COMPAT_DOMAIN),
+    "PROVIZIO_DDS_CROSS_COMPAT_SUFFIX": _CROSS_COMPAT_SUFFIX,
+    **({"FASTRTPS_DEFAULT_PROFILES_FILE": _XML_PROFILE} if _XML_PROFILE else {}),
+}
 
 
 # Scaled the way CMake scales the ctest timeouts (provizio_dds_finalize_tests exports the
@@ -244,7 +272,10 @@ def run_pair(stage: str, cmd_a, cmd_b, timeout: float = _PAIR_TIMEOUT_SEC) -> No
             _kill_quietly(proc)
             drain.join(timeout=5.0)
             # A side that has printed its success line has done every bit of work this pair
-            # asserts: these children print it last, immediately before returning from main.
+            # asserts: these children print it last, immediately before returning from main,
+            # and ONLY on the success path -- the publishers' zero-published case has a
+            # failure line of its own that carries no "Success", so this cannot mistake a
+            # genuine interop regression that also exits slowly for a completed run.
             # What can still be outstanding is teardown -- and on the LEGACY side that is a
             # released 1.10.x tearing a Fast-DDS participant down on whatever runner CI gave
             # us, which on a loaded ARM box has now twice taken longer than the budget here.
