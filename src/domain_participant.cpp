@@ -520,6 +520,63 @@ namespace provizio::dds
                                 [&lowered](const std::string_view name) { return lowered == name; });
         }
 
+        // The mirror image of certainly_outside_loopback: whether an interface-list entry
+        // CERTAINLY names the loopback interface -- an address in 127.0.0.0/8, ::1, or one of
+        // the device names above. An entry that is certain in neither direction (a device
+        // name this cannot recognise) fails both tests, and every caller of this one treats
+        // that as "not confined", the safe side for a decision that switches a safety net off.
+        bool certainly_loopback(const std::string &entry)
+        {
+            if (detail::is_ipv6_address_text(entry))
+            {
+                return entry == "::1";
+            }
+            const bool is_ipv4_literal = !entry.empty() && entry.find_first_not_of("0123456789.") == std::string::npos;
+            if (is_ipv4_literal)
+            {
+                return entry.rfind("127.", 0) == 0;
+            }
+            const std::string lowered = detail::to_lower_ascii(entry);
+            return std::any_of(loopback_device_names.begin(), loopback_device_names.end(),
+                               [&lowered](const std::string_view name) { return lowered == name; });
+        }
+
+        // Whether a socket transport is CERTAINLY confined to the loopback interface: it has an
+        // interface list (both spellings count, see certainly_not_confined_to_loopback) and every
+        // entry on it is certainly loopback.
+        bool confined_to_loopback(const eprosima::fastdds::rtps::SocketTransportDescriptor &socket)
+        {
+            if (socket.interface_allowlist.empty() && socket.interfaceWhiteList.empty())
+            {
+                return false;
+            }
+            return std::all_of(socket.interface_allowlist.begin(), socket.interface_allowlist.end(),
+                               [](const eprosima::fastdds::rtps::AllowedNetworkInterface &allowed) {
+                                   return certainly_loopback(allowed.name);
+                               }) &&
+                   std::all_of(socket.interfaceWhiteList.begin(), socket.interfaceWhiteList.end(),
+                               [](const std::string &allowed) { return certainly_loopback(allowed); });
+        }
+
+        // Whether a participant's transports, as its effective QoS describes them, keep it on
+        // this host: the builtin transports are off (they bind every interface), it has at
+        // least one transport of its own, and every socket transport among them is confined to
+        // loopback. Shared memory needs no interface and counts against nothing.
+        bool transports_confine_to_loopback(const dds::DomainParticipantQos &qos)
+        {
+            const auto &transports = qos.transport();
+            if (transports.use_builtin_transports || transports.user_transports.empty())
+            {
+                return false;
+            }
+            return std::all_of(
+                transports.user_transports.begin(), transports.user_transports.end(), [](const auto &descriptor) {
+                    const auto socket =
+                        std::dynamic_pointer_cast<eprosima::fastdds::rtps::SocketTransportDescriptor>(descriptor);
+                    return socket == nullptr || confined_to_loopback(*socket);
+                });
+        }
+
         // Whether a socket transport is CERTAINLY reachable beyond the loopback interface.
         // No interface list at all is the certain case that matters in practice: Fast-DDS
         // then binds every interface it finds.
@@ -549,9 +606,11 @@ namespace provizio::dds
         // whatever the mode asks for: every locator it holds lives on an interface no
         // network change can take away or re-address, so there is nothing for the interface
         // monitor to detect on its behalf — and a reset it did not need would still cost its
-        // peers a full rediscovery. Answered in one place because two callers must agree:
-        // the constructor's recovery_enabled, and make_domain_participant's registration
-        // with the coordinator that does the watching.
+        // peers a full rediscovery. This is the constructor's opening answer; a caller-supplied
+        // XML profile can still narrow it once the Fast-DDS participant exists and its transports
+        // can be read (skip_network_recovery_if_confined_by_xml), which is why
+        // make_domain_participant registers with the coordinator by what the finished
+        // participant says (takes_part_in_network_recovery) rather than by this function.
         bool network_recovery_applies(const network_recovery_mode mode, const transport_mode transport)
         {
             return transport != transport_mode::localhost_only && resolve_network_recovery_enabled(mode);
@@ -1162,6 +1221,10 @@ namespace provizio::dds
         // none held, which is trivially true throughout the constructor.
         const scope_exit flush_vpn_blocklist_log{[this] { flush_pending_vpn_blocklist_log(); }};
 
+        // Before the Fast-DDS participant exists, because that is when its discovery listener goes
+        // live: recovery_enabled must be final before any thread can read it.
+        skip_network_recovery_if_confined_by_xml(mode);
+
         participant = create_fastdds_participant();
         if (participant == nullptr)
         {
@@ -1180,6 +1243,46 @@ namespace provizio::dds
         // generation starts at 1 — anything compared against 0 means "never built
         // against any participant", which teardown_state treats as a no-op.
         generation.store(1, std::memory_order_release);
+    }
+
+    void domain_participant::skip_network_recovery_if_confined_by_xml(const network_recovery_mode mode) noexcept
+    {
+        // A diagnostic-grade decision, so it swallows like warn_if_transport_mode_not_applied
+        // does: a bad_alloc from the log line must not cost the caller its participant.
+        try
+        {
+            if (!recovery_enabled || !xml_profile_owns_transports || network_recovery_explicitly_requested(mode))
+            {
+                return;
+            }
+
+            // The QoS Fast-DDS is about to use, read the way it reads it: create_participant()
+            // calls load_profiles() (idempotent) and substitutes the factory's default participant
+            // QoS -- the one the XML default profile filled -- for PARTICIPANT_QOS_DEFAULT, which is
+            // what create_fastdds_participant passes in this branch. Read here rather than from the
+            // finished participant so the answer is final before the participant (and with it the
+            // discovery listener that can call into this object) exists.
+            auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
+            participant_factory->load_profiles();
+            dds::DomainParticipantQos profile_qos;
+            participant_factory->get_default_participant_qos(profile_qos);
+            if (!transports_confine_to_loopback(profile_qos))
+            {
+                return;
+            }
+            recovery_enabled = false;
+            // Said at info, once per participant: the caller asked for nothing in particular and
+            // is getting the default's judgement, which they can overrule in two ways -- both
+            // named, because the line is the only place they would learn about it.
+            log_info() << "network auto-recovery is not watching this participant on domain " << domain_id
+                       << ": its XML profile confines the transports to the loopback interface, which no network "
+                          "change can take away or re-address, so a rebuild could fix nothing and would only cost "
+                          "its peers a rediscovery. Pass network_recovery_mode::on, or set "
+                          "PROVIZIO_DDS_NETWORK_RECOVERY=on, to have it watched anyway.";
+        }
+        catch (...)  // NOLINT(bugprone-empty-catch): nothing to handle it with, see above
+        {
+        }
     }
 
     void domain_participant::warn_if_transport_mode_not_applied() noexcept
@@ -1930,6 +2033,27 @@ namespace provizio::dds
             return nullptr;
         }
 
+        // Refresh Fast-DDS's process-wide interface cache FIRST, because everything below
+        // is matched against it. Fast-DDS populates that cache once, inside the first
+        // create_participant, and refreshes it on no later one; UDPv4Transport's constructor
+        // then intersects our interface_allowlist with the CACHED list
+        // (get_ipv4s(force_lookup=false)), so an address that has changed since -- a DHCP
+        // renewal, a wifi reconnect -- is in our live list and not in theirs. The
+        // intersection collapses to loopback, and because it is non-empty Fast-DDS' own
+        // "All whitelist interfaces were filtered out" error never fires: the participant
+        // silently reaches nothing. The same staleness would skew the blocklist match and
+        // real_interface_count. One getifaddrs / GetAdaptersAddresses -- measured at 63 us on a
+        // five-interface host, and 0.48% of one make_domain_participant() even in a sanitiser
+        // build -- and it makes the live enumeration below agree with what the transport will
+        // actually see. Unconditional because there is no "only where staleness is possible" to
+        // condition on: any two creations can straddle a DHCP renewal or a Wi-Fi reconnect, so
+        // every creation after the first is exposed.
+        //
+        // Safe under the reset's locks (this runs from the constructor and from
+        // trigger_network_recovery_reset with both lifecycle locks held): it is noexcept, logs
+        // nothing, and takes only SystemInfo's own internal mutex.
+        refresh_fastdds_interface_cache();
+
         // Re-evaluated per creation, so a rebuild after a network change blocks the
         // tunnels that exist at that moment rather than the ones that existed at
         // construction time.
@@ -2603,17 +2727,12 @@ namespace provizio::dds
                 discovered_writer_reliability.clear();
             }
 
-            // Refresh Fast-DDS's process-wide interface cache before recreating.
-            // This is the WHOLE point of the reset on a network change: without
-            // it, the new participant would use the same stale interface set
-            // that the now-destroyed one bound to (the cache is initialised
-            // once in SystemInfo's constructor and not refreshed on any
-            // subsequent participant creation). See network_recovery.h's
-            // docstring on refresh_fastdds_interface_cache for the full
-            // rationale.
-            refresh_fastdds_interface_cache();
-
-            // Create new participant with the SAME QoS as the original.
+            // Create new participant with the SAME QoS as the original. It refreshes
+            // Fast-DDS's process-wide interface cache itself, before reading any interface
+            // list -- which is the WHOLE point of the reset on a network change, since
+            // otherwise the new participant would bind the same stale interface set the
+            // destroyed one did. See network_recovery.h's docstring on
+            // refresh_fastdds_interface_cache for the full rationale.
             // Flagged BEFORE the rebuild is attempted, and cleared only once it has fully
             // succeeded. Everything from here to the end of this block can throw --
             // create_fastdds_participant is not noexcept, and the type/topic/endpoint
@@ -2715,7 +2834,7 @@ namespace provizio::dds
         // runs only after they are all gone.
         auto participant = std::make_shared<domain_participant>(
             domain_id, recovery_mode, std::move(initial_discovery_callback), initial_discovery_kinds, transport);
-        if (network_recovery_applies(recovery_mode, transport))
+        if (participant->takes_part_in_network_recovery())
         {
             detail::network_recovery_coordinator::instance().register_participant(participant);
         }

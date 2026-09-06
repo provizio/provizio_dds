@@ -397,6 +397,22 @@ namespace provizio::dds
         }
 
         /**
+         * @brief Whether this participant is watched by network auto-recovery, i.e. rebuilt on a
+         * confirmed network change. Decided once, at construction: the @c network_recovery_mode,
+         * the @c PROVIZIO_DDS_NETWORK_RECOVERY variable, and whether the transports leave this host
+         * at all -- a participant confined to the loopback interface (by
+         * @c transport_mode::localhost_only, or by a caller-supplied XML profile that whitelists
+         * only loopback) has nothing a network change could take from it, and is not watched in
+         * the default mode. See @c network_recovery_mode::env_var_controlled.
+         *
+         * @return true when a network change rebuilds this participant.
+         */
+        bool takes_part_in_network_recovery() const noexcept
+        {
+            return recovery_enabled;
+        }
+
+        /**
          * @brief Monotonically increasing identifier for the underlying Fast-DDS
          * participant. Starts at 1 on construction, increments by 1 on every
          * successful recreation in @c trigger_network_recovery_reset. Used by
@@ -583,6 +599,15 @@ namespace provizio::dds
         /// @c warn_if_transport_mode_not_applied_unchecked; this swallows.
         void warn_if_transport_mode_not_applied() noexcept;
         void warn_if_transport_mode_not_applied_unchecked();
+        /// Leave this participant unwatched by network auto-recovery when its caller-supplied XML
+        /// profile confines every socket transport to the loopback interface and recovery was not
+        /// asked for explicitly (see @c network_recovery_explicitly_requested). Called once, from the
+        /// constructor, BEFORE the Fast-DDS participant exists: that is when its discovery listener
+        /// goes live, and @c recovery_enabled must be final before any other thread can read it. It
+        /// reads the QoS that creation is about to use from the participant factory, so the answer is
+        /// the finished participant's. @c noexcept for the same reason as
+        /// @c warn_if_transport_mode_not_applied.
+        void skip_network_recovery_if_confined_by_xml(network_recovery_mode mode) noexcept;
 
         /// @brief Restrict the socket transports this library built to the loopback
         /// interface, which is what makes @c transport_mode::localhost_only same-host-only:

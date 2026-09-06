@@ -30,6 +30,7 @@ import weakref
 
 import provizio_test_deadline
 import provizio_dds
+from provizio_dds import network_recovery as _network_recovery
 
 
 # A case that stops making progress used to reach its ctest timeout and be killed with
@@ -189,6 +190,78 @@ def test_env_garbage():
     )
     assert saw_warning, f"expected a 'not recognised' warning; got {captured!r}"
     _log("env_garbage: PASS")
+    return 0
+
+
+def _test_env_explicit_request(expected: bool):
+    """Common body for the explicit-request subcommands.
+
+    network_recovery_explicitly_requested tells "asked for" apart from "merely defaulted
+    on", which is what decides whether a participant whose transports cannot benefit from a
+    rebuild is watched anyway. The distinction rests on the RAW env value, so the boundary
+    cases are what these pin -- and they are mirrored case for case by the C++
+    network_recovery_env_explicit_* entries, so the two languages cannot answer differently
+    for one value on one host. Own process each, for the one-shot cache.
+    """
+    from provizio_dds import network_recovery as nr
+    actual = nr.network_recovery_explicitly_requested(
+        provizio_dds.NetworkRecoveryMode.ENV_VAR_CONTROLLED
+    )
+    assert actual is expected, f"expected {expected}, got {actual}"
+    # Neither explicit mode consults the variable at all.
+    assert nr.network_recovery_explicitly_requested(
+        provizio_dds.NetworkRecoveryMode.ON
+    ) is True
+    assert nr.network_recovery_explicitly_requested(
+        provizio_dds.NetworkRecoveryMode.OFF
+    ) is False
+    _log(f"env_explicit_request {expected}: PASS")
+    return 0
+
+
+def test_env_explicit_unset():
+    """PROVIZIO_DDS_NETWORK_RECOVERY unset/empty -> defaulted on, not requested."""
+    return _test_env_explicit_request(expected=False)
+
+
+def test_env_explicit_whitespace():
+    """A value of nothing but whitespace is a value the user set: unrecognised (so the
+    default stands, with a warning) but an explicit request all the same. The C++ mirror
+    reads the raw value the same way -- it must, or the same variable would mean two things
+    to the two halves of one application."""
+    return _test_env_explicit_request(expected=True)
+
+
+def test_env_explicit_on():
+    """PROVIZIO_DDS_NETWORK_RECOVERY=on -> requested."""
+    return _test_env_explicit_request(expected=True)
+
+
+def test_env_explicit_off():
+    """PROVIZIO_DDS_NETWORK_RECOVERY=off -> not a request to watch anything."""
+    return _test_env_explicit_request(expected=False)
+
+
+def test_allowed_interfaces_are_ipv4():
+    """The mirror of the C++ `allowed_interfaces_are_ipv4` case.
+
+    Exercises the REAL host enumeration rather than a substituted list, and asserts it as a
+    property of whatever this host has: every entry goes into a UDPv4 transport descriptor's
+    allowlist, where an IPv6 address text could never own a sender socket. A property rather
+    than a comparison against the C++ enumeration deliberately -- the two read the host
+    through different mechanisms (IPFinder there, the POSIX walk here), each matching what
+    its own transport layer sees, so set equality would assert an agreement neither side
+    promises.
+    """
+    from provizio_dds import network_recovery as nr
+    allowed = nr.allowed_interfaces(frozenset())
+    if nr.allowed_interfaces_read_failed():
+        # A host whose interfaces cannot be read says nothing either way.
+        _log("allowed_interfaces_are_ipv4: PASS (interfaces unreadable on this host)")
+        return 0
+    offenders = [entry for entry in allowed if ":" in entry[0]]
+    assert not offenders, f"IPv6 address text(s) in a UDPv4 allowlist: {offenders!r}"
+    _log(f"allowed_interfaces_are_ipv4: PASS ({len(allowed)} entry/entries on this host)")
     return 0
 
 
@@ -1512,6 +1585,71 @@ def test_snapshot_policy_follows_transports():
     return 0
 
 
+def test_env_explicit_request_survives_mutation():
+    """The "was it explicitly requested" answer and the verdict must come from ONE reading.
+
+    Both are cached once per process, but the explicit-request question used to re-read
+    os.environ live and AND that with the cached verdict, so the two could describe different
+    environments. That decides whether a loopback-confined participant is watched, and it got
+    it wrong in both directions -- see the two cases below. Mirrors read_env_var_once() in
+    src/network_recovery.cpp, which had the same split.
+
+    Runs in its own process, like every other env-var case here, because the reading is cached
+    for the life of the process by design."""
+    from provizio_dds import network_recovery as nr
+
+    mode = nr.NetworkRecoveryMode.ENV_VAR_CONTROLLED
+
+    # Prime the reading with the variable UNSET: the verdict caches default-on, and nothing
+    # was explicitly requested.
+    os.environ.pop(nr._ENV_VAR_NAME, None)
+    assert not nr.network_recovery_explicitly_requested(mode), (
+        "an unset variable must not read as an explicit request"
+    )
+    assert nr.resolve_network_recovery_enabled(mode), (
+        "an unset variable must still default the recovery on"
+    )
+
+    # Now set it to "off" mid-process. The old code saw a non-empty value AND the cached
+    # default-on verdict, and reported "off" as an explicit request for ON -- so a
+    # loopback-confined participant was watched against the caller's word.
+    os.environ[nr._ENV_VAR_NAME] = "off"
+    assert not nr.network_recovery_explicitly_requested(mode), (
+        "'off' set after the reading must not read as an explicit request for ON"
+    )
+    assert nr.resolve_network_recovery_enabled(mode), (
+        "the cached verdict must not change either; the reading is once per process"
+    )
+
+    _log("env_explicit_request_survives_mutation: PASS")
+    return 0
+
+
+def test_env_explicit_request_survives_removal():
+    """The reverse of :func:`test_env_explicit_request_survives_mutation`: an explicit request
+    made at launch must not be forgotten when the variable is deleted mid-process.
+
+    The old code re-read os.environ for the "was it set" half, so deleting the variable made a
+    launch-time explicit "on" read as no request at all -- and the loopback-confinement skip
+    then applied to a participant whose owner had asked for it to be watched."""
+    from provizio_dds import network_recovery as nr
+
+    mode = nr.NetworkRecoveryMode.ENV_VAR_CONTROLLED
+
+    os.environ[nr._ENV_VAR_NAME] = "on"
+    assert nr.network_recovery_explicitly_requested(mode), (
+        "'on' at the first reading must be an explicit request"
+    )
+
+    del os.environ[nr._ENV_VAR_NAME]
+    assert nr.network_recovery_explicitly_requested(mode), (
+        "deleting the variable must not retract an explicit request already read"
+    )
+
+    _log("env_explicit_request_survives_removal: PASS")
+    return 0
+
+
 def test_snapshot_policy_honours_override():
     """PROVIZIO_DDS_ALLOW_VPN_INTERFACES puts tunnels back into change detection, and
     nothing else with them.
@@ -1532,8 +1670,215 @@ def test_snapshot_policy_honours_override():
     return 0
 
 
+def _test_xml_loopback_profile(default_mode_watched):
+    """FASTDDS_DEFAULT_PROFILES_FILE names test/fast_dds_localhost_profile.xml here (the ctest
+    registration sets it): builtin transports off, one UDPv4 transport whitelisted to 127.0.0.1.
+    Such a participant has nothing a network change could take from it, so in the default mode
+    with PROVIZIO_DDS_NETWORK_RECOVERY unset it is not watched, while NetworkRecoveryMode.ON --
+    or the variable set to on -- has it watched like any other. Mirrors the C++
+    network_recovery xml_loopback_profile case."""
+    by_default = provizio_dds.make_domain_participant(0)
+    assert by_default._recovery_enabled is default_mode_watched, (
+        f"default mode watched: {by_default._recovery_enabled}, expected {default_mode_watched}"
+    )
+    explicit_on = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert explicit_on._recovery_enabled is True, "NetworkRecoveryMode.ON must always be watched"
+    explicit_off = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.OFF)
+    assert explicit_off._recovery_enabled is False, "NetworkRecoveryMode.OFF must never be watched"
+    _log(f"xml_loopback_profile: PASS (default mode watched: {by_default._recovery_enabled})")
+    return 0
+
+
+def test_xml_loopback_profile_skipped():
+    """PROVIZIO_DDS_NETWORK_RECOVERY unset + loopback-confining profile: the default mode is
+    not watched."""
+    return _test_xml_loopback_profile(default_mode_watched=False)
+
+
+def test_xml_loopback_profile_env_on_participates():
+    """PROVIZIO_DDS_NETWORK_RECOVERY=on + loopback-confining profile: an explicit request wins."""
+    return _test_xml_loopback_profile(default_mode_watched=True)
+
+
+def test_xml_profile_flags_are_optional():
+    """xml_profile_confines_to_loopback must work on a platform that lacks the Unix-only
+    open flags it prefers.
+
+    O_NONBLOCK and O_NOFOLLOW do not exist on Windows. Naming either directly raises
+    AttributeError, which the parser's own except swallows -- so it does not fail loudly, it
+    quietly answers "not confined" for EVERY profile, and a participant an XML profile
+    confines to loopback is then watched by auto-recovery when it should not be. That shipped
+    (O_NONBLOCK was unguarded while O_NOFOLLOW was) and cost two Windows CI jobs; nothing on
+    Linux could see it, because Linux has both flags.
+
+    Simulated by hiding the attributes rather than by skipping on Windows, so the guard is
+    exercised on every platform the suite runs on -- including the ones that would otherwise
+    never take that branch."""
+    import tempfile
+
+    confining = (
+        '<?xml version="1.0" encoding="UTF-8" ?>\n'
+        '<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">\n'
+        '  <profiles>\n'
+        '    <transport_descriptors>\n'
+        '      <transport_descriptor>\n'
+        '        <transport_id>loopback_udp</transport_id>\n'
+        '        <type>UDPv4</type>\n'
+        '        <interfaceWhiteList><address>127.0.0.1</address></interfaceWhiteList>\n'
+        '      </transport_descriptor>\n'
+        '    </transport_descriptors>\n'
+        '    <participant profile_name="p" is_default_profile="true">\n'
+        '      <rtps>\n'
+        '        <userTransports><transport_id>loopback_udp</transport_id></userTransports>\n'
+        '        <useBuiltinTransports>false</useBuiltinTransports>\n'
+        '      </rtps>\n'
+        '    </participant>\n'
+        '  </profiles>\n'
+        '</dds>\n'
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as handle:
+        handle.write(confining)
+        path = handle.name
+
+    passed = True
+    try:
+        # Baseline: this platform, with whatever flags it really has.
+        if not _network_recovery.xml_profile_confines_to_loopback(path):
+            passed = False
+            _log("  baseline (real flags): FAIL -- the fixture is not recognised as confining")
+
+        # Now every combination of the optional flags being absent, which is what a
+        # non-POSIX platform looks like from inside the parser.
+        for hidden in (("O_NONBLOCK",), ("O_NOFOLLOW",), ("O_NONBLOCK", "O_NOFOLLOW"), ("O_BINARY",)):
+            saved = {}
+            for name in hidden:
+                if hasattr(os, name):
+                    saved[name] = getattr(os, name)
+                    delattr(os, name)
+            try:
+                actual = _network_recovery.xml_profile_confines_to_loopback(path)
+            finally:
+                for name, value in saved.items():
+                    setattr(os, name, value)
+            if actual is not True:
+                passed = False
+            _log(f"  without {'+'.join(hidden)}: {'ok' if actual else 'FAIL (got False, expected True)'}")
+    finally:
+        os.unlink(path)
+
+    _log(f"xml_profile_flags_are_optional: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_xml_loopback_confinement_parser():
+    """xml_profile_confines_to_loopback over the shapes that matter: the repository's own
+    loopback profile (both spellings of the interface list), the same with builtin transports
+    left on, a whitelist that reaches the LAN, a profile with no default participant, shared
+    memory alongside (needs no interface), and a file that is not XML at all."""
+    import tempfile
+
+    confines = _network_recovery.xml_profile_confines_to_loopback
+    checks = []
+
+    def case(name, xml_text, expected):
+        with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as handle:
+            handle.write(xml_text)
+            path = handle.name
+        try:
+            actual = confines(path)
+        finally:
+            os.unlink(path)
+        checks.append(actual is expected)
+        _log(f"  {name}: {'ok' if actual is expected else 'FAIL'} (got {actual}, expected {expected})")
+
+    def profile(transports_xml, participant_rtps_xml):
+        return (
+            '<?xml version="1.0" encoding="UTF-8" ?><dds xmlns="http://www.eprosima.com"><profiles>'
+            f"<transport_descriptors>{transports_xml}</transport_descriptors>"
+            f'<participant profile_name="p" is_default_profile="true"><rtps>{participant_rtps_xml}</rtps></participant>'
+            "</profiles></dds>"
+        )
+
+    udp_loopback_old = (
+        "<transport_descriptor><transport_id>lo</transport_id><type>UDPv4</type>"
+        "<interfaceWhiteList><address>127.0.0.1</address></interfaceWhiteList></transport_descriptor>"
+    )
+    udp_loopback_new = (
+        "<transport_descriptor><transport_id>lo</transport_id><type>UDPv4</type>"
+        '<interfaces><allowlist><interface name="127.0.0.1"/></allowlist></interfaces>'
+        "</transport_descriptor>"
+    )
+    udp_loopback_device = (
+        "<transport_descriptor><transport_id>lo</transport_id><type>UDPv4</type>"
+        "<interfaceWhiteList><interface>lo0</interface></interfaceWhiteList></transport_descriptor>"
+    )
+    udp_lan = (
+        "<transport_descriptor><transport_id>lan</transport_id><type>UDPv4</type>"
+        "<interfaceWhiteList><address>127.0.0.1</address><address>192.168.1.5</address></interfaceWhiteList>"
+        "</transport_descriptor>"
+    )
+    udp_open = "<transport_descriptor><transport_id>open</transport_id><type>UDPv4</type></transport_descriptor>"
+    shm = "<transport_descriptor><transport_id>shm</transport_id><type>SHM</type></transport_descriptor>"
+    uses = "<userTransports><transport_id>{}</transport_id></userTransports><useBuiltinTransports>false</useBuiltinTransports>"
+
+    case("loopback, deprecated spelling", profile(udp_loopback_old, uses.format("lo")), True)
+    case("loopback, current spelling", profile(udp_loopback_new, uses.format("lo")), True)
+    case("loopback device name, <interface> entry", profile(udp_loopback_device, uses.format("lo")), True)
+    case("loopback + shared memory", profile(udp_loopback_old + shm, uses.format("lo") + "<userTransports><transport_id>shm</transport_id></userTransports>"), True)
+    case("loopback but builtin transports left on", profile(udp_loopback_old, "<userTransports><transport_id>lo</transport_id></userTransports>"), False)
+    case("whitelist that reaches the LAN", profile(udp_lan, uses.format("lan")), False)
+    case("no interface list at all", profile(udp_open, uses.format("open")), False)
+    case("no default participant profile", profile(udp_loopback_old, uses.format("lo")).replace(' is_default_profile="true"', ""), False)
+    case("not XML", "this is not a profile", False)
+
+    # This file is found by RELATIVE name in the process' working directory, so its contents
+    # are chosen by anyone who can write there. A DOCTYPE must be refused rather than expanded:
+    # ElementTree grows nested entity declarations exponentially, so a few hundred bytes reach
+    # gigabytes. Refused at the parser, so the file's ENCODING cannot carry one past the check
+    # -- the UTF-16 case below is the one a byte-level search for "<!DOCTYPE" would miss.
+    entity_bomb = (
+        '<?xml version="1.0"?>\n'
+        "<!DOCTYPE profiles [\n"
+        '<!ENTITY a "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">\n'
+        '<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">\n'
+        '<!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">\n'
+        '<!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;">\n'
+        "]>\n"
+        '<profiles><participant profile_name="p" is_default_profile="true">'
+        "<rtps><name>&d;</name></rtps></participant></profiles>"
+    )
+    case("entity-expansion bomb", entity_bomb, False)
+    case(
+        "a DOCTYPE beside an otherwise confining profile",
+        profile(udp_loopback_old, uses.format("lo")).replace(
+            '<?xml version="1.0" encoding="UTF-8" ?>',
+            '<?xml version="1.0" encoding="UTF-8" ?><!DOCTYPE dds [<!ENTITY x "y">]>',
+        ),
+        False,
+    )
+    # Bigger than the read ceiling, so it is refused without being taken into memory whole.
+    case(
+        "larger than the profile size ceiling",
+        "<profiles>" + "<!-- pad -->" * 400000 + "</profiles>",
+        False,
+    )
+    # The file the suite itself runs under, exactly as CI sets it.
+    repo_profile = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fast_dds_localhost_profile.xml")
+    if os.path.isfile(repo_profile):
+        actual = confines(repo_profile)
+        checks.append(actual is True)
+        _log(f"  test/fast_dds_localhost_profile.xml: {'ok' if actual else 'FAIL'}")
+    passed = all(checks)
+    _log(f"xml_loopback_confinement_parser: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
 _TESTS = {
     "logging": test_logging,
+    "xml_loopback_profile_skipped": test_xml_loopback_profile_skipped,
+    "xml_loopback_profile_env_on_participates": test_xml_loopback_profile_env_on_participates,
+    "xml_loopback_confinement_parser": test_xml_loopback_confinement_parser,
+    "xml_profile_flags_are_optional": test_xml_profile_flags_are_optional,
     "env_recovery": test_env_recovery,
     "env_default": test_env_default,
     "env_on": test_env_on,
@@ -1555,6 +1900,11 @@ _TESTS = {
     "snapshot_prefix_length": test_snapshot_prefix_length,
     "netmask_read_is_bounded": test_netmask_read_is_bounded,
     "linked_list_walk_advances": test_linked_list_walk_advances,
+    "env_explicit_unset": test_env_explicit_unset,
+    "env_explicit_whitespace": test_env_explicit_whitespace,
+    "env_explicit_on": test_env_explicit_on,
+    "env_explicit_off": test_env_explicit_off,
+    "allowed_interfaces_are_ipv4": test_allowed_interfaces_are_ipv4,
     "extra_interfaces_env": test_extra_interfaces_env,
     "netlink_binds_before_snapshot": test_netlink_binds_before_snapshot,
     "safety_net_detects_missed_change": test_safety_net_detects_missed_change,
@@ -1568,6 +1918,8 @@ _TESTS = {
     "netlink_kinds_match_the_kernel": test_netlink_kinds_match_the_kernel,
     "listener_drain_reports_a_stall_until_it_ends": test_listener_drain_reports_a_stall_until_it_ends,
     "snapshot_policy_honours_override": test_snapshot_policy_honours_override,
+    "env_explicit_request_survives_mutation": test_env_explicit_request_survives_mutation,
+    "env_explicit_request_survives_removal": test_env_explicit_request_survives_removal,
 }
 
 

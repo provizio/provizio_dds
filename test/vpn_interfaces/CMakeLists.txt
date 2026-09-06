@@ -49,7 +49,7 @@ set(_VPN_CASES classifier blocklist blocklist_forced blocklist_override_all bloc
     no_op_with_builtin_transports_env leaves_caller_transports_alone
     snapshot_excludes_vpn snapshot_honours_override
     snapshot_policy_excludes_tunnel snapshot_policy_follows_transports classifier_table
-    loopback_address loopback_table)
+    loopback_address loopback_table allowed_interfaces_are_ipv4)
 if(NOT WIN32)
     # POSIX-only: the helper it covers is the getifaddrs backends' own, and does not
     # compile (or exist) on Windows, whose enumeration is GetAdaptersAddresses.

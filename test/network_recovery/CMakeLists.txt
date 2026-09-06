@@ -38,8 +38,9 @@ endif()
 # because 29 call sites read better for it.
 function(_nr_add_test name)
     set(options)
-    set(one_value_args TIMEOUT ENV)
-    set(multi_value_args ARGS)
+    set(one_value_args TIMEOUT)
+    # ENV takes any number of NAME=VALUE entries, like provizio_dds_add_subcommand_test itself.
+    set(multi_value_args ARGS ENV)
     cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
 
     provizio_dds_add_subcommand_test(${name}
@@ -69,7 +70,33 @@ _nr_add_test(network_recovery_env_falsy   ARGS env_recovery off TIMEOUT ${_NR_TI
 _nr_add_test(network_recovery_env_garbage ARGS env_recovery_garbage TIMEOUT ${_NR_TIMEOUT_FAST}
     ENV "PROVIZIO_DDS_NETWORK_RECOVERY=banana")
 
+# env_explicit_request: "asked for" vs "merely defaulted on", which is decided by the RAW
+# value. Mirrored case for case by the python_network_recovery_env_explicit_* entries in
+# test/python/CMakeLists.txt -- a whitespace-only value is the case the two languages
+# disagreed on, and one host runs both.
+_nr_add_test(network_recovery_env_explicit_unset ARGS env_explicit_request no
+    TIMEOUT ${_NR_TIMEOUT_FAST} ENV "PROVIZIO_DDS_NETWORK_RECOVERY=")  # unset / empty: not a request
+_nr_add_test(network_recovery_env_explicit_whitespace ARGS env_explicit_request yes
+    TIMEOUT ${_NR_TIMEOUT_FAST} ENV "PROVIZIO_DDS_NETWORK_RECOVERY= ")  # set, unrecognised: a request
+_nr_add_test(network_recovery_env_explicit_on ARGS env_explicit_request yes
+    TIMEOUT ${_NR_TIMEOUT_FAST} ENV "PROVIZIO_DDS_NETWORK_RECOVERY=on")
+_nr_add_test(network_recovery_env_explicit_off ARGS env_explicit_request no
+    TIMEOUT ${_NR_TIMEOUT_FAST} ENV "PROVIZIO_DDS_NETWORK_RECOVERY=off")  # a request to switch OFF is not one to watch
+
 _nr_add_test(network_recovery_reset_roundtrip ARGS reset_roundtrip TIMEOUT ${_NR_TIMEOUT_DDS})
+
+# xml_loopback_profile: a caller's XML profile that confines the transports to loopback keeps
+# the participant out of auto-recovery in the default mode, and only there. The two entries are
+# two processes because PROVIZIO_DDS_NETWORK_RECOVERY is resolved once per process; the empty
+# value is "unset" to both the resolver and the explicitness check.
+_nr_add_test(network_recovery_xml_loopback_profile_skips_default_mode
+    ARGS xml_loopback_profile skipped TIMEOUT ${_NR_TIMEOUT_DDS}
+    ENV "FASTDDS_DEFAULT_PROFILES_FILE=${CMAKE_SOURCE_DIR}/test/fast_dds_localhost_profile.xml"
+        "PROVIZIO_DDS_NETWORK_RECOVERY=")
+_nr_add_test(network_recovery_xml_loopback_profile_env_on_participates
+    ARGS xml_loopback_profile participates TIMEOUT ${_NR_TIMEOUT_DDS}
+    ENV "FASTDDS_DEFAULT_PROFILES_FILE=${CMAKE_SOURCE_DIR}/test/fast_dds_localhost_profile.xml"
+        "PROVIZIO_DDS_NETWORK_RECOVERY=on")
 _nr_add_test(network_recovery_reset_disabled  ARGS reset_disabled  TIMEOUT ${_NR_TIMEOUT_DDS})
 # APT-11792 regression test: verifies the auto-recovery reset actually
 # refreshes Fast-DDS's process-wide interface cache. Without the fix the

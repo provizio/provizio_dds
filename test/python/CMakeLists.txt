@@ -281,7 +281,11 @@ foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         netlink_binds_before_snapshot safety_net_env
         snapshot_policy_excludes_tunnel snapshot_policy_follows_transports
         netlink_kinds_match_the_kernel listener_drain_reports_a_stall_until_it_ends
-        safety_net_retries_while_interfaces_are_unreadable)
+        safety_net_retries_while_interfaces_are_unreadable xml_loopback_confinement_parser
+        allowed_interfaces_are_ipv4
+        xml_profile_flags_are_optional
+        env_explicit_request_survives_mutation
+        env_explicit_request_survives_removal)
     add_test(NAME python_network_recovery_${_nrt_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_network_recovery_test.py ${_nrt_case}
@@ -572,11 +576,39 @@ function(_python_nr_env_test name case_name env_value)
 endfunction()
 
 _python_nr_env_test(python_network_recovery_env_default env_default "")
+
+# xml_loopback_profile: a caller's XML profile that confines the transports to loopback keeps
+# the participant out of auto-recovery in the default mode, and only there -- mirror of the C++
+# network_recovery entries of the same name, with the same two-process split.
+function(_python_nr_xml_profile_test name case_name recovery_env_value)
+    add_test(NAME ${name} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
+        ./python_network_recovery_test.py ${case_name}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    set(_env "PROVIZIO_DDS_NETWORK_RECOVERY=${recovery_env_value}"
+        "FASTDDS_DEFAULT_PROFILES_FILE=${CMAKE_SOURCE_DIR}/test/fast_dds_localhost_profile.xml")
+    if(WIN32)
+        list(APPEND _env "PATH=${PROVIZIO_DDS_TEST_PATH}")
+    endif()
+    set_tests_properties(${name} PROPERTIES TIMEOUT 60 ENVIRONMENT "${_env}")
+endfunction()
+_python_nr_xml_profile_test(python_network_recovery_xml_loopback_profile_skips_default_mode xml_loopback_profile_skipped "")
+_python_nr_xml_profile_test(python_network_recovery_xml_loopback_profile_env_on_participates xml_loopback_profile_env_on_participates "on")
 _python_nr_env_test(python_network_recovery_env_on      env_on      "on")
 _python_nr_env_test(python_network_recovery_env_off     env_off     "off")
 _python_nr_env_test(python_network_recovery_env_truthy  env_truthy  "yes")
 _python_nr_env_test(python_network_recovery_env_falsy   env_falsy   "NO")
 _python_nr_env_test(python_network_recovery_env_garbage env_garbage "banana")
+
+# "Asked for" vs "merely defaulted on", which is decided by the RAW value. Mirrors the
+# C++ network_recovery_env_explicit_* entries in test/network_recovery/CMakeLists.txt --
+# a whitespace-only value is the case the two languages disagreed on, and one host runs
+# both. CTest preserves the trailing space in the value below.
+_python_nr_env_test(python_network_recovery_env_explicit_unset      env_explicit_unset      "")
+_python_nr_env_test(python_network_recovery_env_explicit_whitespace env_explicit_whitespace " ")
+_python_nr_env_test(python_network_recovery_env_explicit_on         env_explicit_on         "on")
+_python_nr_env_test(python_network_recovery_env_explicit_off        env_explicit_off        "off")
 
 # Force-included interfaces — same one-shot-per-process caching, so it needs its own
 # process too. The value deliberately carries stray whitespace and an empty entry.

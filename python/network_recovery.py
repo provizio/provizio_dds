@@ -51,6 +51,7 @@ import ctypes
 import errno
 import math
 import os
+import stat
 import queue
 import re
 import select
@@ -80,7 +81,12 @@ class NetworkRecoveryMode(Enum):
     #: the whole process. Recognised values (case-insensitive): ``on`` /
     #: ``1`` / ``true`` / ``yes`` to enable (default when the variable is
     #: unset); ``off`` / ``0`` / ``false`` / ``no`` to disable. Any other
-    #: value is treated as enabled with a one-time warning.
+    #: value is treated as enabled with a one-time warning. With the variable
+    #: unset, a participant whose caller-supplied XML profile confines every
+    #: socket transport to the loopback interface is not watched: no network
+    #: change can take an address away from it or re-address it, so a rebuild
+    #: could fix nothing and would only cost its peers a rediscovery. Setting
+    #: the variable to ``on``, like :attr:`ON`, has it watched anyway.
     ENV_VAR_CONTROLLED = "env_var_controlled"
 
     #: Force auto-recovery on, regardless of env var.
@@ -118,6 +124,13 @@ _log_callback: Optional[LogCallback] = None
 
 _env_resolution_lock = threading.Lock()
 _env_resolution_cached: Optional[bool] = None
+# Whether the variable was SET, non-empty, in that same one reading. Captured beside the
+# verdict and never re-read, because the two must describe ONE environment: re-reading
+# os.environ here while the verdict came from the cache let a mid-process
+# os.environ["..."] = "off" be reported as an explicit request for ON (and, in reverse, a
+# launch-time "on" be forgotten once the variable was deleted). Mirrors env_var_reading in
+# src/network_recovery.cpp.
+_env_explicitly_set_cached: Optional[bool] = None
 
 
 def set_log_callback(callback: Optional[LogCallback]) -> Optional[LogCallback]:
@@ -165,6 +178,207 @@ def resolve_network_recovery_enabled(mode: NetworkRecoveryMode) -> bool:
     return _resolve_env_once()
 
 
+def network_recovery_explicitly_requested(mode: NetworkRecoveryMode) -> bool:
+    """Whether auto-recovery was asked for in so many words -- :attr:`NetworkRecoveryMode.ON`,
+    or :attr:`NetworkRecoveryMode.ENV_VAR_CONTROLLED` with ``PROVIZIO_DDS_NETWORK_RECOVERY``
+    set to an enabling value -- as opposed to merely defaulted on with the variable unset. The
+    distinction decides whether the library may leave a participant unwatched because watching
+    it could fix nothing (see :attr:`NetworkRecoveryMode.ENV_VAR_CONTROLLED`): an explicit
+    request is always honoured. Mirrors the C++ ``network_recovery_explicitly_requested``."""
+    if mode == NetworkRecoveryMode.ON:
+        return True
+    if mode != NetworkRecoveryMode.ENV_VAR_CONTROLLED:
+        return False
+    # BOTH halves out of one reading of the environment. Asking os.environ afresh here and
+    # AND-ing that with the cached verdict let the two describe different environments: with
+    # the variable unset at the first participant the verdict caches True, and a later
+    # os.environ[...] = "off" then reads as non-empty AND True -- "off" reported as an explicit
+    # request for ON, so a loopback-confined participant is watched against the caller's word.
+    # The reverse held too: launch with "on", then delete the variable, and the explicit
+    # request is forgotten. Mirrors read_env_var_once() in src/network_recovery.cpp.
+    #
+    # _resolve_env_once() is called FIRST because it is what fills the pair on the first call.
+    enabled = _resolve_env_once()
+    return bool(_env_explicitly_set_cached) and enabled
+
+
+def _is_ipv6_address_text(text: str) -> bool:
+    """Whether ``text`` is an IPv6 address literal rather than an IPv4 one or a device name.
+
+    A colon is the whole test, and it is enough for every text this library classifies: the
+    sources are ``getifaddrs`` / ``GetAdaptersAddresses`` output and Fast-DDS' own
+    ``IPFinder`` names, all bare presentation forms, and neither an IPv4 literal nor any
+    platform's device name may contain one. Stated once because the rule is one rule -- a
+    zone-scoped form (``fe80::1%eth0``) or a bracketed one (``[::1]:7400``) reaching any of
+    these paths would need the same answer in all of them. Mirrors
+    ``detail::is_ipv6_address_text`` in src/detail/env_utils.h."""
+    return ":" in text
+
+
+def _is_loopback_interface_entry(entry: str) -> bool:
+    """Whether a Fast-DDS interface-list entry CERTAINLY names the loopback interface -- an
+    address in 127.0.0.0/8, ``::1``, or a loopback device name. An entry certain in neither
+    direction (a device name this cannot recognise) is "not loopback" here, the safe side for
+    a decision that switches a safety net off. Mirrors ``certainly_loopback`` in
+    src/domain_participant.cpp."""
+    entry = entry.strip()
+    if _is_ipv6_address_text(entry):
+        return entry == "::1"
+    if entry and all(c in "0123456789." for c in entry):
+        return entry.startswith("127.")
+    return entry.lower() in ("lo", "lo0", "loopback pseudo-interface 1")
+
+
+# Ceiling on the Fast-DDS profiles file :func:`xml_profile_confines_to_loopback` will read.
+# A profiles file is kilobytes; 4 MiB is far beyond any real one while still small enough that
+# reading it costs nothing worth noticing. See that function for why this file gets a ceiling
+# at all when most configuration does not.
+_MAX_XML_PROFILE_BYTES = 4 * 1024 * 1024
+
+
+def xml_profile_confines_to_loopback(path: str) -> bool:
+    """Whether the default participant profile in a Fast-DDS XML profiles file keeps its
+    participants on this host: builtin transports off, at least one transport of its own, and
+    every socket transport among them (UDP / TCP; shared memory needs no interface) whitelisted
+    to loopback only. Both spellings Fast-DDS parses are read, because it honours both: the
+    deprecated ``<interfaceWhiteList>`` (whose entries are ``<address>`` or ``<interface>``
+    elements holding the address or device name as text) and the current
+    ``<interfaces><allowlist><interface name="..."/></allowlist></interfaces>`` -- see
+    XMLParser::parseXMLTransportData / parseXMLAllowlist in Fast-DDS. (``interface_allowlist``
+    is the C++ member the latter fills, not an XML element; a profile using it as one fails to
+    load.) Anything unreadable, unparsable or ambiguous is "not confined". The Python bindings
+    cannot read the transports Fast-DDS built from the profile back out of the participant, so
+    this reads the file the C++ side reads the effective QoS for
+    (``transports_confine_to_loopback`` in src/domain_participant.cpp)."""
+    # Read and parsed defensively, because this file is attacker-influenceable in a way most
+    # configuration is not: it is found by RELATIVE name in the process' working directory (see
+    # _owning_xml_profile_path in provizio_dds.py), so anyone who can write there chooses its
+    # contents.
+    #
+    # A DOCTYPE is refused outright rather than parsed. ElementTree's parser expands internal
+    # entities, so a few hundred bytes of nested declarations expand to gigabytes -- measured
+    # here at 412 bytes producing 500,000 characters over five levels, each further level
+    # multiplying by ten. Refusing costs nothing real: Fast-DDS reads this same file with
+    # tinyxml2, which does not expand DTD entities at all, so a profile that needed one would
+    # not work anyway. Rejecting at the PARSER rather than by searching the bytes for
+    # "<!DOCTYPE" is what makes it hold whatever the file's encoding is -- expat has decoded by
+    # then, so a UTF-16 document cannot carry one past the check.
+    #
+    # The read is capped for the same reason: a profiles file is kilobytes, and reading an
+    # arbitrarily large one into memory to discover it is not a profile IS the failure mode.
+    try:
+        import xml.etree.ElementTree as element_tree  # local: a rare path, and a heavy import
+        from xml.parsers import expat
+
+        # os.open with O_NONBLOCK | O_NOFOLLOW, not a plain open(). The path is found by
+        # RELATIVE name in the working directory and was proved a regular file ONCE per
+        # process, so what sits there now is whatever anyone who can write there has since put
+        # there. A plain open() on a FIFO blocks for ever, with no timeout and no diagnostic,
+        # hanging every later make_domain_participant() -- and a stalled NFS or FUSE path does
+        # the same without an attacker. O_NOFOLLOW refuses a symlink swapped in for the same
+        # reason, and the S_ISREG check is made on the DESCRIPTOR rather than the name, so it
+        # describes the file actually opened.
+        #
+        # EVERY optional flag goes through getattr. O_NONBLOCK and O_NOFOLLOW are both
+        # Unix-only, and naming either directly raises AttributeError on Windows -- which the
+        # except below then swallows, so the function answers "not confined" for every profile
+        # ever handed to it. That is silent and total: it does not fail, it just always says
+        # no. (It shipped that way with O_NONBLOCK unguarded and cost two Windows CI jobs;
+        # test_xml_profile_flags_are_optional now pins it on every platform.) O_BINARY is the
+        # mirror image -- Windows-only, and needed there because os.open defaults to text mode
+        # while the fdopen below asks for "rb".
+        #
+        # What Windows loses with the flags absent is real and worth naming: no FIFO
+        # protection and no symlink refusal. The S_ISREG check on the descriptor still stands,
+        # which is the part that matters most, and Windows has no filesystem FIFOs to block on
+        # the way a POSIX host does.
+        open_flags = os.O_RDONLY
+        for optional_flag in ("O_NONBLOCK", "O_NOFOLLOW", "O_BINARY"):
+            open_flags |= getattr(os, optional_flag, 0)
+        descriptor = os.open(path, open_flags)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return False
+            with os.fdopen(descriptor, "rb", closefd=True) as profile:
+                descriptor = -1  # fdopen owns it now.
+                document = profile.read(_MAX_XML_PROFILE_BYTES + 1)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if len(document) > _MAX_XML_PROFILE_BYTES:
+            return False
+
+        def _reject_doctype(*_args):
+            raise ValueError("a DOCTYPE is not accepted in a Fast-DDS profiles file")
+
+        builder = element_tree.TreeBuilder()
+        # "}" as the namespace separator so a namespaced tag arrives as "uri}tag", which
+        # local_name below strips exactly as it strips ElementTree's own "{uri}tag" form.
+        parser = expat.ParserCreate(namespace_separator="}")
+        parser.StartDoctypeDeclHandler = _reject_doctype
+        parser.StartElementHandler = builder.start
+        parser.EndElementHandler = builder.end
+        parser.CharacterDataHandler = builder.data
+        parser.Parse(document, True)
+        root = builder.close()
+    except Exception:  # noqa: BLE001 -- any failure to read the file is "not confined"
+        return False
+
+    def local_name(element) -> str:
+        if not isinstance(element.tag, str):
+            return ""
+        # Both spellings a namespace can arrive in: expat's "uri}tag" and a raw "prefix:tag"
+        # from a document whose prefix it could not resolve.
+        return element.tag.rsplit("}", 1)[-1].rsplit(":", 1)[-1]
+
+    def child(element, name):
+        return next((c for c in element if local_name(c) == name), None)
+
+    def text(element) -> str:
+        return (element.text or "").strip() if element is not None else ""
+
+    descriptors = {}
+    for descriptor in root.iter():
+        if local_name(descriptor) != "transport_descriptor":
+            continue
+        entries = []
+        whitelist = child(descriptor, "interfaceWhiteList")
+        if whitelist is not None:
+            # <address> and <interface> are interchangeable here, both carrying the entry as text.
+            entries.extend(
+                text(entry) for entry in whitelist if local_name(entry) in ("address", "interface")
+            )
+        interfaces = child(descriptor, "interfaces")
+        allowlist = child(interfaces, "allowlist") if interfaces is not None else None
+        if allowlist is not None:
+            entries.extend(
+                entry.get("name", "") for entry in allowlist if local_name(entry) == "interface"
+            )
+        descriptors[text(child(descriptor, "transport_id"))] = (text(child(descriptor, "type")).upper(), entries)
+
+    default_profile = next(
+        (p for p in root.iter()
+         if local_name(p) == "participant" and p.get("is_default_profile", "").lower() == "true"),
+        None,
+    )
+    rtps = child(default_profile, "rtps") if default_profile is not None else None
+    if rtps is None or text(child(rtps, "useBuiltinTransports")).lower() != "false":
+        return False
+    user_transports = child(rtps, "userTransports")
+    transport_ids = [text(t) for t in user_transports if local_name(t) == "transport_id"] if user_transports is not None else []
+    if not transport_ids:
+        return False
+    for transport_id in transport_ids:
+        if transport_id not in descriptors:
+            return False
+        kind, entries = descriptors[transport_id]
+        if kind == "SHM":
+            continue
+        if not entries or not all(_is_loopback_interface_entry(e) for e in entries):
+            return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Internals: logging
 # ---------------------------------------------------------------------------
@@ -201,11 +415,17 @@ def _emit_log(level: LogLevel, message: str) -> None:
 
 def _resolve_env_once() -> bool:
     global _env_resolution_cached
+    global _env_explicitly_set_cached
     with _env_resolution_lock:
         if _env_resolution_cached is not None:
             return _env_resolution_cached
 
         raw = os.environ.get(_ENV_VAR_NAME)
+        # Recorded in the same reading as the verdict below -- see _env_explicitly_set_cached.
+        # Raw non-emptiness, deliberately NOT stripped: a value of nothing but whitespace is a
+        # value the user set, so it counts as explicit, and the parse below rejects it as
+        # unrecognised and says so.
+        _env_explicitly_set_cached = bool(raw)
         if raw is None or raw == "":
             _env_resolution_cached = True  # default-on
             return True
@@ -1553,7 +1773,7 @@ def _vpn_blocklist_entries_posix() -> "FrozenSet[str]":
         # non-empty blocklist still forces whitelist mode and netmask filtering on (and
         # with it the loss of peers reachable only through a gateway). Mirrors
         # src/address_snapshot_linux.cpp.
-        if ":" not in addr_text and _excluded_as_vpn_interface(
+        if not _is_ipv6_address_text(addr_text) and _excluded_as_vpn_interface(
             name, _is_vpn_interface_kind(kind)
         ):
             # Both forms — see vpn_interface_blocklist_entries for why the device name
@@ -1908,7 +2128,7 @@ def _vpn_blocklist_entries_windows() -> "FrozenSet[str]":
         # IPv4 only, and the adapter's name only alongside an IPv4 address of its own —
         # see the rationale in _vpn_blocklist_entries_posix and
         # src/address_snapshot_windows.cpp.
-        if ":" in addr_text:
+        if _is_ipv6_address_text(addr_text):
             continue
         if _excluded_as_vpn_adapter_win(name, friendly, description, if_type):
             # The GUID-ish AdapterName is what Fast-DDS compares a blocklist entry to as
@@ -2132,7 +2352,7 @@ def allowed_interfaces(blocked: "Collection[str]") -> "List[Tuple[str, bool]]":
         _read_failures.allowed = True
         return []
     for name, address in walk:
-        if ":" in address:
+        if _is_ipv6_address_text(address):
             continue  # IPv6: no UDPv4 sender socket can exist for it.
         if name in blocked_set or address in blocked_set:
             continue

@@ -1027,6 +1027,46 @@ namespace
         return passed ? 0 : 1;
     }
 
+    int test_allowed_interfaces_are_ipv4()
+    {
+        // The one case that exercises the REAL IPFinder enumeration rather than substituting
+        // a list through force_allowed_interfaces_for_test. Asserted as a property of
+        // whatever this host happens to have, not against an expected set: the entries go
+        // into a UDPv4TransportDescriptor's interface_allowlist, where an IPv6 address text
+        // could never own a sender socket, so "one entry per usable IPv4 address" has to hold
+        // on every host the suite runs on. ::1 used to slip through -- IPFinder reports it as
+        // type=IP6_LOCAL and the loopback escape in the type check admitted it.
+        //
+        // A property rather than a comparison against the Python mirror's enumeration
+        // deliberately: the two read the host through different mechanisms (IPFinder here,
+        // the POSIX walk there), each matching what its own transport layer sees, so set
+        // equality would assert an agreement neither side promises. This asserts what both
+        // sides DO promise, and its Python twin asserts the same of the mirror.
+        bool passed = true;
+        bool enumeration_failed = false;
+        const auto allowed = provizio::dds::detail::vpn_allowed_interfaces({}, &enumeration_failed);
+        if (enumeration_failed)
+        {
+            // Not a failure of the rule: a host whose interfaces cannot be read says nothing
+            // either way, and the enumeration reporting that faithfully is itself correct.
+            std::cout << "allowed_interfaces_are_ipv4: PASS (interfaces unreadable on this host, "
+                         "nothing to check)\n";
+            return 0;
+        }
+        for (const auto &entry : allowed)
+        {
+            if (entry.address.find(':') != std::string::npos)
+            {
+                std::cerr << "FAIL: '" << entry.address
+                          << "' is an IPv6 address text and cannot own a UDPv4 sender socket\n";
+                passed = false;
+            }
+        }
+        std::cout << "allowed_interfaces_are_ipv4: " << (passed ? "PASS" : "FAIL") << " (" << allowed.size()
+                  << " entry/entries on this host)\n";
+        return passed ? 0 : 1;
+    }
+
     // Machine-readable "<address>|<0/1>" per address given (or a built-in sample), for
     // test/python/vpn_classifier_parity_test.py to compare with _is_loopback_address.
     int test_loopback_table(const std::vector<std::string_view> &args)
@@ -1267,6 +1307,10 @@ int main(int argc, char **argv)
     if (subcommand == "classifier_table")
     {
         return test_classifier_table(args);
+    }
+    if (subcommand == "allowed_interfaces_are_ipv4")
+    {
+        return test_allowed_interfaces_are_ipv4();
     }
     if (subcommand == "loopback_address")
     {

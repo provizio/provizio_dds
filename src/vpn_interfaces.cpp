@@ -589,6 +589,20 @@ namespace provizio::dds::detail
             // address) would then count as a REAL interface -- switching netmask filtering on
             // for the host's one NIC and leaving the alias sending, and warning, per datagram.
             const bool is_loopback = is_loopback_address(info.name);
+            if (is_ipv6_address_text(info.name))
+            {
+                // An IPv6 address text, and no UDPv4 sender socket can ever exist for one, so
+                // it has no place in a UDPv4TransportDescriptor's allowlist -- which is what
+                // "one entry per usable IPv4 address" in the header promises. Tested by text
+                // rather than left to the type check below, because is_loopback_address("::1")
+                // is true and the loopback escape there would let the IPv6 loopback through:
+                // IPFinder reports ::1 as dev=lo name=::1 type=IP6_LOCAL. Inert in practice --
+                // UDPv4Transport only string-compares allowlist entries against its cached
+                // IPv4 interfaces -- but it breaks the stated contract and diverges from the
+                // Python mirror, which skips any address containing ':'
+                // (network_recovery.py's allowed_interfaces).
+                continue;
+            }
             if (info.type != eprosima::fastdds::rtps::IPFinder::IP4 && !is_loopback)
             {
                 // IPv4 only: an interface holding no IPv4 address can neither be blocked by

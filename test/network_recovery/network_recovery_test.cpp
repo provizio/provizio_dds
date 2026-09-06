@@ -228,6 +228,42 @@ namespace
         return passed ? 0 : 1;
     }
 
+    int test_env_explicit_request(const std::string &expected)
+    {
+        // network_recovery_explicitly_requested tells "asked for" apart from "merely
+        // defaulted on", which is what decides whether a participant whose transports
+        // cannot benefit from a rebuild is watched anyway. The distinction rests on the
+        // RAW environment value, so the boundary cases are what this pins -- and it is
+        // mirrored case for case by python_network_recovery_env_explicit_* so the two
+        // languages cannot answer differently for one value on one host.
+        bool passed = true;
+
+        const bool explicitly_requested = provizio::dds::network_recovery_explicitly_requested(
+            provizio::dds::network_recovery_mode::env_var_controlled);
+        if (expected == "yes")
+        {
+            passed &= EXPECT(explicitly_requested);
+        }
+        else if (expected == "no")
+        {
+            passed &= EXPECT(!explicitly_requested);
+        }
+        else
+        {
+            std::cerr << "bad <expected> value: " << expected << '\n';
+            return 1;
+        }
+
+        // Neither explicit mode consults the variable at all.
+        passed &=
+            EXPECT(provizio::dds::network_recovery_explicitly_requested(provizio::dds::network_recovery_mode::on));
+        passed &=
+            EXPECT(!provizio::dds::network_recovery_explicitly_requested(provizio::dds::network_recovery_mode::off));
+
+        std::cout << "env_explicit_request " << expected << ": " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
+    }
+
     int test_snapshot()
     {
         using provizio::dds::detail::capture_address_snapshot;
@@ -1023,6 +1059,44 @@ namespace
         return passed ? 0 : 1;
     }
 
+    // FASTDDS_DEFAULT_PROFILES_FILE names test/fast_dds_localhost_profile.xml here (the ctest
+    // registration sets it): builtin transports off, one UDPv4 transport whitelisted to
+    // 127.0.0.1. Such a participant has nothing a network change could take from it, so in the
+    // default mode with PROVIZIO_DDS_NETWORK_RECOVERY unset ("skipped") it is not watched, while
+    // an explicit network_recovery_mode::on -- or the variable set to on ("participates") -- has
+    // it watched like any other. Two registrations, two processes: the variable is resolved
+    // once per process. The one CI failure this exists for: a macos-15-intel runner renewing its
+    // DHCP lease mid-test rebuilt every loopback-confined participant of a request/response
+    // test and lost the response in flight, for a change that could not have affected them.
+    int test_xml_loopback_profile(const std::string &expectation)
+    {
+        bool passed = true;
+        const bool default_mode_watched = expectation == "participates";
+
+        const auto by_default = provizio::dds::make_domain_participant(0);
+        passed &= EXPECT(by_default->takes_part_in_network_recovery() == default_mode_watched);
+
+        const auto explicit_on = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+        passed &= EXPECT(explicit_on->takes_part_in_network_recovery());
+
+        const auto explicit_off = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        passed &= EXPECT(!explicit_off->takes_part_in_network_recovery());
+
+        // The decision is what a reset acts on: a participant that is not watched treats
+        // trigger_network_recovery_reset as a no-op and keeps its Fast-DDS participant.
+        const auto generation_before = by_default->participant_generation();
+        by_default->trigger_network_recovery_reset();
+        passed &= EXPECT((by_default->participant_generation() != generation_before) == default_mode_watched);
+
+        const auto on_generation_before = explicit_on->participant_generation();
+        explicit_on->trigger_network_recovery_reset();
+        passed &= EXPECT(explicit_on->participant_generation() != on_generation_before);
+
+        std::cout << "xml_loopback_profile(" << expectation << "): " << (passed ? "PASS" : "FAIL")
+                  << " (default mode watched: " << by_default->takes_part_in_network_recovery() << ")\n";
+        return passed ? 0 : 1;
+    }
+
     // Regression test for the APT-11792 stale-interface-cache bug.
     //
     // Without the fix, Fast-DDS's process-wide `SystemInfo` cache is populated
@@ -1749,6 +1823,15 @@ int main(int argc, char **argv)
     {
         return test_env_recovery_garbage();
     }
+    if (subcommand == "env_explicit_request")
+    {
+        if (args.size() < 3)
+        {
+            std::cerr << "usage: " << args[0] << " env_explicit_request <yes|no>" << '\n';
+            return 1;
+        }
+        return test_env_explicit_request(std::string{args[2]});
+    }
     if (subcommand == "snapshot")
     {
         return test_snapshot();
@@ -1764,6 +1847,15 @@ int main(int argc, char **argv)
     if (subcommand == "reset_disabled")
     {
         return test_reset_disabled();
+    }
+    if (subcommand == "xml_loopback_profile")
+    {
+        if (args.size() < 3)
+        {
+            std::cerr << "xml_loopback_profile needs an expectation: skipped | participates\n";
+            return 1;
+        }
+        return test_xml_loopback_profile(std::string{args[2]});
     }
     if (subcommand == "reset_refreshes_fastdds_interface_cache")
     {

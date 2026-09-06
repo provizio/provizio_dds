@@ -1400,6 +1400,20 @@ _working_directory_profile_path: "Optional[str]" = None
 _xml_profile_owns_transports_lock = threading.Lock()
 
 
+def _owning_xml_profile_path(xml_profiles_env_variable: str) -> "Optional[str]":
+    """The XML profiles file that configured the transports, when one did (see
+    :func:`_xml_profile_owns_transports`): the file ``FASTDDS_DEFAULT_PROFILES_FILE`` names,
+    else the ``DEFAULT_FASTDDS_PROFILES.xml`` of the working directory, else ``None``."""
+    if not _xml_profile_owns_transports(xml_profiles_env_variable):
+        return None
+    path = os.environ.get(xml_profiles_env_variable)
+    if bool(path) and os.path.isfile(path):
+        return path
+    # The absolute path captured when the answer was cached, not the bare name -- see
+    # _working_directory_profile_path.
+    return _working_directory_profile_path
+
+
 def _xml_profile_owns_transports(xml_profiles_env_variable: str) -> bool:
     """Whether an XML profile the caller supplied is what configured the transports —
     the profile named by ``FASTDDS_DEFAULT_PROFILES_FILE``, or a
@@ -2135,70 +2149,6 @@ def make_domain_participant(domain_id: int = 0,
             transports itself."""
             global _builtin_transports_set_by_library
 
-            blocked_entries = _network_recovery.vpn_interface_blocklist_entries()
-
-            if _network_recovery.blocklist_read_failed():
-                # The host could not be read, which is NOT the same as having no tunnel --
-                # and on a rebuild the difference is the whole point: deriving fresh
-                # transports from an empty reading would drop the exclusion this
-                # participant already had, unblocking a tunnel that is still up. Reusing
-                # the profile last applied keeps the last known set excluded until a read
-                # succeeds. Mirrors refresh_vpn_interface_blocklist, which leaves its
-                # interface lists untouched for the same reason.
-                #
-                # Change detection has to learn this, and the first creation is why: there
-                # is no profile to reuse yet, so the participant takes the default
-                # transports and DDS binds and announces every tunnel the host has. Without
-                # the report, vpn_exclusion_applies_to_transports() would keep saying the
-                # exclusion reached the transports and the snapshot filter would keep
-                # dropping that same tunnel, leaving a re-auth or a reconnect with a dead
-                # locator no rebuild replaces -- the one disagreement the two filters may
-                # never have. Reported on a rebuild too, where a profile does stand: the
-                # flag is one-way and conservative by design, a tunnel that came up since
-                # that reading is bound and unwatched exactly as at first creation, and
-                # watching one that is in fact excluded costs an unnecessary rebuild at
-                # worst.
-                _network_recovery.report_vpn_exclusion_not_applied()
-
-                # Said once per participant, for the reason the caller-owns-the-transports
-                # line below is: silence here is what an operator gets when the exclusion is
-                # documented as on by default and did not apply. Not gated on the host
-                # having a tunnel up, unlike that line -- whether it has one is precisely
-                # what could not be read.
-                if not self._vpn_exclusion_skip_reported:
-                    self._vpn_exclusion_skip_reported = True
-                    self._pending_vpn_blocklist_logs.append(
-                        (
-                            _network_recovery.LogLevel.WARNING,
-                            f"could not read this host's network interfaces while "
-                            f"configuring domain {self._domain_id}: this participant keeps "
-                            f"whatever VPN / tunnel exclusion it already had (none, if this "
-                            f"is its first creation) and may bind and announce a tunnel. "
-                            f"The next participant creation, or the next network-recovery "
-                            f"rebuild, reads the host again.",
-                            # Says the exclusion did NOT apply, so nothing invalidates it.
-                            False,
-                        )
-                    )
-                return self._last_vpn_profile_name
-
-            if not blocked_entries:
-                # Nothing is excluded any more, so forget what was last reported: a
-                # tunnel that comes back — even on the address it had before — is worth
-                # a line again. refresh_vpn_interface_blocklist() in
-                # src/domain_participant.cpp records the current set unconditionally for
-                # the same reason, and the two must not disagree about when they speak.
-                self._last_logged_vpn_blocklist = None
-                # And forget the profile last applied: it is what a failed read falls
-                # back to, and it would reinstate an allowlist of addresses from an older
-                # host state -- confining the participant to an address a real interface
-                # has since renewed away from. refresh_vpn_interface_blocklist() in
-                # src/domain_participant.cpp erases its own entries on every pass that
-                # reaches its descriptors, which is the same forgetting; it does keep them
-                # where the read of the remaining interfaces fails, a case this layer
-                # answers here, before that read.
-                self._last_vpn_profile_name = None
-
             # Two ways the caller can own the transport configuration, both of which
             # this layer must leave alone — matching what src/domain_participant.cpp
             # does, and what the README promises:
@@ -2225,14 +2175,17 @@ def make_domain_participant(domain_id: int = 0,
             #     its own setup_transports() created.
             transports_configured_by_caller = _caller_configured_transports(factory)
 
-            # Resolved BEFORE the VPN branch below, and on both routes, because the
-            # transport stack is a process-wide decision that must not depend on whether
-            # a tunnel happens to be up. Taking the profile route first would skip the
-            # warning and the env pinning underneath, so the same application code would
-            # behave differently on two hosts: with FASTDDS_BUILTIN_TRANSPORTS already
-            # fixed to DEFAULT by an earlier participant, a later UDP_ONLY one keeps
-            # SHM+UDPv4 and is told so — but on a tunnel-carrying host it would silently
-            # get a UDP-only profile instead, and nothing would say so.
+            # Resolved BEFORE the host is even read for tunnels, and so on EVERY route out
+            # of this method, because the transport stack is a process-wide decision that
+            # must not depend on whether a tunnel happens to be up -- or on whether the
+            # host could be asked. Returning ahead of this would skip the warning and the
+            # env pinning underneath, so the same application code would behave differently
+            # on two hosts: with FASTDDS_BUILTIN_TRANSPORTS already fixed to DEFAULT by an
+            # earlier participant, a later UDP_ONLY one keeps SHM+UDPv4 and is told so --
+            # but on a tunnel-carrying host it would silently get a UDP-only profile
+            # instead, and nothing would say so. A failed interface read used to return
+            # above this point and cost the participant UDP_ONLY and the enlarged socket
+            # buffers outright, which is why the read now happens below it.
             #
             # Safe to pin the env variable even when the profile route wins: the
             # generated profile sets <useBuiltinTransports>false</useBuiltinTransports>,
@@ -2308,6 +2261,83 @@ def make_domain_participant(domain_id: int = 0,
             # which time this participant's transports are long since fixed. Mirrors the
             # report_vpn_exclusion_not_applied() calls in src/domain_participant.cpp.
             allowed = None
+            blocked_entries = _network_recovery.vpn_interface_blocklist_entries()
+
+            if _network_recovery.blocklist_read_failed():
+                # The host could not be read, which is NOT the same as having no tunnel --
+                # and on a rebuild the difference is the whole point: deriving fresh
+                # transports from an empty reading would drop the exclusion this
+                # participant already had, unblocking a tunnel that is still up. Reusing
+                # the profile last applied keeps the last known set excluded until a read
+                # succeeds. Mirrors refresh_vpn_interface_blocklist, which leaves its
+                # interface lists untouched for the same reason.
+                #
+                # Change detection has to learn this, and the first creation is why: there
+                # is no profile to reuse yet, so the participant takes the default
+                # transports and DDS binds and announces every tunnel the host has. Without
+                # the report, vpn_exclusion_applies_to_transports() would keep saying the
+                # exclusion reached the transports and the snapshot filter would keep
+                # dropping that same tunnel, leaving a re-auth or a reconnect with a dead
+                # locator no rebuild replaces -- the one disagreement the two filters may
+                # never have. Reported on a rebuild too, where a profile does stand: the
+                # flag is one-way and conservative by design, a tunnel that came up since
+                # that reading is bound and unwatched exactly as at first creation, and
+                # watching one that is in fact excluded costs an unnecessary rebuild at
+                # worst.
+                _network_recovery.report_vpn_exclusion_not_applied()
+
+                # Said once per participant, for the reason the caller-owns-the-transports
+                # line below is: silence here is what an operator gets when the exclusion is
+                # documented as on by default and did not apply. Not gated on the host
+                # having a tunnel up, unlike that line -- whether it has one is precisely
+                # what could not be read.
+                if not self._vpn_exclusion_skip_reported:
+                    self._vpn_exclusion_skip_reported = True
+                    self._pending_vpn_blocklist_logs.append(
+                        (
+                            _network_recovery.LogLevel.WARNING,
+                            f"could not read this host's network interfaces while "
+                            f"configuring domain {self._domain_id}: this participant keeps "
+                            f"whatever VPN / tunnel exclusion it already had (none, if this "
+                            f"is its first creation) and may bind and announce a tunnel. "
+                            f"The next participant creation, or the next network-recovery "
+                            f"rebuild, reads the host again.",
+                            # Says the exclusion did NOT apply, so nothing invalidates it.
+                            False,
+                        )
+                    )
+
+                # ...but never a profile of ours over transports that are the CALLER's. All
+                # three ownership answers are already known here, and the mitigation further
+                # down that nulls the cached name runs only on a pass whose read SUCCEEDED --
+                # so without this, a name cached before the caller took the transports over
+                # would be handed back on a failing pass and _build_participant_qos would
+                # clear their descriptors to install ours. The sequence is reachable: a first
+                # participant on a tunnel-carrying host caches a profile, the application then
+                # configures its own transports through the factory, and a recovery rebuild
+                # whose interface read fails -- the very case this branch exists for -- lands
+                # here.
+                if xml_profile_in_use or transports_owned_by_caller or transports_configured_by_caller:
+                    self._last_vpn_profile_name = None
+                return self._last_vpn_profile_name
+
+            if not blocked_entries:
+                # Nothing is excluded any more, so forget what was last reported: a
+                # tunnel that comes back — even on the address it had before — is worth
+                # a line again. refresh_vpn_interface_blocklist() in
+                # src/domain_participant.cpp records the current set unconditionally for
+                # the same reason, and the two must not disagree about when they speak.
+                self._last_logged_vpn_blocklist = None
+                # And forget the profile last applied: it is what a failed read falls
+                # back to, and it would reinstate an allowlist of addresses from an older
+                # host state -- confining the participant to an address a real interface
+                # has since renewed away from. refresh_vpn_interface_blocklist() in
+                # src/domain_participant.cpp erases its own entries on every pass that
+                # reaches its descriptors, which is the same forgetting; it does keep them
+                # where the read of the remaining interfaces fails, a case this layer
+                # answers here, before that read.
+                self._last_vpn_profile_name = None
+
             if xml_profile_in_use or transports_owned_by_caller or transports_configured_by_caller:
                 _network_recovery.report_vpn_exclusion_not_applied()
                 # The transports are the caller's from here, so a later failed read must not
@@ -2635,6 +2665,18 @@ def make_domain_participant(domain_id: int = 0,
                             False,
                         )
                     )
+                    # Both, as every sibling failure path does, and they are not
+                    # substitutes for one another. The discard drops the pending "excluding
+                    # VPN / tunnel interface(s)" line, which would otherwise announce an
+                    # exclusion this participant did not get; the report clears the latch
+                    # that change detection reads (may_drop_tunnels), which would otherwise
+                    # keep the snapshot filter dropping the very tunnel this participant is
+                    # about to bind and announce. Discarding alone left the two filters in
+                    # exactly the state the comment in _resolve_transports_body calls "the
+                    # one disagreement the two filters may never have": a re-auth of that
+                    # tunnel changes no snapshot, so nothing rebuilds, and the participant
+                    # announces a dead locator for the rest of the process' life.
+                    _network_recovery.report_vpn_exclusion_not_applied()
                     self._discard_reports_of_an_exclusion_that_did_not_apply()
                     # Forgotten for the same reason as on the profile-not-built path above:
                     # this participant binds the tunnel, so a later one that excludes the
@@ -2864,6 +2906,27 @@ def make_domain_participant(domain_id: int = 0,
             # C++ side resolves the env var the same way — once per
             # process, cached).
             self._recovery_enabled = _network_recovery.resolve_network_recovery_enabled(recovery_mode)
+            # ...unless the caller's XML profile confines the transports to loopback and recovery
+            # was merely defaulted on: no network change can take an address from such a
+            # participant, so a rebuild could fix nothing and would only cost its peers a
+            # rediscovery. Mirrors domain_participant::skip_network_recovery_if_confined_by_xml,
+            # which reads the effective QoS; the bindings cannot, so the profile file is read.
+            if self._recovery_enabled and not _network_recovery.network_recovery_explicitly_requested(
+                recovery_mode
+            ):
+                owning_profile = _owning_xml_profile_path("FASTDDS_DEFAULT_PROFILES_FILE")
+                if owning_profile is not None and _network_recovery.xml_profile_confines_to_loopback(
+                    owning_profile
+                ):
+                    self._recovery_enabled = False
+                    _network_recovery._emit_log(
+                        _network_recovery.LogLevel.INFO,
+                        f"network auto-recovery is not watching this participant on domain {domain_id}: "
+                        f"its XML profile confines the transports to the loopback interface, which no "
+                        f"network change can take away or re-address, so a rebuild could fix nothing and "
+                        f"would only cost its peers a rediscovery. Pass NetworkRecoveryMode.ON, or set "
+                        f"PROVIZIO_DDS_NETWORK_RECOVERY=on, to have it watched anyway.",
+                    )
 
             # Set by _reset_hook_locked when a reset left this participant unusable —
             # its Fast-DDS participant could not be recreated, or an endpoint failed to
@@ -3400,6 +3463,19 @@ def make_domain_participant(domain_id: int = 0,
                     self._participant.delete_contained_entities()
                     factory.delete_participant(self._participant)
                     self._participant = None
+
+                    # Armed BEFORE the window between here and the recreate below, not after
+                    # it. Everything in that window -- the interface-cache refresh, the QoS
+                    # re-resolution, the create itself -- now runs with no participant, and if
+                    # any of it throws, this method unwinds with self._participant None and
+                    # nothing scheduled to try again: the safety-net tick filters on this very
+                    # flag and never checks for a missing participant, so the endpoints would
+                    # stay inert until the next confirmed address change happened to revive
+                    # them. Arming it first makes that failure self-healing, and the success
+                    # path clears it below exactly as it always did. The pre-PR window held
+                    # only the effectively throw-free interface-cache refresh, which is why
+                    # this was not needed before.
+                    self._recovery_retry_needed = True
 
                 # Drop the match-publisher discovery cache: it tracked writers seen by the
                 # now-destroyed participant. The new participant re-discovers currently-present
