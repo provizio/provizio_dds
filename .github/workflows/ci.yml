@@ -652,6 +652,9 @@ jobs:
     needs: commit-cache
     runs-on: ubuntu-latest
     strategy:
+      # As every other test matrix here: one profile failing must not cancel the
+      # others, whose results are exactly what says whether the failure is specific to it.
+      fail-fast: false
       matrix:
         packets_loss: [25%, 50%]
         network_delay: [250ms, 500ms]
@@ -670,6 +673,9 @@ jobs:
     needs: commit-cache
     runs-on: ubuntu-latest
     strategy:
+      # As every other test matrix here: one profile failing must not cancel the
+      # others, whose results are exactly what says whether the failure is specific to it.
+      fail-fast: false
       matrix:
         packets_loss: [50%, 75%]
         network_delay: [250ms, 500ms]
