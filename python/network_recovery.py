@@ -2602,6 +2602,35 @@ OnSafetyNetTick = Callable[[], None]
 # detection interval (also the polling cadence on non-event-driven backends).
 _MAX_DEBOUNCE_SEC = 60.0
 
+# How many times a burst whose END snapshot could not be read may be re-armed to try that
+# read again, and how long to wait before each attempt. Mirrors the C++
+# max_burst_end_read_retries / burst_end_read_retry_delay (see
+# include/provizio/dds/detail/network_recovery_coordinator.h).
+#
+# Without the re-arm the burst is simply dropped, and for the transient flap this machinery
+# exists to catch that loses the evidence for good: the burst-start snapshot showed the
+# interface down, the addresses came back before the end read, and the end read then failed.
+# The safety-net tick compares the live snapshot against a baseline the flap returned to, sees
+# no difference, and reports nothing -- leaving sockets bound to an address that was torn down
+# and re-added.
+#
+# The delay is deliberately NOT the quiet period. That window coalesces a burst of kernel
+# events into one reset; a re-armed read is not one -- no new event has arrived, an
+# enumeration syscall failed and may well succeed a moment later.
+_MAX_BURST_END_READ_RETRIES = 3
+# How many reads one burst may spend on its START snapshot before giving up on it. The
+# first event of a burst spends attempt 1; a failed read is retried on later events of the
+# SAME burst, because one failure otherwise leaves the burst with no start snapshot for its
+# whole life and so disables transient-flap detection exactly when a flap may be what is
+# happening. Bounded, and for a different reason than the end read is: this retry rides on
+# the kernel event stream rather than on a timer, so a host whose interface list is durably
+# unreadable while its links churn (container/veth noise raises a burst per event) would pay
+# one full enumeration per event, multiplying syscall load exactly while the resource that
+# enumeration needs is what is short. Four mirrors the end read's one initial read plus
+# _MAX_BURST_END_READ_RETRIES retries, and the C++ max_burst_start_read_attempts.
+_MAX_BURST_START_READ_ATTEMPTS = 4
+_BURST_END_READ_RETRY_SEC = 0.1
+
 # How often an event-driven monitor re-verifies the snapshot directly when no burst
 # is pending, mirroring the C++ default_safety_net_period. This is the backstop for
 # everything the event channel cannot report: a dropped netlink datagram (ENOBUFS),
@@ -2865,6 +2894,28 @@ class _PollingNetworkMonitor:
         return False
 
 
+def _fresh_burst_state(
+    burst_start: "Optional[AddressSnapshot]",
+) -> "Tuple[Optional[AddressSnapshot], bool, int, int]":
+    """The per-burst state of :meth:`_NetlinkNetworkMonitor._run`'s loop, as one value.
+
+    Returns ``(burst_start, burst_start_valid, burst_start_attempts,
+    burst_end_read_retries)``. The loop resets all four together in three places -- opening
+    a burst, giving up on one whose end-of-burst read kept failing, and completing one --
+    and they were three separate blocks in three different statement orders. Adding a
+    per-burst variable then meant remembering all three; the one that already existed,
+    ``burst_start_attempts``, had to be retrofitted into each. One definition instead.
+
+    ``burst_start`` is the only one that differs between the callers: opening a burst adopts
+    the last known set as its start, ending one has no start at all. The declaration at the
+    top of the loop goes through it too, so there is no fourth place to keep in step.
+
+    No C++ counterpart: the coalescer keeps this state in members under a mutex and clears
+    different subsets of it in each place, so there is no equivalent repeated block there.
+    """
+    return burst_start, False, 0, 0
+
+
 class _NetlinkNetworkMonitor:
     """Linux event-driven monitor. Subscribes an ``AF_NETLINK`` / ``NETLINK_ROUTE``
     socket to ``RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR | RTMGRP_LINK`` and coalesces
@@ -3010,20 +3061,40 @@ class _NetlinkNetworkMonitor:
 
     def _run(self) -> None:
         pending = False
-        # None means "no burst-start snapshot", which is exactly what a missing baseline
-        # amounts to as well, so the two collapse into one value.
-        burst_start: Optional[AddressSnapshot] = None
+        # Through the same helper as the three resets below, so this is not a fourth place to
+        # remember. None means "no burst-start snapshot", which is exactly what a missing
+        # baseline amounts to as well, so the two collapse into one value; burst_start_valid
+        # says whether it holds a reading of the host rather than the fallback, and
+        # burst_start_attempts / burst_end_read_retries are how many reads this burst has
+        # spent on each of its two bounded retries. All four belong to the CURRENT burst.
+        (
+            burst_start,
+            burst_start_valid,
+            burst_start_attempts,
+            burst_end_read_retries,
+        ) = _fresh_burst_state(None)
         first_event_mono = 0.0
         last_event_mono = 0.0
 
+        # ABSOLUTE next-tick deadline, re-armed only when a tick actually runs. A relative
+        # timeout restarts the full period after every burst, and the kernel subscription is
+        # unfiltered -- every veth / container link event on the host raises one -- so sustained
+        # churn postponed the tick indefinitely, and with it everything that runs only from
+        # ticks: the failed-rebuild retry (so a participant left torn down stays dead, and the
+        # attempt counter never reaches its bound, so even the give-up error never fires), the
+        # revival of a dropped netlink socket, and the re-verify that catches an event the
+        # kernel never delivered. One burst is enough on its own, since _MAX_DEBOUNCE_SEC
+        # exceeds the default period. Mirrors next_tick in the C++ coalescer_loop.
+        next_tick = time.monotonic() + self._safety_net if self._safety_net > 0 else None
+
         while True:
             timeout: Optional[float] = None
+            now = time.monotonic()
             if pending:
-                now = time.monotonic()
                 wake_at = min(last_event_mono + self._quiet, first_event_mono + _MAX_DEBOUNCE_SEC)
                 timeout = max(0.0, wake_at - now)
-            elif self._safety_net > 0:
-                timeout = self._safety_net
+            elif next_tick is not None:
+                timeout = max(0.0, next_tick - now)
 
             # Read the socket ONCE per iteration and use that value throughout: it can be
             # replaced under us (kill_for_test from another thread, or a revival from a
@@ -3039,6 +3110,9 @@ class _NetlinkNetworkMonitor:
                 # the thread, which is what an uncaught exception here used to do.
                 # Silent: internal clamp, no effect the caller can observe.
                 self._safety_net = min(self._safety_net, _DEFAULT_SAFETY_NET_SEC)
+                # The clamp lowers the period, so bring the pending deadline down with it --
+                # otherwise the tick keeps the unrepresentable deadline it was just clamped for.
+                next_tick = time.monotonic() + self._safety_net if self._safety_net > 0 else None
                 continue
             except ValueError:
                 # select() raises ValueError (not OSError) for a socket whose fd is
@@ -3108,16 +3182,33 @@ class _NetlinkNetworkMonitor:
                 if not pending:
                     pending = True
                     first_event_mono = now
-                    # Burst START snapshot — capture immediately, before a quick
-                    # flap can revert. capture_address_snapshot() is slow; while it
-                    # runs the kernel buffers further events for the next iteration.
                     # An unreadable list leaves the burst with the last known set as its
                     # start, which makes the transient test below a no-op rather than
                     # reporting every address as having returned during the burst. With no
                     # baseline yet that yields None, which the coordinator already reads as
                     # "no burst-start snapshot" — the same no-op by a different route.
+                    (
+                        burst_start,
+                        burst_start_valid,
+                        burst_start_attempts,
+                        burst_end_read_retries,
+                    ) = _fresh_burst_state(self._last_known)
+                if not burst_start_valid and burst_start_attempts < _MAX_BURST_START_READ_ATTEMPTS:
+                    # Burst START snapshot — captured on the first event, before a quick flap
+                    # can revert, and RETRIED on later events of the same burst when that read
+                    # failed. Attempting it exactly once left a burst whose first read failed
+                    # with no start snapshot at all for its whole life, which disables the very
+                    # detection this snapshot exists for: for a genuine flap the end state
+                    # equals the baseline, so every other route concludes nothing happened.
+                    # capture_address_snapshot() is slow; while it runs the kernel buffers
+                    # further events for the next iteration. Bounded by
+                    # _MAX_BURST_START_READ_ATTEMPTS — see it for why this retry needs a bound
+                    # the end read's does not. Mirrors the C++ coalescer's on_kernel_event.
+                    burst_start_attempts += 1
                     captured_start = _try_capture_address_snapshot()
-                    burst_start = captured_start if captured_start is not None else self._last_known
+                    if captured_start is not None:
+                        burst_start = captured_start
+                        burst_start_valid = True
                 last_event_mono = now
                 continue
 
@@ -3125,6 +3216,12 @@ class _NetlinkNetworkMonitor:
             # max_debounce), or there was no burst at all and it is time for a
             # safety-net tick.
             if not pending:
+                # Re-armed BEFORE the tick runs, not after, and here and nowhere else. After
+                # the tick, the period would restart from the moment the tick FINISHED, so the
+                # effective cadence drifts to period + tick_duration under load -- and a tick
+                # rebuilds participants, so that duration is not small. C++ re-arms before
+                # calling safety_net_tick() for the same reason.
+                next_tick = time.monotonic() + self._safety_net if self._safety_net > 0 else None
                 self._safety_net_check()
                 continue
 
@@ -3134,10 +3231,51 @@ class _NetlinkNetworkMonitor:
             ):
                 end_snapshot = _try_capture_address_snapshot()
                 if end_snapshot is None:
-                    # Unreadable interfaces are not a change — see the helper. The burst is
-                    # dropped; the safety-net tick re-checks once a read succeeds.
-                    pending = False
-                    burst_start = None
+                    # Unreadable interfaces are not a change — see the helper. But the burst
+                    # must not simply be dropped: nothing else would ever look again. No
+                    # participant is flagged for retry (that flag means "a rebuild failed",
+                    # and none did), and the safety-net tick compares the live snapshot
+                    # against a baseline that never moved — which for a flap that RETURNED to
+                    # its starting addresses is equal, so the tick reports nothing and the
+                    # flap is lost for good. So re-arm, carrying burst_start over as the
+                    # evidence of what the burst began from, and come back for the read after
+                    # _BURST_END_READ_RETRY_SEC. Bounded, so a host whose list is durably
+                    # unreadable settles into the periodic tick instead of re-reading forever.
+                    if burst_end_read_retries >= _MAX_BURST_END_READ_RETRIES:
+                        # One more than _MAX_BURST_END_READ_RETRIES: that bounds the RE-ARMS,
+                        # and the first read -- the one this burst made before any re-arm --
+                        # failed too. The line counts failed reads, which is what an operator
+                        # gauging how long enumeration has been broken needs.
+                        _emit_log(
+                            LogLevel.WARNING,
+                            "network monitor: could not read this host's interfaces at the end "
+                            f"of a change burst {_MAX_BURST_END_READ_RETRIES + 1} time(s) running; "
+                            "giving up on that burst, so a transient interface flap inside it "
+                            "goes unnoticed. The periodic safety-net check still runs, and the "
+                            "next interface change is decided normally.",
+                        )
+                        pending = False
+                        (
+                            burst_start,
+                            burst_start_valid,
+                            burst_start_attempts,
+                            burst_end_read_retries,
+                        ) = _fresh_burst_state(None)
+                        continue
+                    burst_end_read_retries += 1
+                    # Back-date the event timers so the wake computation at the top of the loop
+                    # lands _BURST_END_READ_RETRY_SEC from now, rather than a whole quiet period.
+                    # Both move together to keep last >= first.
+                    #
+                    # This DOES re-anchor the _MAX_DEBOUNCE_SEC ceiling to now rather than
+                    # continuing to measure the original burst's age -- the true burst-start
+                    # timestamp is gone once first_event_mono is overwritten. Inert as the
+                    # constants stand (3 retries x 0.1 s is 0.3 s of drift against a 60 s
+                    # ceiling) and accepted for that reason, but it stops being inert if either
+                    # constant grows. Mirrors the C++ coalescer, which back-dates the same way.
+                    retry_at = time.monotonic() - (self._quiet - _BURST_END_READ_RETRY_SEC)
+                    first_event_mono = retry_at
+                    last_event_mono = retry_at
                     continue
                 if self._last_known is None:
                     # See the polling monitor: with no baseline the empty set stands in, so this
@@ -3150,7 +3288,12 @@ class _NetlinkNetworkMonitor:
                     _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
                 self._last_known = end_snapshot
                 pending = False
-                burst_start = None
+                (
+                    burst_start,
+                    burst_start_valid,
+                    burst_start_attempts,
+                    burst_end_read_retries,
+                ) = _fresh_burst_state(None)
 
     def _close_socket(self, expected: "Optional[socket.socket]" = None) -> None:
         """Drop the netlink socket, leaving the loop running on its periodic check.

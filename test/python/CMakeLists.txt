@@ -291,6 +291,10 @@ foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         safety_net_retries_while_interfaces_are_unreadable xml_loopback_confinement_parser
         allowed_interfaces_are_ipv4
         xml_profile_flags_are_optional
+        netlink_end_read_failure_keeps_the_flap
+        netlink_start_read_failure_is_retried_in_the_burst
+        netlink_start_read_retry_is_bounded
+        netlink_safety_net_survives_sustained_churn
         env_explicit_request_survives_mutation
         env_explicit_request_survives_removal)
     add_test(NAME python_network_recovery_${_nrt_case} COMMAND

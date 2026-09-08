@@ -1585,6 +1585,140 @@ def test_snapshot_policy_follows_transports():
     return 0
 
 
+def test_netlink_end_read_failure_keeps_the_flap():
+    """A failed end-of-burst read must not throw away the evidence of a transient flap.
+
+    The burst-start snapshot is the only record that an interface went away mid-burst. If
+    the end read fails and the burst is simply dropped, and the addresses came back before
+    that read, then nothing else can ever notice: the safety-net tick compares the live
+    snapshot against a baseline the flap RETURNED to, finds them equal, and reports nothing
+    -- leaving participants on sockets bound to an address that was torn down and re-added.
+    So a failed end read re-arms the burst, keeping burst_start, bounded and on a short
+    backoff of its own. Mirrors the C++ coalescer's run_reset.
+
+    Drives the real _run() loop with a select() that honours its timeout (a mock returning
+    instantly would never let the short retry deadline arrive) and a scripted sequence of
+    interface reads: interface down at burst start, the end read failing, then the original
+    addresses back."""
+    from unittest.mock import Mock, patch
+
+    from provizio_dds import network_recovery as nr
+
+    baseline = frozenset({("eth0", "192.0.2.1", 24)})
+    monitor = nr._NetlinkNetworkMonitor.__new__(nr._NetlinkNetworkMonitor)
+    monitor._sock = Mock()
+    monitor._stop_r = 12345
+    monitor._quiet = 0.0
+    monitor._safety_net = 0.0
+    monitor._last_known = baseline
+    monitor._on_event = Mock()
+    monitor._on_safety_net_tick = None
+
+    wakeups = [
+        ([monitor._sock], [], []),  # a kernel event opens the burst
+        ([], [], []),  # quiet: the end read is attempted, and fails
+        ([], [], []),  # the re-armed read, which succeeds
+        ([monitor._stop_r], [], []),  # shut the loop down
+    ]
+    calls = {"n": 0}
+
+    def _select(_readers, _writers, _errors, timeout=None):
+        # A real select() does not return before its timeout has elapsed, and the retry
+        # deadline depends on that. Waited out against the clock rather than with a single
+        # sleep(): sleep() may return marginally early where the platform timer is coarse
+        # (Windows), and the loop under test would then find its deadline not yet reached and
+        # never re-attempt the read -- a failure of the mock, not of the code.
+        if timeout:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                time.sleep(0.005)
+        index = calls["n"]
+        calls["n"] += 1
+        return wakeups[index] if index < len(wakeups) else ([monitor._stop_r], [], [])
+
+    with patch.object(nr.select, "select", side_effect=_select):
+        with patch.object(
+            nr,
+            "_try_capture_address_snapshot",
+            side_effect=[frozenset(), None, baseline],
+        ) as snapshots:
+            monitor._run()
+
+    assert snapshots.call_count == 3, (
+        f"the end read must be re-attempted after failing; reads: {snapshots.call_count}"
+    )
+    assert monitor._on_event.call_count == 1, (
+        f"the flap must be reported; events: {monitor._on_event.call_count}"
+    )
+    _, end_snapshot, burst_start = monitor._on_event.call_args[0]
+    assert burst_start == frozenset(), f"burst-start evidence must survive the retry: {burst_start}"
+    assert end_snapshot == baseline, f"the end snapshot must be the one that finally read: {end_snapshot}"
+
+
+def test_netlink_start_read_failure_is_retried_in_the_burst():
+    """A failed burst-START read must be re-attempted on the next event of the SAME burst.
+
+    The start snapshot is the only record that an address went away mid-burst. Attempting it
+    exactly once meant one transient enumeration failure on the very first kernel event of a
+    burst left that burst with no start evidence for its whole life -- and for the flap this
+    machinery exists to catch the end state EQUALS the baseline, so every other route
+    concludes nothing happened and the flap is lost. The C++ coalescer retries the read on
+    every later event of the burst; this is the Python mirror of that (on_kernel_event in
+    src/network_recovery_coordinator.cpp).
+
+    Drives the real _run() loop: the first event's read fails, the second event's read finds
+    the interface gone, and the end read finds it back. Without the retry the reported
+    burst_start would be the pre-burst baseline and the flap would read as "nothing
+    changed"."""
+    from unittest.mock import Mock, patch
+
+    from provizio_dds import network_recovery as nr
+
+    baseline = frozenset({("eth0", "192.0.2.1", 24)})
+    monitor = nr._NetlinkNetworkMonitor.__new__(nr._NetlinkNetworkMonitor)
+    monitor._sock = Mock()
+    monitor._stop_r = 12345
+    monitor._quiet = 0.0
+    monitor._safety_net = 0.0
+    monitor._last_known = baseline
+    monitor._on_event = Mock()
+    monitor._on_safety_net_tick = None
+
+    wakeups = [
+        ([monitor._sock], [], []),  # first event: the start read fails
+        ([monitor._sock], [], []),  # second event of the same burst: the retry succeeds
+        ([], [], []),  # quiet: the end read
+        ([monitor._stop_r], [], []),  # shut the loop down
+    ]
+    calls = {"n": 0}
+
+    def _select(_readers, _writers, _errors, timeout=None):
+        index = calls["n"]
+        calls["n"] += 1
+        return wakeups[index] if index < len(wakeups) else ([monitor._stop_r], [], [])
+
+    with patch.object(nr.select, "select", side_effect=_select):
+        with patch.object(
+            nr,
+            # Read 1: fails. Read 2 (the retry): the address is gone. Read 3: it is back.
+            "_try_capture_address_snapshot",
+            side_effect=[None, frozenset(), baseline],
+        ) as snapshots:
+            monitor._run()
+
+    assert snapshots.call_count == 3, (
+        f"the start read must be re-attempted after failing; reads: {snapshots.call_count}"
+    )
+    assert monitor._on_event.call_count == 1, (
+        f"the burst must be reported; events: {monitor._on_event.call_count}"
+    )
+    _, end_snapshot, burst_start = monitor._on_event.call_args[0]
+    assert burst_start == frozenset(), (
+        f"the retried read must become the burst start, not the pre-burst baseline: {burst_start}"
+    )
+    assert end_snapshot == baseline, f"the end snapshot must be the read that succeeded: {end_snapshot}"
+
+
 def test_env_explicit_request_survives_mutation():
     """The "was it explicitly requested" answer and the verdict must come from ONE reading.
 
@@ -1648,6 +1782,147 @@ def test_env_explicit_request_survives_removal():
 
     _log("env_explicit_request_survives_removal: PASS")
     return 0
+
+
+def test_netlink_safety_net_survives_sustained_churn():
+    """Regression: bursts arriving faster than the safety-net period must not starve the tick.
+
+    Everything that runs only from ticks depends on this -- the failed-rebuild retry (whose
+    counter never reaches its bound if the tick never runs, so not even the give-up error
+    fires), the revival of a dropped netlink socket, and the re-verify that catches an event
+    the kernel never delivered. The deadline has to be ABSOLUTE, as the C++ coalescer_loop's
+    next_tick is: recomputing a whole fresh period after every burst pushes the tick out
+    indefinitely on a host with container/veth churn, and one burst is enough on its own since
+    _MAX_DEBOUNCE_SEC exceeds the default period.
+
+    Drives the real _run() loop with a scripted event stream: a burst completes, then another
+    arrives, repeatedly, each well inside the safety-net period."""
+    from unittest.mock import Mock, patch
+
+    from provizio_dds import network_recovery as nr
+
+    baseline = frozenset({("eth0", "192.0.2.1", 24)})
+    monitor = nr._NetlinkNetworkMonitor.__new__(nr._NetlinkNetworkMonitor)
+    monitor._sock = Mock()
+    monitor._stop_r = 12345
+    monitor._quiet = 0.0
+    monitor._safety_net = 30.0  # Far longer than this test's simulated elapsed time.
+    monitor._last_known = baseline
+    monitor._on_event = Mock()
+    monitor._on_safety_net_tick = None
+
+    ticks = {"n": 0}
+    real_check = nr._NetlinkNetworkMonitor._safety_net_check
+
+    def counting_check(self):
+        ticks["n"] += 1
+        return real_check(self)
+
+    # A clock we control, so "the period elapsed" is a fact of the test rather than a wait.
+    # It advances 1 s per select() call: five bursts of two events cost far less than the 30 s
+    # period, so a correctly ARMED absolute deadline still would not fire -- what the test
+    # pins is that the deadline is not RESET by each burst, which it proves by advancing past
+    # it once the bursts stop.
+    clock = {"t": 1000.0}
+
+    bursts = 5
+    wakeups = []
+    for _ in range(bursts):
+        wakeups.append(([monitor._sock], [], []))  # an event opens a burst
+        wakeups.append(([], [], []))  # quiet: the burst completes
+    wakeups.append(([], [], []))  # nothing pending: the tick deadline is consulted
+    wakeups.append(([monitor._stop_r], [], []))
+
+    calls = {"n": 0}
+    # With _quiet at 0 a burst-pending iteration asks for a timeout of 0, so every POSITIVE
+    # one is the loop consulting its tick deadline. Those are what this test reads.
+    tick_waits = []
+
+    def _select(_readers, _writers, _errors, timeout=None):
+        if timeout:
+            tick_waits.append(timeout)
+        # Advance by 1 s per call rather than by the whole requested wait, so the bursts stay
+        # well inside the 30 s period: letting the period elapse honestly would make the test
+        # pass with or without the fix.
+        clock["t"] += 1.0
+        index = calls["n"]
+        calls["n"] += 1
+        return wakeups[index] if index < len(wakeups) else ([monitor._stop_r], [], [])
+
+    with patch.object(nr.time, "monotonic", lambda: clock["t"]):
+        with patch.object(nr.select, "select", side_effect=_select):
+            with patch.object(nr._NetlinkNetworkMonitor, "_safety_net_check", counting_check):
+                with patch.object(nr, "_try_capture_address_snapshot", return_value=baseline):
+                    monitor._run()
+
+    assert monitor._on_event.call_count == bursts, (
+        f"the scripted bursts must all be processed; events: {monitor._on_event.call_count}"
+    )
+
+    # The discriminator. An ABSOLUTE deadline shrinks as the bursts go by, because time has
+    # passed and the deadline has not moved. A relative one is the whole period every time --
+    # which is the starvation: the tick is pushed a full period into the future by each burst
+    # and, on a host where bursts arrive faster than that, never comes due at all.
+    assert len(tick_waits) >= 2, f"the loop must consult its tick deadline more than once: {tick_waits}"
+    # min(), not the last value: once a tick DOES run it legitimately re-arms the deadline to a
+    # whole period again, so the last wait is 30 s in either world. What separates them is
+    # whether the waits ever shrank while the bursts were arriving.
+    assert min(tick_waits) < monitor._safety_net, (
+        f"the tick deadline must be absolute, so the wait shrinks as bursts go by; got "
+        f"{tick_waits} -- a constant {monitor._safety_net}s means each burst reset it, which "
+        f"on a host where bursts arrive faster than the period means the tick never comes due"
+    )
+
+    _log(
+        f"netlink_safety_net_survives_sustained_churn: PASS "
+        f"({bursts} burst(s), tick waits shrank to {min(tick_waits):.0f}s of "
+        f"{monitor._safety_net:.0f}s, {ticks['n']} tick(s))"
+    )
+    return 0
+
+
+def test_netlink_start_read_retry_is_bounded():
+    """The burst-start retry rides on the kernel event stream, so it must be bounded.
+
+    A host whose interface list is durably unreadable while its links churn raises a burst
+    event per change; retrying without a bound would spend one full enumeration on every one
+    of them, multiplying syscall load exactly while the resource that enumeration needs is
+    what is short. After _MAX_BURST_START_READ_ATTEMPTS the burst runs without a start
+    snapshot, which is what it did before the retry existed."""
+    from unittest.mock import Mock, patch
+
+    from provizio_dds import network_recovery as nr
+
+    baseline = frozenset({("eth0", "192.0.2.1", 24)})
+    monitor = nr._NetlinkNetworkMonitor.__new__(nr._NetlinkNetworkMonitor)
+    monitor._sock = Mock()
+    monitor._stop_r = 12345
+    monitor._quiet = 0.0
+    monitor._safety_net = 0.0
+    monitor._last_known = baseline
+    monitor._on_event = Mock()
+    monitor._on_safety_net_tick = None
+
+    # Twice as many events as the bound allows attempts, so the cap is what stops the reads
+    # rather than the event stream running out.
+    events = 2 * nr._MAX_BURST_START_READ_ATTEMPTS
+    wakeups = [([monitor._sock], [], []) for _ in range(events)]
+    wakeups.append(([monitor._stop_r], [], []))
+    calls = {"n": 0}
+
+    def _select(_readers, _writers, _errors, timeout=None):
+        index = calls["n"]
+        calls["n"] += 1
+        return wakeups[index] if index < len(wakeups) else ([monitor._stop_r], [], [])
+
+    with patch.object(nr.select, "select", side_effect=_select):
+        with patch.object(nr, "_try_capture_address_snapshot", return_value=None) as snapshots:
+            monitor._run()
+
+    assert snapshots.call_count == nr._MAX_BURST_START_READ_ATTEMPTS, (
+        f"the start read must stop after {nr._MAX_BURST_START_READ_ATTEMPTS} attempts, "
+        f"not once per event; reads: {snapshots.call_count} over {events} event(s)"
+    )
 
 
 def test_snapshot_policy_honours_override():
@@ -1918,6 +2193,14 @@ _TESTS = {
     "netlink_kinds_match_the_kernel": test_netlink_kinds_match_the_kernel,
     "listener_drain_reports_a_stall_until_it_ends": test_listener_drain_reports_a_stall_until_it_ends,
     "snapshot_policy_honours_override": test_snapshot_policy_honours_override,
+    "netlink_end_read_failure_keeps_the_flap": test_netlink_end_read_failure_keeps_the_flap,
+    "netlink_start_read_failure_is_retried_in_the_burst": (
+        test_netlink_start_read_failure_is_retried_in_the_burst
+    ),
+    "netlink_start_read_retry_is_bounded": test_netlink_start_read_retry_is_bounded,
+    "netlink_safety_net_survives_sustained_churn": (
+        test_netlink_safety_net_survives_sustained_churn
+    ),
     "env_explicit_request_survives_mutation": test_env_explicit_request_survives_mutation,
     "env_explicit_request_survives_removal": test_env_explicit_request_survives_removal,
 }
