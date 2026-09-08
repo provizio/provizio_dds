@@ -699,35 +699,70 @@ namespace provizio::dds::detail
             // coalescer come back after another quiet_period. Bounded, so a host whose
             // interface list is durably unreadable settles into the periodic tick instead of
             // re-reading forever.
-            const std::lock_guard<std::mutex> lock{coalescer_mutex};
-            if (has_pending_burst)
+            // Composed under the lock but EMITTED after it, like every other diagnostic on
+            // this path: a log callback is documented as free to publish onto a DDS topic,
+            // which takes milliseconds, and on_kernel_event() takes this same mutex on the
+            // netlink monitor thread. Emitting here would block that thread out of its recv()
+            // for the callback's duration, so the kernel socket goes undrained -- ENOBUFS and
+            // dropped events, which is the failure the safety net exists to paper over. It
+            // would also hold up ~network_recovery_coordinator at process exit, and let a
+            // callback that calls wait_for_idle() deadlock on this non-recursive mutex.
+            std::string give_up_warning;
             {
-                // A newer burst is already pending and owns the state below; it will take
-                // its own start snapshot and end read, so leave it entirely alone.
-                return;
+                const std::lock_guard<std::mutex> lock{coalescer_mutex};
+                if (has_pending_burst)
+                {
+                    // A newer burst is already pending and owns the state below; it will take
+                    // its own start snapshot and end read, so leave it entirely alone.
+                    return;
+                }
+                if (burst_end_read_retries >= max_burst_end_read_retries)
+                {
+                    // One more than max_burst_end_read_retries: that bounds the RE-ARMS, and
+                    // the first read -- the one this burst made before any re-arm -- failed
+                    // too. The line counts failed reads, which is what an operator gauging how
+                    // long enumeration has been broken needs, and it is the same count the
+                    // quiet_period x (1 + max_burst_end_read_retries) arithmetic below uses.
+                    give_up_warning = "network auto-recovery: could not read this host's interfaces at the end of "
+                                      "a change burst " +
+                                      std::to_string(max_burst_end_read_retries + 1) +
+                                      " time(s) running; giving up on that burst, so a transient interface flap "
+                                      "inside it goes unnoticed. The periodic safety-net check still runs, and "
+                                      "the next interface change is decided normally.";
+                    burst_end_read_retries = 0;
+                }
+                else
+                {
+                    ++burst_end_read_retries;
+                    // Come back for the read after burst_end_read_retry_delay, not after another full
+                    // quiet_period. The header says why the two are different things; the cost of
+                    // conflating them was that every burst ending on an unreadable interface list
+                    // delayed its recovery decision by quiet_period x (1 + max_burst_end_read_retries)
+                    // -- 12 s of a host that briefly cannot enumerate being left on sockets bound to an
+                    // address that may already be gone, where the design intends 3.
+                    //
+                    // Expressed by back-dating the event timers rather than by adding a second deadline
+                    // beside them, so the coalescer keeps the ONE wake computation it has today:
+                    // last_event_time + quiet_period then falls burst_end_read_retry_delay from now.
+                    // first_event_time moves with it, both to keep last >= first and because the
+                    // max_debounce ceiling should measure this burst's age rather than restart on every
+                    // failed read.
+                    const auto now = std::chrono::steady_clock::now() - (quiet_period - burst_end_read_retry_delay);
+                    first_event_time = now;
+                    last_event_time = now;
+                    has_pending_burst = true;
+                    if (had_burst_start && !burst_start_valid)
+                    {
+                        burst_start_snapshot = burst_start;
+                        burst_start_valid = true;
+                    }
+                    coalescer_cv.notify_all();
+                }
             }
-            if (burst_end_read_retries >= max_burst_end_read_retries)
+            if (!give_up_warning.empty())
             {
-                log_warning() << "network auto-recovery: could not read this host's interfaces at the end of "
-                                 "a change burst "
-                              << max_burst_end_read_retries
-                              << " time(s) running; giving up on that burst, so a transient interface flap "
-                                 "inside it goes unnoticed. The periodic safety-net check still runs, and "
-                                 "the next interface change is decided normally.";
-                burst_end_read_retries = 0;
-                return;
+                log_warning() << give_up_warning;
             }
-            ++burst_end_read_retries;
-            const auto now = std::chrono::steady_clock::now();
-            first_event_time = now;
-            last_event_time = now;
-            has_pending_burst = true;
-            if (had_burst_start && !burst_start_valid)
-            {
-                burst_start_snapshot = burst_start;
-                burst_start_valid = true;
-            }
-            coalescer_cv.notify_all();
             return;
         }
         {

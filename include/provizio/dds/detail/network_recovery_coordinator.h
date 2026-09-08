@@ -120,6 +120,25 @@ namespace provizio::dds::detail
         static constexpr std::chrono::seconds max_debounce{60};
 
         /**
+         * @brief How long to wait before re-attempting an end-of-burst interface read that
+         * failed (see @c max_burst_end_read_retries).
+         *
+         * Deliberately NOT @c quiet_period. That window exists to coalesce a burst of kernel
+         * events into a single reset, and a re-armed read is not one: no new event has
+         * arrived and nothing is settling -- an enumeration syscall failed and may well
+         * succeed a moment later. Charging it the coalescing window made an unreadable burst
+         * cost @c quiet_period x (1 + @c max_burst_end_read_retries) = 12 s before the
+         * recovery decision was made, where the design intends 3.
+         *
+         * 100 ms: long enough for a momentary failure (a transient ENOMEM/EMFILE, a netlink
+         * hiccup) to clear, short enough that all three attempts together are invisible next
+         * to the 3 s the burst already waited. Fixed rather than backing off, because the
+         * bound is three attempts over 300 ms -- a range across which a backoff would change
+         * nothing worth reasoning about.
+         */
+        static constexpr std::chrono::milliseconds burst_end_read_retry_delay{100};
+
+        /**
          * @brief How often the coalescer re-verifies the address snapshot when no
          * event burst is pending — the safety net described in the file comment.
          * 30 seconds: frequent enough that a missed event costs a bounded outage
@@ -497,9 +516,10 @@ namespace provizio::dds::detail
         /// EQUALS the baseline, which is exactly what every other route (the safety-net
         /// tick's snapshot comparison included) treats as "nothing happened". A bound
         /// rather than an unlimited retry because a host whose interface list is durably
-        /// unreadable would otherwise re-read it every quiet_period for the rest of the
-        /// process' life; three attempts cover a momentary failure, and beyond that the
-        /// periodic safety-net tick is the right mechanism. Guarded by coalescer_mutex.
+        /// unreadable would otherwise re-read it every burst_end_read_retry_delay for the
+        /// rest of the process' life; three attempts cover a momentary failure, and beyond
+        /// that the periodic safety-net tick is the right mechanism. Guarded by
+        /// coalescer_mutex.
         static constexpr unsigned int max_burst_end_read_retries{3};
 
         /// Re-arms spent on the current burst's end-of-burst read (see
