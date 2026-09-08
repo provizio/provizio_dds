@@ -1089,6 +1089,59 @@ def test_netlink_binds_before_snapshot():
     return 0
 
 
+def test_netlink_stop_keeps_descriptors_under_a_live_worker():
+    """Regression: stop() must not close the netlink socket or the self-pipe while its worker
+    is still running.
+
+    The join is bounded, and it legitimately times out -- the worker returns to its select()
+    after a reset hook, and rebuilding participants takes seconds. A closed fd number is
+    immediately reusable, so closing here lets the next socket() or open() anywhere in the
+    process be handed one of these numbers, at which point the still-running worker watches,
+    and reads from, a descriptor belonging to somebody else. Leaking three descriptors is much
+    the cheaper failure. The C++ monitor joins unconditionally and never had the hazard."""
+    from provizio_dds import network_recovery as nr
+
+    if not sys.platform.startswith("linux"):
+        _log("netlink_stop_keeps_descriptors_under_a_live_worker: SKIP (netlink is Linux-only)")
+        return 0
+
+    monitor = nr._NetlinkNetworkMonitor(lambda *_: None, 3600.0, None, 0.0)
+    stop_r, stop_w = monitor._stop_r, monitor._stop_w
+
+    # A stand-in for a worker still inside a reset hook. Substituted rather than wedging the
+    # real one, so the case stays deterministic and the real worker is still stopped cleanly
+    # below -- what stop() reads is is_alive(), and this is alive until we let it go.
+    release = threading.Event()
+    blocked = threading.Thread(target=release.wait, daemon=True)
+    blocked.start()
+    real_worker, monitor._thread = monitor._thread, blocked
+    try:
+        monitor.stop()  # Bounded join times out against `blocked`, so nothing may be closed.
+        assert monitor._sock is not None, "the netlink socket was closed under a live worker"
+        # Still valid: fstat rather than write, so a check cannot itself disturb whatever a
+        # closed-and-reused number would now refer to.
+        os.fstat(stop_r)
+        os.fstat(stop_w)
+    finally:
+        release.set()
+        blocked.join(timeout=5.0)
+        monitor._thread = real_worker
+
+    # The real worker was woken by the stop() above; with it gone, stop() closes everything.
+    monitor.stop()
+    assert not real_worker.is_alive(), "the real worker outlived stop()"
+    assert monitor._sock is None, "the netlink socket was left open after a clean stop"
+    for name, descriptor in (("stop_r", stop_r), ("stop_w", stop_w)):
+        try:
+            os.fstat(descriptor)
+        except OSError:
+            continue
+        raise AssertionError(f"{name} was left open after a clean stop")
+
+    _log("netlink_stop_keeps_descriptors_under_a_live_worker: PASS")
+    return 0
+
+
 def test_listener_drain_reports_a_stall_until_it_ends():
     """A callback that does not return says so for as long as it does not, and the log
     gets an end as well as a beginning.
@@ -2182,6 +2235,9 @@ _TESTS = {
     "allowed_interfaces_are_ipv4": test_allowed_interfaces_are_ipv4,
     "extra_interfaces_env": test_extra_interfaces_env,
     "netlink_binds_before_snapshot": test_netlink_binds_before_snapshot,
+    "netlink_stop_keeps_descriptors_under_a_live_worker": (
+        test_netlink_stop_keeps_descriptors_under_a_live_worker
+    ),
     "safety_net_detects_missed_change": test_safety_net_detects_missed_change,
     "safety_net_reopens_dead_monitor": test_safety_net_reopens_dead_monitor,
     "safety_net_retries_failed_rebuild": test_safety_net_retries_failed_rebuild,

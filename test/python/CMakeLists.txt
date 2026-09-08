@@ -285,7 +285,8 @@ foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         unreadable_interfaces_are_not_a_change no_baseline_rebuilds_for_first_readable_list
         rebuild_on_address_change snapshot_prefix_length
         netmask_read_is_bounded linked_list_walk_advances
-        netlink_binds_before_snapshot safety_net_env
+        netlink_binds_before_snapshot netlink_stop_keeps_descriptors_under_a_live_worker
+        safety_net_env
         snapshot_policy_excludes_tunnel snapshot_policy_follows_transports
         netlink_kinds_match_the_kernel listener_drain_reports_a_stall_until_it_ends
         safety_net_retries_while_interfaces_are_unreadable xml_loopback_confinement_parser

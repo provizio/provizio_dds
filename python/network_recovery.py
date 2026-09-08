@@ -2549,10 +2549,17 @@ class DeferredReaper:
     def _ensure_thread(self) -> None:
         with self._lock:
             if self._thread is None:
-                self._thread = threading.Thread(
+                thread = threading.Thread(
                     target=self._run, name="provizio_dds_reaper", daemon=True
                 )
-                self._thread.start()
+                # Assigned only once start() has SUCCEEDED. Assigning first latched a
+                # never-started thread on the one transient failure ("can't start new thread"
+                # under a thread-count or memory limit): every later _ensure_thread saw a
+                # non-None thread and did nothing, while submit() went on queueing work nobody
+                # would ever drain -- which silently stops every deferred reader build, and so
+                # every match-publisher subscriber, for the life of the process.
+                thread.start()
+                self._thread = thread
 
     def _run(self) -> None:
         while True:
@@ -3334,11 +3341,36 @@ class _NetlinkNetworkMonitor:
         except OSError:
             pass
         self._thread.join(timeout=2.0)
+        if self._thread.is_alive():
+            # The descriptors are deliberately LEAKED rather than closed. The write above
+            # wakes the worker's select() at once, so a join that still times out means the
+            # thread is inside a reset hook -- rebuilding participants, which legitimately
+            # takes seconds -- and will come back to its select() afterwards. A closed fd
+            # number is immediately reusable, so closing here lets the next socket() or
+            # open() anywhere in the process be handed one of these numbers, at which point
+            # this thread's select() watches, and its read() consumes, an unrelated
+            # descriptor belonging to somebody else. Three descriptors held for the life of
+            # the process is by far the cheaper failure.
+            _emit_log(
+                LogLevel.WARNING,
+                "network monitor: its worker did not stop within 2s (a participant rebuild "
+                "is most likely still running), so the netlink socket and self-pipe are "
+                "left open rather than closed under a live reader",
+            )
+            return
         for closer in (self._close_socket, lambda: os.close(self._stop_r), lambda: os.close(self._stop_w)):
             try:
                 closer()
             except OSError:
                 pass
+        # Forgotten, not just closed. stop() is called once in production but is reachable more
+        # than once from tests and from a caller being careful, and a closed fd NUMBER is
+        # immediately reusable: a second pass would os.write() a byte into, and then close,
+        # whatever unrelated descriptor the process has since been handed. The except OSError
+        # above does not help there -- the number is perfectly valid, it just is not ours. -1 is
+        # what makes both operations fail loudly-but-harmlessly instead.
+        self._stop_r = -1
+        self._stop_w = -1
 
 
 def _make_network_monitor(
