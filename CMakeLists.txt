@@ -484,11 +484,33 @@ else(HAS_BIN_CACHE)
             set(RPATH_DIV ":")
         endif(APPLE)
 
-        set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_DIV}${RPATH_ORIGIN}${RPATH_DIV}${RPATH_ORIGIN}/../lib")
+        # The separator goes in only ahead of a value that already has something in it. An
+        # EMPTY rpath element is the CURRENT WORKING DIRECTORY to the dynamic loader (glibc's
+        # fillin_rpath substitutes "./" for it), so a leading separator here -- which is what
+        # appending to an unset CMAKE_INSTALL_RPATH used to produce -- puts every consumer's
+        # working directory on the search path of every library we ship, ahead of $ORIGIN.
+        # Anything that drops a libfastdds.so.3.6, libfastcdr.so.2 or libstdc++.so.6 into the
+        # directory a Provizio process is started from would then be loaded in preference to
+        # the real one.
+        # STREQUAL rather than if(CMAKE_INSTALL_RPATH), which is a BOOLEAN test: a caller
+        # passing -DCMAKE_INSTALL_RPATH=OFF (or 0, or NOTFOUND) meaning "no rpath please" would
+        # take the false branch and have their value concatenated straight onto the next one,
+        # yielding a first element of "OFF$ORIGIN" -- a RELATIVE path, which the loader resolves
+        # against the working directory, reinstating the very thing this guard removes. A value
+        # the caller ended with a separator of their own is trimmed for the same reason.
+        string(REGEX REPLACE "${RPATH_DIV}+$" "" CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}")
+        if(NOT CMAKE_INSTALL_RPATH STREQUAL "")
+            set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_DIV}")
+        endif()
 
-        if(CMAKE_INSTALL_PREFIX)
-            set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_DIV}${CMAKE_INSTALL_PREFIX}/lib")
-        endif(CMAKE_INSTALL_PREFIX)
+        # $ORIGIN for a library beside its dependencies, $ORIGIN/../lib for an executable in
+        # a sibling bin/. Between them they cover the installed layout wherever it is moved
+        # to, which is why CMAKE_INSTALL_PREFIX/lib is deliberately NOT added: it is the
+        # BUILD machine's absolute path, baked into a shipped binary, where it is at best
+        # redundant with the two relative entries and at worst a directory that exists only
+        # on the machine that produced the binaries (the prebuilt caches carried their CI
+        # runner's checkout path all the way to customers).
+        set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_ORIGIN}${RPATH_DIV}${RPATH_ORIGIN}/../lib")
     endif(NOT WIN32)
 
     # Help it find OpenSSL in macOS
@@ -577,7 +599,13 @@ else(HAS_BIN_CACHE)
             list(APPEND FAST_DDS_CMAKE_ARGS "--compile-no-warning-as-error")
         endif()
         if(NOT WIN32)
-            list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
+            # FAST_DDS_INSTALL_DIR/lib is deliberately NOT appended here: it is where these
+            # libraries are installed, so $ORIGIN already resolves to exactly that directory for
+            # every one of them, and $ORIGIN/../lib covers an executable installed beside them in
+            # bin/. Naming it absolutely as well only bakes this build tree into libraries that
+            # install(DIRECTORY) then ships verbatim -- a path that means nothing on any other
+            # machine, which is the same fault the rpath above was just cleared of.
+            list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}")
         endif()
         if(PROVIZIO_DDS_SANITIZER_FLAGS)
             list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}" "-DCMAKE_C_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}")
