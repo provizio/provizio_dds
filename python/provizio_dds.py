@@ -4993,7 +4993,10 @@ class Service:
                     self._stop = True
                     self._cv.notify()
                     join = True
-            if join:
+            # Guarded exactly as _AsyncRequestHandler.stop() is, and for the same reason:
+            # Thread.join() raises on a thread that was never started, __init__'s start() can
+            # fail under a thread-count limit, and __del__ then calls this.
+            if join and self._thread.ident is not None:
                 self._thread.join()
 
         def handle_request(self, request, identity):
@@ -5055,11 +5058,25 @@ class Service:
             self.stop()
 
         def stop(self):
-            join = False
-            if self._loop.is_running():
+            # Scheduled unconditionally, never gated on self._loop.is_running(). __init__
+            # starts the worker and returns before it reaches run_forever(), so a stop()
+            # landing in that window -- __del__ right after construction, a Service built
+            # and dropped in a loop -- would find the loop not yet running, schedule
+            # nothing, and leave the thread running for the life of the process.
+            # call_soon_threadsafe is safe on a loop that has not started: it queues the
+            # callback, and run_forever() drains that queue on its first iteration. Only a
+            # CLOSED loop rejects it, and a closed loop cannot be running, so there is
+            # nothing left to stop in that case either.
+            try:
                 self._loop.call_soon_threadsafe(self._loop.stop)
-                join = True
-            if join:
+            except RuntimeError:
+                pass
+            # Guarded, because the join is now unconditional: Thread.join() raises
+            # RuntimeError on a thread that was never started, and __init__'s start() can
+            # fail (RuntimeError: can't start new thread, under a thread-count or memory
+            # limit). __del__ then calls stop(), and an exception from __del__ during
+            # interpreter shutdown is both unignorable noise and unactionable.
+            if self._thread.ident is not None:
                 self._thread.join()
 
         def _run_loop(self):
@@ -5124,6 +5141,15 @@ class Service:
         default_max_queue_size = 10
         minimal_max_queue_size = 1
 
+        # FIRST, before anything that can raise. __del__ calls stop(), whose very first
+        # statement is `with self._service_cv:` -- so a Service that failed the topic-name
+        # validation below raised AttributeError out of its finalizer, on top of the caller's
+        # real error. The hasattr guards further down in stop() cover the members assigned
+        # after the endpoints are built; these two are what stop() cannot run without at all,
+        # and the fix for them is to make the invariant true rather than to test for it.
+        self._stop = False
+        self._service_cv = threading.Condition()
+
         if request_topic_name is None:
             assert (
                 service_name is not None
@@ -5136,10 +5162,8 @@ class Service:
             ), "Either of response_topic_name or service_name are required"
             response_topic_name = _response_prefix + service_name + _response_suffix
 
-        self._stop = False
         self._ready_responses = []
         self._matched_subscriptions = set()
-        self._service_cv = threading.Condition()
         self._request_data_type = request_data_type
 
         max_queue_size = (
@@ -5267,7 +5291,17 @@ class Service:
             #     point no Service-managed thread can call into them.
             if hasattr(self, '_request_handler'):
                 self._request_handler.stop()
-            self._dispatch_responses_thread.join()
+            # hasattr-guarded like the members around it: this is assigned
+            # LAST in __init__, after two constructors that raise on a
+            # documented state (a participant whose recreate failed). A
+            # half-built Service is then collected, __del__ calls stop(), and
+            # an unguarded join raised AttributeError out of a finalizer -- on
+            # top of the caller's real error, and before the cleanup below
+            # could run.
+            if hasattr(self, "_dispatch_responses_thread") and (
+                self._dispatch_responses_thread.ident is not None
+            ):
+                self._dispatch_responses_thread.join()
             # Delete in child-before-parent order; their __del__ methods
             # are guarded against participant-already-cleaned-up.
             for attr in ('_subscriber', '_publisher', '_request_handler'):

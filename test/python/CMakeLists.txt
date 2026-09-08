@@ -568,7 +568,8 @@ endif()
 # test/callback_exceptions/ suite): a raising user callback must be reported
 # through the configurable logger and must NOT abort the process / silently stop a
 # service. Each subcommand is its own ctest entry.
-foreach(_cbe_case on_data on_has_publisher_changed on_has_subscriber_changed service_sync service_async)
+foreach(_cbe_case on_data on_has_publisher_changed on_has_subscriber_changed service_sync
+        service_async service_async_stop_before_loop_runs)
     add_test(NAME python_callback_exceptions_${_cbe_case} COMMAND
         "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
         ./python_callback_exceptions_test.py ${_cbe_case}

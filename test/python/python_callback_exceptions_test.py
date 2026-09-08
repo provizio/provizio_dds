@@ -237,12 +237,51 @@ def test_service_async():
     return _run_service_case(bad_handler, "service_async")
 
 
+def test_service_async_stop_before_loop_runs():
+    """Regression: stopping an async service handler must terminate its worker even when the
+    stop lands before that worker's event loop has started running.
+
+    __init__ starts the thread and returns; the thread reaches run_forever() a moment later. A
+    stop() in that window -- including the one __del__ makes, for a Service built and dropped
+    without an explicit stop -- used to find loop.is_running() False, schedule nothing, and
+    leave the thread running for the life of the process. call_soon_threadsafe queues on a loop
+    that has not started yet, and run_forever() drains that queue on its first iteration, so
+    the guard was not merely redundant."""
+    handler_type = provizio_dds.Service._AsyncRequestHandler
+
+    # The window is widened deterministically rather than raced: the worker sleeps before it
+    # reaches run_forever(), so stop() is guaranteed to arrive while the loop is not running.
+    real_run_loop = handler_type._run_loop
+
+    def slow_run_loop(self):
+        time.sleep(0.5)
+        return real_run_loop(self)
+
+    handler_type._run_loop = slow_run_loop
+    try:
+        handler = handler_type(lambda request: request, lambda response, identity: None, 8)
+        handler.stop()
+        worker_alive = handler._thread.is_alive()
+        # __del__ calls stop() as well, so a second call must neither raise nor hang.
+        handler.stop()
+    finally:
+        handler_type._run_loop = real_run_loop
+
+    if worker_alive:
+        print("service_async_stop_before_loop_runs: FAIL (the worker outlived stop())")
+        return 1
+
+    print("service_async_stop_before_loop_runs: PASS")
+    return 0
+
+
 _TESTS = {
     "on_data": test_on_data,
     "on_has_publisher_changed": test_on_has_publisher_changed,
     "on_has_subscriber_changed": test_on_has_subscriber_changed,
     "service_sync": test_service_sync,
     "service_async": test_service_async,
+    "service_async_stop_before_loop_runs": test_service_async_stop_before_loop_runs,
 }
 
 
