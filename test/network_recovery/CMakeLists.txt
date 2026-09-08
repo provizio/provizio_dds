@@ -89,6 +89,14 @@ _nr_add_test(network_recovery_reset_roundtrip ARGS reset_roundtrip TIMEOUT ${_NR
 # the participant out of auto-recovery in the default mode, and only there. The two entries are
 # two processes because PROVIZIO_DDS_NETWORK_RECOVERY is resolved once per process; the empty
 # value is "unset" to both the resolver and the explicitness check.
+# A profile Fast-DDS auto-loads from the working directory, which unlike the env-var route
+# leaves the library's own unrestricted transports on the participant -- so it stays watched.
+# The case makes and enters a temporary directory of its own; the env entries below only keep
+# the ambient environment from selecting one of the other routes instead.
+_nr_add_test(network_recovery_working_directory_xml_profile
+    ARGS working_directory_xml_profile TIMEOUT ${_NR_TIMEOUT_DDS}
+    ENV "FASTDDS_DEFAULT_PROFILES_FILE=" "PROVIZIO_DDS_NETWORK_RECOVERY=" "SKIP_DEFAULT_XML_FILE=")
+
 _nr_add_test(network_recovery_xml_loopback_profile_skips_default_mode
     ARGS xml_loopback_profile skipped TIMEOUT ${_NR_TIMEOUT_DDS}
     ENV "FASTDDS_DEFAULT_PROFILES_FILE=${CMAKE_SOURCE_DIR}/test/fast_dds_localhost_profile.xml"

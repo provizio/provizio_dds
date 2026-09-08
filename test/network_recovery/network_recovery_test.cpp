@@ -22,6 +22,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -1097,6 +1099,93 @@ namespace
         return passed ? 0 : 1;
     }
 
+    // Case: a profile Fast-DDS auto-loads from the WORKING DIRECTORY confines only what it
+    // configures, and the participant must be judged on what it actually ends up with.
+    //
+    // Both XML routes set xml_profile_owns_transports, but they produce different
+    // participants. With FASTDDS_DEFAULT_PROFILES_FILE, create_fastdds_participant passes
+    // PARTICIPANT_QOS_DEFAULT and Fast-DDS substitutes the profile wholesale -- the transports
+    // are the XML's alone, and a loopback-confined profile really does mean there is nothing to
+    // recover from. A working-directory DEFAULT_FASTDDS_PROFILES.xml takes the other branch:
+    // the participant is built from cached_qos, onto which setup_transports has APPENDED this
+    // library's own unrestricted transports. Such a participant binds real interfaces, so it
+    // must stay watched -- it was not, while the decision was read from the factory's XML QoS
+    // instead of from the QoS creation uses.
+    //
+    // Runs in a temporary directory of its own rather than the target directory the other cases
+    // share: the probe reads a RELATIVE path, so a profile dropped in the shared directory would
+    // silently re-configure every case running beside it.
+    int test_working_directory_xml_profile()
+    {
+        namespace fs = std::filesystem;
+
+        std::error_code error;
+        // Named from the clock rather than the pid, so the case stays portable to the
+        // platforms this binary is also built for.
+        const auto directory =
+            fs::temp_directory_path(error) /
+            ("provizio_dds_wd_profile_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories(directory, error);
+        if (error)
+        {
+            std::cout << "working_directory_xml_profile: FAIL (could not create " << directory.string() << ")\n";
+            return 1;
+        }
+        const auto previous = fs::current_path(error);
+
+        {
+            std::ofstream profile{(directory / "DEFAULT_FASTDDS_PROFILES.xml").string()};
+            profile << R"(<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com">
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>wd_loopback_udpv4</transport_id>
+            <type>UDPv4</type>
+            <interfaceWhiteList>
+                <address>127.0.0.1</address>
+            </interfaceWhiteList>
+        </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="wd_loopback" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>wd_loopback_udpv4</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+        </rtps>
+    </participant>
+</profiles>
+)";
+        }
+
+        // Before the first participant: both the library's probe and Fast-DDS' own
+        // load_profiles() read the working directory once, on first use.
+        fs::current_path(directory, error);
+        if (error)
+        {
+            std::cout << "working_directory_xml_profile: FAIL (could not enter " << directory.string() << ")\n";
+            return 1;
+        }
+
+        const auto by_default = provizio::dds::make_domain_participant(0);
+        const bool watched = by_default->takes_part_in_network_recovery();
+        // Watched, because the transports it actually holds are not confined: the profile's
+        // loopback descriptor plus this library's own, which bind every interface.
+        bool passed = EXPECT(watched);
+
+        // And a reset is real work for it, which is the thing being watched buys.
+        const auto generation_before = by_default->participant_generation();
+        by_default->trigger_network_recovery_reset();
+        passed &= EXPECT(by_default->participant_generation() != generation_before);
+
+        fs::current_path(previous, error);
+        fs::remove_all(directory, error);
+
+        std::cout << "working_directory_xml_profile: " << (passed ? "PASS" : "FAIL") << " (watched: " << watched
+                  << ")\n";
+        return passed ? 0 : 1;
+    }
+
     // Regression test for the APT-11792 stale-interface-cache bug.
     //
     // Without the fix, Fast-DDS's process-wide `SystemInfo` cache is populated
@@ -1847,6 +1936,10 @@ int main(int argc, char **argv)
     if (subcommand == "reset_disabled")
     {
         return test_reset_disabled();
+    }
+    if (subcommand == "working_directory_xml_profile")
+    {
+        return test_working_directory_xml_profile();
     }
     if (subcommand == "xml_loopback_profile")
     {

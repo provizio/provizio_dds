@@ -1256,17 +1256,27 @@ namespace provizio::dds
                 return;
             }
 
-            // The QoS Fast-DDS is about to use, read the way it reads it: create_participant()
-            // calls load_profiles() (idempotent) and substitutes the factory's default participant
-            // QoS -- the one the XML default profile filled -- for PARTICIPANT_QOS_DEFAULT, which is
-            // what create_fastdds_participant passes in this branch. Read here rather than from the
-            // finished participant so the answer is final before the participant (and with it the
-            // discovery listener that can call into this object) exists.
+            // The QoS this participant will actually be created with -- which is NOT always the
+            // XML's, and the difference decides correctly here. create_fastdds_participant passes
+            // PARTICIPANT_QOS_DEFAULT only where the profile came from
+            // FASTDDS_DEFAULT_PROFILES_FILE; Fast-DDS then substitutes the factory default that
+            // the XML filled, so reading that default is reading what the participant gets. A
+            // profile Fast-DDS auto-loaded from the WORKING DIRECTORY takes the other branch of
+            // that same ternary: the participant is built from cached_qos, onto which the
+            // transport block above has already APPENDED this library's own, unrestricted,
+            // transports. Judging such a participant by the XML alone saw nothing but the
+            // loopback-confined descriptor and left unwatched a participant that also holds an
+            // unrestricted UDP transport -- one that binds real interfaces, and so does have
+            // something to recover from. Mirroring the ternary is what keeps the two in step.
+            //
+            // Read here rather than from the finished participant so the answer is final before
+            // the participant (and with it the discovery listener that can call into this object)
+            // exists. load_profiles() is idempotent and is what create_participant would call.
             auto participant_factory = dds::DomainParticipantFactory::get_shared_instance();
             participant_factory->load_profiles();
             dds::DomainParticipantQos profile_qos;
             participant_factory->get_default_participant_qos(profile_qos);
-            if (!transports_confine_to_loopback(profile_qos))
+            if (!transports_confine_to_loopback(used_xml_profile ? profile_qos : cached_qos))
             {
                 return;
             }
