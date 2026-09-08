@@ -481,7 +481,8 @@ endforeach()
 # platform too, so the guard here is a convenience rather than the only safeguard.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     foreach(_sc_case reclaims_synthetic age_guard kill_switch leaves_other_files_alone
-                     rejects_planted_lock_files rate_limited reclaims_dead_participant spares_the_living)
+                     rejects_planted_lock_files rate_limited reclaims_dead_participant spares_the_living
+                     no_datasharing_segments)
         add_test(NAME python_shm_cleanup_${_sc_case} COMMAND
             "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
             ./python_shm_cleanup_test.py ${_sc_case}
@@ -505,6 +506,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                          RESOURCE_LOCK provizio_dds_shm_cleanup)
     set_tests_properties(python_shm_cleanup_reclaims_dead_participant
                          python_shm_cleanup_spares_the_living PROPERTIES TIMEOUT 120
+                         RESOURCE_LOCK provizio_dds_shm_cleanup)
+    # Drives a real participant in the real /dev/shm, so it joins the cases above under the
+    # same lock. It sweeps nothing and asserts only about objects that are never created, but
+    # the participant it creates is enough on its own to fail reclaims_dead_participant, which
+    # snapshots every unlocked Fast-DDS object on the host and requires all of them reclaimed.
+    set_tests_properties(python_shm_cleanup_no_datasharing_segments PROPERTIES TIMEOUT 120
                          RESOURCE_LOCK provizio_dds_shm_cleanup)
 endif()
 

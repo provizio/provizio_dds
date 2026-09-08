@@ -429,12 +429,9 @@ namespace provizio::dds
             datareader_qos.durability().kind = *durability_kind;
         }
 
-#if defined(_MSC_VER) || defined(__APPLE__)
-        // Disable data sharing on Windows and macOS: it uses shared memory segments
-        // that may be unavailable or leak resources. On Windows the interprocess
-        // directory may not exist; on macOS the system-wide SHM limits are low.
+        // Data sharing is off here as it is for writers, and for the same reasons: see
+        // publisher_handle::build_state, which carries the rationale in full.
         datareader_qos.data_sharing().off();
-#endif
 
         // Prime the listener BEFORE create_datareader attaches it to the new
         // DataReader: Fast-DDS can fire on_subscription_matched on an internal

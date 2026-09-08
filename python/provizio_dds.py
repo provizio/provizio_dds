@@ -3799,8 +3799,31 @@ class Publisher(_TopicHandle):
         self._publisher.get_default_datawriter_qos(writer_qos)
         writer_qos.reliability().kind = self._captured_reliability_kind
         writer_qos.endpoint().history_memory_policy = self._captured_qos_defaults.memory_policy
-        if sys.platform in ("win32", "darwin"):
-            writer_qos.data_sharing().off()
+        # Data sharing -- Fast-DDS' zero-copy same-host path, where a reader maps the
+        # writer's payload pool instead of being sent an RTPS message -- is off on every
+        # platform, for readers as well as writers. Either side declining puts the pair
+        # back on the shared-memory transport, so this holds against a peer that leaves it
+        # on (a stock ROS 2 node) as much as against our own endpoints.
+        #
+        # It is off because its shared-memory objects cannot be reclaimed. A writer creates
+        # a payload pool and a reader a notification segment, each named after the
+        # endpoint's GUID -- which carries 16 random bits on top of the pid, so a
+        # restarted process practically never reuses a dead one's name. Only an orderly
+        # destructor removes them, so every SIGKILL, bare exit() and crash leaves one behind
+        # permanently, and the sweep in shm_cleanup.py cannot take them: they carry no lock file, so a dead owner cannot
+        # be told from a live one, and removing a LIVE one is by far the worse error -- a
+        # reader that cannot open a live writer's pool refuses the match outright while
+        # that writer matches the reader and publishes as normal, leaving a publisher that
+        # reports a matched subscriber, a subscriber whose callback never fires, and not
+        # one sample delivered, for as long as both live.
+        #
+        # Giving it up costs almost nothing: it only ever applied to bounded keyless types
+        # -- the small fixed-size messages (Twist, Pose, Transform, the std_msgs scalars),
+        # never a point cloud, an image, or anything holding a sequence or a string -- so
+        # no topic whose throughput matters was using it. On the traffic that was, it
+        # measured ~0.3 us of a ~5 us same-host hop, with no measurable difference in CPU
+        # or throughput. Mirrors the C++ make_publisher.
+        writer_qos.data_sharing().off()
         # History (untied from durability): an explicit positive depth wins, else fall
         # back to the per-type default (0 = leave the Fast-DDS default). KEEP_LAST only —
         # durability is configured independently below, so this is not an RxO QoS (ROS 2
@@ -4235,8 +4258,10 @@ class Subscriber(_TopicHandle):
         self._subscriber.get_default_datareader_qos(reader_qos)
         reader_qos.reliability().kind = effective_reliability_kind
         reader_qos.endpoint().history_memory_policy = self._captured_qos_defaults.memory_policy
-        if sys.platform in ("win32", "darwin"):
-            reader_qos.data_sharing().off()
+        # Data sharing is off here as it is for writers, and for the same reasons: see
+        # Publisher._build_state, which carries the rationale in full. Mirrors the C++
+        # make_subscriber.
+        reader_qos.data_sharing().off()
         # History (untied from durability): an explicit positive depth wins, else fall
         # back to the per-type default (0 = leave the Fast-DDS default). KEEP_LAST only —
         # durability is configured independently below, so this is not an RxO QoS (ROS 2

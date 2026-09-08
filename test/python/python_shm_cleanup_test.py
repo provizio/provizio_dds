@@ -49,6 +49,7 @@ import provizio_dds
 # immediately recreate the very port files the sweep had just reclaimed.
 DOMAIN = 71
 SWEEPER_DOMAIN = 72
+NO_DATASHARING_DOMAIN = 74
 
 # Where Fast-DDS keeps its shared-memory objects on Linux.
 PLATFORM_SHM_DIR = "/dev/shm"
@@ -798,6 +799,99 @@ def test_rate_limited():
     print(f"rate_limited: {'PASS' if not _failures else 'FAIL'}")
 
 
+def test_no_datasharing_segments():
+    """The endpoints this library builds create no data-sharing objects at all. Fast-DDS'
+    data sharing is off in every Publisher and Subscriber provizio_dds creates (see
+    Publisher._build_state for the reasons), which is what makes the sweep's refusal to
+    touch ``fast_datasharing_*`` free: the files it will not reclaim are files we never
+    create. The fixture publishes a BOUNDED, keyless type on purpose — data sharing engages
+    for nothing else, so the String the rest of this suite uses would pass this case whatever
+    the QoS said. The same Twist as the C++ no_datasharing_segments, which this mirrors."""
+    # Never sweeps: this case asserts about objects that are never created, not about
+    # anything the sweep does, so it has no reason to disturb the real /dev/shm.
+    os.environ[ENABLED_ENV] = "0"
+
+    # Stamped with this process's pid, as spares_the_living is and for the same reason.
+    topic = "provizio_dds_python_test_shm_no_datasharing_" + unique_tag()
+
+    condition = threading.Condition()
+    counter = {"count": 0}
+
+    def on_message(_):
+        with condition:
+            counter["count"] += 1
+            condition.notify_all()
+
+    # A domain of this case's own, for the reason reclaims_dead_participant gives its
+    # sweeper one: Fast-DDS derives shared-memory PORT names from the domain, so a participant
+    # here on the shared domain could take the lock on a port object that case had already
+    # snapshotted as reclaimable, the sweep would then rightly spare it, and its "everything
+    # unlocked was reclaimed" assertion would fail on this case's doing. The resource lock in
+    # the CMakeLists makes that impossible in the first place; this makes it harmless even if
+    # the lock is ever dropped.
+    participant = provizio_dds.make_domain_participant(
+        NO_DATASHARING_DOMAIN, provizio_dds.NetworkRecoveryMode.OFF
+    )
+    publisher = provizio_dds.Publisher(participant, topic, provizio_dds.TwistPubSubType)
+    subscriber = provizio_dds.Subscriber(
+        participant,
+        topic,
+        provizio_dds.TwistPubSubType,
+        provizio_dds.Twist,
+        on_message,
+    )
+    assert subscriber is not None
+
+    # A sample has to arrive before anything is asserted. An endpoint that never finished
+    # building creates no data-sharing objects either and would pass below for the wrong
+    # reason — and the Subscriber's default reliability defers its DataReader until a writer
+    # is discovered, so until then it has no GUID to name a file after at all.
+    message = provizio_dds.Twist()
+    deadline = time.monotonic() + MAX_WAIT_TIME
+    while time.monotonic() < deadline:
+        publisher.publish(message)
+        with condition:
+            if condition.wait_for(lambda: counter["count"] > 0, PUBLISH_EVERY_SEC):
+                break
+    # Read out under the condition and used from here on, as the C++ mirror does: the
+    # subscriber is still alive and its callback still writes the counter.
+    with condition:
+        delivered = counter["count"]
+    expect(delivered > 0, "a sample was delivered without data sharing")
+
+    # Named exactly as Fast-DDS names them — "fast_datasharing_<guid prefix>_<entity id>",
+    # one payload pool for the writer and one notification segment for the reader. Deriving
+    # the two names from the endpoints' own GUIDs rather than scanning for a pattern is what
+    # keeps this hermetic: another application on the host may legitimately hold data-sharing
+    # objects, and none of them can be named after these two endpoints.
+    def datasharing_object_name(endpoint_guid):
+        return f"fast_datasharing_{endpoint_guid.guidPrefix}_{endpoint_guid.entityId}"
+
+    # Each GUID is bound to a local before its members are read. get_guid() hands back a SWIG
+    # proxy owning the GUID; reading `.guidPrefix` straight off the temporary would leave the
+    # member proxy outliving the object it points into, and the name would be built from freed
+    # memory -- which in a test that asserts a file does NOT exist would pass in silence.
+    writer_guid = publisher.get_guid()
+    reader_guid = subscriber.get_guid()
+    # And both must be real GUIDs. get_guid() answers the unknown GUID for an endpoint that is
+    # absent or built against a superseded participant generation, and the name derived from
+    # that never exists, so the assertions below would pass while testing nothing at all.
+    unknown_guid = str(provizio_dds.GUID_t())
+    expect(str(writer_guid) != unknown_guid, "the publisher reported a real GUID")
+    expect(str(reader_guid) != unknown_guid, "the subscriber reported a real GUID")
+    writer_segment = datasharing_object_name(writer_guid)
+    reader_segment = datasharing_object_name(reader_guid)
+    expect(not exists(writer_segment), f"no writer payload pool {writer_segment}")
+    expect(not exists(reader_segment), f"no reader notification segment {reader_segment}")
+
+    print(
+        f"no_datasharing_segments: {'PASS' if not _failures else 'FAIL'} "
+        f"({delivered} sample(s) delivered; writer pool "
+        f"{'PRESENT' if exists(writer_segment) else 'absent'}, reader notification "
+        f"{'PRESENT' if exists(reader_segment) else 'absent'})"
+    )
+
+
 _SUBCOMMANDS = {
     "reclaims_synthetic": test_reclaims_synthetic,
     "reclaims_dead_participant": test_reclaims_dead_participant,
@@ -807,6 +901,7 @@ _SUBCOMMANDS = {
     "leaves_other_files_alone": test_leaves_other_files_alone,
     "rejects_planted_lock_files": test_rejects_planted_lock_files,
     "rate_limited": test_rate_limited,
+    "no_datasharing_segments": test_no_datasharing_segments,
 }
 
 

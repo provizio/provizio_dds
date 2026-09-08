@@ -66,6 +66,7 @@
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/subscriber.h"
 
+#include <geometry_msgs/msg/TwistPubSubTypes.hpp>
 #include <std_msgs/msg/StringPubSubTypes.hpp>
 
 namespace
@@ -77,6 +78,7 @@ namespace
     // immediately recreate the very port files the sweep had just reclaimed.
     constexpr auto k_domain = 71;
     constexpr auto k_sweeper_domain = 72;
+    constexpr auto k_no_datasharing_domain = 73;
 
     constexpr const char *const k_enabled_env = "PROVIZIO_DDS_SHM_CLEANUP";
     constexpr const char *const k_min_age_env = "PROVIZIO_DDS_SHM_CLEANUP_MIN_AGE_SEC";
@@ -1053,6 +1055,98 @@ namespace
         std::cout << "rate_limited: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;
     }
+
+    // Case: the endpoints this library builds create no data-sharing objects at all.
+    // Fast-DDS' data sharing is off in every publisher and subscriber provizio_dds creates
+    // (publisher_handle::build_state carries the reasons), which is what makes the sweep's
+    // refusal to touch "fast_datasharing_*" free: the files it will not reclaim are files we
+    // never create. The fixture publishes a BOUNDED, keyless type on purpose -- data sharing
+    // engages for nothing else, so the String the rest of this suite uses would pass this
+    // case whatever the QoS said.
+    int test_no_datasharing_segments()
+    {
+        // Never sweeps: this case asserts about objects that are never created, not about
+        // anything the sweep does, so it has no reason to disturb the real /dev/shm.
+        set_env(k_enabled_env, "0");
+
+        // Stamped with this process's pid, as spares_the_living is and for the same reason.
+        const std::string topic = "provizio_dds_test_shm_no_datasharing_" + unique_tag();
+
+        std::mutex mutex;
+        std::condition_variable received;
+        int count = 0;
+
+        // A domain of this case's own, for the reason reclaims_dead_participant gives its
+        // sweeper one: Fast-DDS derives shared-memory PORT names from the domain, so a
+        // participant here on the shared domain could take the lock on a port object that case
+        // had already snapshotted as reclaimable, the sweep would then rightly spare it, and its
+        // "everything unlocked was reclaimed" assertion would fail on this case's doing. The
+        // resource lock in the CMakeLists makes that impossible in the first place; this makes it
+        // harmless even if the lock is ever dropped.
+        const auto participant =
+            provizio::dds::make_domain_participant(k_no_datasharing_domain, provizio::dds::network_recovery_mode::off);
+        const auto publisher = provizio::dds::make_publisher<geometry_msgs::msg::TwistPubSubType>(participant, topic);
+        const auto subscriber = provizio::dds::make_subscriber<geometry_msgs::msg::TwistPubSubType>(
+            participant, topic, [&](const geometry_msgs::msg::Twist & /*message*/) {
+                const std::lock_guard<std::mutex> guard{mutex};
+                ++count;
+                received.notify_all();
+            });
+
+        // A sample has to arrive before anything is asserted. An endpoint that never finished
+        // building creates no data-sharing objects either and would pass below for the wrong
+        // reason -- and the subscriber's default reliability defers its DataReader until a
+        // writer is discovered, so until then it has no GUID to name a file after at all.
+        geometry_msgs::msg::Twist message;
+        int delivered = 0;
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds{20 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
+        {
+            std::unique_lock<std::mutex> guard{mutex};
+            while (count == 0 && std::chrono::steady_clock::now() < deadline)
+            {
+                guard.unlock();
+                publisher->publish(message);
+                guard.lock();
+                received.wait_for(guard, k_publish_period, [&] { return count > 0; });
+            }
+            // Read out under the lock and used from here on. The subscriber is still alive and
+            // its callback still writes `count`, so touching it unlocked below would be a data
+            // race -- one TSan would rightly report. spares_the_living does the same.
+            delivered = count;
+        }
+        bool passed = EXPECT(delivered > 0);
+
+        // Named exactly as Fast-DDS names them -- "fast_datasharing_<guid prefix>_<entity id>",
+        // one payload pool for the writer and one notification segment for the reader. Deriving
+        // the two names from the endpoints' own GUIDs rather than scanning for a pattern is what
+        // keeps this hermetic: another application on the host may legitimately hold
+        // data-sharing objects, and none of them can be named after these two endpoints.
+        const auto datasharing_object_name = [](const provizio::dds::guid &endpoint) {
+            std::ostringstream stream;
+            stream << "fast_datasharing_" << endpoint.guidPrefix << "_" << endpoint.entityId;
+            return stream.str();
+        };
+        // Both GUIDs are checked to be real ones first. get_guid() answers the unknown GUID
+        // for an endpoint that is absent or built against a superseded participant generation,
+        // and the name derived from that -- fast_datasharing_00.00.[...]_0.0.0.0 -- is one that
+        // never exists, so both assertions below would pass while testing nothing at all.
+        const auto writer_guid = publisher->get_guid();
+        const auto reader_guid = subscriber->get_guid();
+        passed &= EXPECT(writer_guid != provizio::dds::guid{});
+        passed &= EXPECT(reader_guid != provizio::dds::guid{});
+        const auto writer_segment = datasharing_object_name(writer_guid);
+        const auto reader_segment = datasharing_object_name(reader_guid);
+        passed &= EXPECT(!exists(writer_segment));
+        passed &= EXPECT(!exists(reader_segment));
+
+        std::cout << "no_datasharing_segments: " << (passed ? "PASS" : "FAIL") << " (" << delivered
+                  << " sample(s) delivered; writer pool " << (exists(writer_segment) ? "PRESENT" : "absent") << " ("
+                  << writer_segment << "), reader notification " << (exists(reader_segment) ? "PRESENT" : "absent")
+                  << " (" << reader_segment << "))" << '\n';
+        return passed ? 0 : 1;
+    }
+
 }  // namespace
 
 int main(int argc, char **argv)
@@ -1108,6 +1202,10 @@ int main(int argc, char **argv)
     if (subcommand == "rate_limited")
     {
         return test_rate_limited();
+    }
+    if (subcommand == "no_datasharing_segments")
+    {
+        return test_no_datasharing_segments();
     }
     std::cerr << "unknown subcommand: " << subcommand << "\n";
     return 1;

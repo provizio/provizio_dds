@@ -588,12 +588,33 @@ namespace provizio::dds
         datawriter_qos.publish_mode().kind = qos_defaults<data_pub_sub_type>::datawriter_publish_mode;
         datawriter_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
 
-#if defined(_MSC_VER) || defined(__APPLE__)
-        // Disable data sharing on Windows and macOS: it uses shared memory segments
-        // that may be unavailable or leak resources. On Windows the interprocess
-        // directory may not exist; on macOS the system-wide SHM limits are low.
+        // Data sharing -- Fast-DDS' zero-copy same-host path, where a reader maps the writer's
+        // payload pool instead of being sent an RTPS message -- is off on every platform, for
+        // readers as well as writers. Either side declining puts the pair back on the
+        // shared-memory transport, so this holds against a peer that leaves it on (a stock ROS 2
+        // node) as much as against our own endpoints.
+        //
+        // It is off because its shared-memory objects cannot be reclaimed. A writer creates a
+        // payload pool and a reader a notification segment, each named after the endpoint's
+        // GUID -- which carries 16 random bits on top of the pid, so a restarted process
+        // practically never reuses a dead one's name. Only an orderly destructor removes them,
+        // so every SIGKILL, bare exit() and crash leaves one behind permanently, and the sweep
+        // in detail/shm_cleanup.h cannot take them:
+        // they carry no lock file, so a dead owner cannot be told from a live one, and removing
+        // a LIVE one is by far the worse error -- a reader that cannot open a live writer's pool
+        // refuses the match outright while that writer matches the reader and publishes as
+        // normal, leaving a publisher that reports a matched subscriber, a subscriber whose
+        // callback never fires, and not one sample delivered, for as long as both live.
+        //
+        // Giving it up costs almost nothing: it only ever applied to bounded keyless types --
+        // the small fixed-size messages (Twist, Pose, Transform, the std_msgs scalars), never a
+        // point cloud, an image, or anything holding a sequence or a string -- so no topic whose
+        // throughput matters was using it. On the traffic that was, it measured ~0.3 us of a
+        // ~5 us same-host hop, with no measurable difference in CPU or throughput, and the
+        // shared-memory transport that carries those samples instead delivers all of them where
+        // data sharing drops whatever the writer's ring laps before the reader's listener thread
+        // reaches it.
         datawriter_qos.data_sharing().off();
-#endif
 
         // Prime the listener BEFORE create_datawriter attaches it to the new
         // DataWriter: Fast-DDS can fire on_publication_matched on an internal
