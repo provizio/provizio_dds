@@ -707,6 +707,26 @@ else(HAS_BIN_CACHE)
             CMAKE_ARGS ${FAST_DDS_CMAKE_ARGS}
             BUILD_BYPRODUCTS ${_FAST_DDS_BYPRODUCTS}
         )
+
+        # Re-run the patch step when any of the scripts above changes. ExternalProject stamps a
+        # step against its COMMAND LINE, and those lines name the scripts by path -- so editing
+        # a script's contents left the stamp valid and the step skipped, and an already
+        # configured tree kept whatever the previous revision had written into it. That is how a
+        # corrected patch silently fails to reach an existing build (the scripts are idempotent,
+        # so re-running is free where nothing changed).
+        #
+        # Re-running is necessary but not sufficient, and only resource_event_per_timer_wait.cmake
+        # is structurally covered for the rest: it carries a _revision / _revision_marker pair and
+        # migrates every file it writes, so a bump reaches an existing tree. The other three
+        # detect "patched" by a bare marker, which cannot tell one revision's text from another's
+        # -- fine while their text never changes, which is why each of them says at its marker
+        # what to add before changing it.
+        ExternalProject_Add_StepDependencies(libfast_dds patch
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
+        )
         link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
         # On Windows, installed libraries have versioned names (e.g. fastdds-3.6.lib).

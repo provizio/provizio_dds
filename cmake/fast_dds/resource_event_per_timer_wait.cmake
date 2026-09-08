@@ -73,8 +73,62 @@ foreach(_var IN ITEMS RESOURCE_EVENT_H RESOURCE_EVENT_CPP WRITER_PROXY_CPP)
     endif()
 endforeach()
 
-# Every replacement below carries this tag in a comment; a file that has it is already patched.
+# Every replacement below carries this tag in a comment; a file that has it has been patched by
+# some revision of this script.
 set(_marker "[provizio_dds]")
+
+# ...but "patched by some revision" is not "patched by THIS one, and a source tree carries no
+# other record of which. Treating the plain marker as done is how a corrected defect keeps
+# shipping: a tree patched before the fix below carries the marker, so re-running this script on
+# it reported "already patched -- no-op" and left the old, broken implementation in place. Bump
+# this whenever a replacement changes in a way an existing tree must pick up, and give the
+# affected file a migration from the revision before it.
+set(_revision "2")
+set(_revision_marker "[provizio_dds r${_revision}]")
+
+# What every marker starts with, whatever revision wrote it: the bare "[provizio_dds]" of the
+# revisions before the marker existed, and "[provizio_dds rN]" of every one since. Used to ask
+# "was this file patched by SOME revision of this script?" without keeping a list of past ones.
+set(_marker_prefix "[provizio_dds")
+
+# Stamp every marker this script wrote into ${_contents} with the current revision, so the file
+# records WHICH revision produced it. The literals below all carry the plain marker; this is the
+# single place the revision is attached, so no literal has to spell it and none can be missed.
+function(_provizio_stamp_revision _out_contents)
+    # Normalised BEFORE promoting. A tree stamped by an earlier revision carries
+    # "[provizio_dds rN]" for some other N, which the plain REPLACE below would not touch --
+    # so the file would keep the old revision's stamp and be diagnosed as stale for ever after.
+    # Demoting every versioned marker back to the bare form first is what makes the stamp work
+    # from ANY revision rather than only from the unversioned one.
+    string(REGEX REPLACE "\\[provizio_dds r[0-9]+\\]" "${_marker}" _normalised "${${_out_contents}}")
+    string(REPLACE "${_marker}" "${_revision_marker}" _stamped "${_normalised}")
+    set(${_out_contents} "${_stamped}" PARENT_SCOPE)
+endfunction()
+
+# Sets _provizio_stale_pos in the CALLER's scope to -1 when every marker in the contents held
+# by ${_contents_var} is THIS revision's, and to a non-negative position when at least one was
+# written by a different one.
+#
+# Asked by removing this revision's markers and looking for what is left, rather than by
+# testing for the shapes a previous revision happened to write. Enumerating those shapes is
+# what broke: the check recognised the bare marker and this revision's, so the moment
+# _revision is bumped, every existing tree -- stamped with the revision before it -- matched
+# neither, fell through to the pristine-source branch and failed the configure blaming
+# Fast-DDS for a shape change that had not happened.
+#
+# A function taking the NAME of the variable, never a macro taking the text -- the same shape
+# _provizio_stamp_revision uses, for the same reason. A macro's parameters are textual
+# substitutions, so the whole Fast-DDS source file would be pasted into the body and RE-
+# EVALUATED: every ${...} in it dereferenced (to nothing, silently) and every backslash
+# escape processed, before the marker search ever ran. Today's three files happen to carry
+# neither in the region that matters, so the bug is latent rather than live -- which is
+# exactly the kind that surfaces on a Fast-DDS bump, as a patch that reports a pristine tree
+# and fails the configure blaming eProsima.
+function(_provizio_find_stale_marker _contents_var)
+    string(REPLACE "${_revision_marker}" "" _without_current "${${_contents_var}}")
+    string(FIND "${_without_current}" "${_marker_prefix}" _stale_pos)
+    set(_provizio_stale_pos "${_stale_pos}" PARENT_SCOPE)
+endfunction()
 
 # Replace ONE exact block in ${_contents}, failing loudly if it is not present verbatim.
 function(_provizio_replace_or_fail _file _what _anchor _patched)
@@ -94,9 +148,27 @@ endfunction()
 # ---------------------------------------------------------------------------------------------
 function(_provizio_patch_resource_event_h _out)
 file(READ "${RESOURCE_EVENT_H}" _contents)
-string(FIND "${_contents}" "${_marker}" _already_pos)
-if(NOT _already_pos EQUAL -1)
-    message(STATUS "resource_event_per_timer_wait: ResourceEvent.h already patched -- no-op")
+string(FIND "${_contents}" "${_revision_marker}" _current_pos)
+# Any marker NOT written by this revision -- the bare form, or another rN. See
+# _provizio_find_stale_marker for why the question is asked that way round.
+_provizio_find_stale_marker(_contents)
+if(NOT _current_pos EQUAL -1 AND _provizio_stale_pos EQUAL -1)
+    message(STATUS "resource_event_per_timer_wait: ResourceEvent.h already patched at revision "
+                   "${_revision} -- no-op")
+    # Returns WITHOUT setting ${_out}, which is how the caller knows not to write the file.
+    # Falling through to the write instead round-tripped byte-identical content but moved the
+    # mtime -- and since the patch step now depends on this script, that rebuilt every
+    # translation unit reaching ResourceEvent.h whenever the script was merely touched.
+    return()
+elseif(NOT _provizio_stale_pos EQUAL -1)
+    # Patched by an earlier revision. This file's replacements have not changed between
+    # revisions, so its migration is the stamp alone -- but it must still HAPPEN, because the
+    # three files this script writes are one fix: WriterProxy::stop()'s two-timer fence and
+    # unregister_timer's per-timer wait are halves of each other. Gating only ResourceEvent.cpp
+    # on the revision, as this did, meant a bump upgraded that file and silently left the other
+    # two behind, which is worse than a wholly stale tree.
+    message(STATUS "resource_event_per_timer_wait: stamping ResourceEvent.h at revision ${_revision}")
+    _provizio_stamp_revision(_contents)
 else()
     # uint64_t below: make its header explicit rather than rely on what ThreadSettings.hpp
     # happens to pull in (libstdc++ 15 dropped several such transitive <cstdint> includes).
@@ -157,8 +229,10 @@ else()
     }
 ]==])
 
-    set(${_out} "${_contents}" PARENT_SCOPE)
+    _provizio_stamp_revision(_contents)
 endif()
+
+set(${_out} "${_contents}" PARENT_SCOPE)
 endfunction()
 
 # ---------------------------------------------------------------------------------------------
@@ -166,9 +240,92 @@ endfunction()
 # ---------------------------------------------------------------------------------------------
 function(_provizio_patch_resource_event_cpp _out)
 file(READ "${RESOURCE_EVENT_CPP}" _contents)
-string(FIND "${_contents}" "${_marker}" _already_pos)
-if(NOT _already_pos EQUAL -1)
-    message(STATUS "resource_event_per_timer_wait: ResourceEvent.cpp already patched -- no-op")
+string(FIND "${_contents}" "${_revision_marker}" _current_pos)
+# "Already at this revision" means EVERY marker in the file says so. A file carrying a marker
+# from any other revision -- the bare form, or another rN -- is migrated; taking this
+# revision's mere presence as done would leave a half-stamped file that way for good.
+_provizio_find_stale_marker(_contents)
+if(NOT _current_pos EQUAL -1 AND _provizio_stale_pos EQUAL -1)
+    message(STATUS "resource_event_per_timer_wait: ResourceEvent.cpp already patched at revision "
+                   "${_revision} -- no-op")
+    return()
+endif()
+if(NOT _provizio_stale_pos EQUAL -1)
+    # Patched by an earlier revision of this script. Only the tail of unregister_timer changed,
+    # so migrate that in place rather than making the developer find and delete a Fast-DDS build
+    # tree -- and fail loudly, as everything here does, if it is none of the shapes an earlier
+    # revision left behind.
+    message(STATUS "resource_event_per_timer_wait: upgrading ResourceEvent.cpp to revision ${_revision}")
+
+    # The tail r1 left behind, and the one r2 wants in its place.
+    set(_wait_tail_r1 [==[
+    if (!is_service_thread)
+    {
+        cv_manipulation_.wait(lock, [&]()
+                {
+                    return executing_timer_ != event;
+                });
+    }
+]==])
+    set(_wait_tail_swept [==[
+    if (!is_service_thread)
+    {
+        cv_manipulation_.wait(lock, [&]()
+                {
+                    return executing_timer_ != event;
+                });
+
+        // [provizio_dds] That wait RELEASED the mutex, and a callback is free to restart its
+        // own timer while it runs -- ResourceEvent::notify() then puts this very pointer back
+        // into pending_timers_ behind us. Erasing it before the wait is therefore not enough
+        // on its own: TimedEvent::~TimedEvent deletes the event the moment this returns, and
+        // the requeued pointer is dereferenced on the execution thread's next pass, through
+        // event_compare() and TimedEventImpl::next_trigger_time() (heap-use-after-free, seen
+        // under ASan with a callback that rearms while another thread unregisters it). So
+        // sweep both collections again here, where the callback has provably finished and the
+        // mutex is held again, and nothing can put it back. Dropping that late restart is the
+        // correct outcome: the caller is destroying the timer.
+        it = std::find(pending_timers_.begin(), pending_timers_.end(), event);
+        if (it != pending_timers_.end())
+        {
+            pending_timers_.erase(it);
+            should_notify = true;
+        }
+
+        it = std::find(active_timers_.begin(), active_timers_.end(), event);
+        if (it != active_timers_.end())
+        {
+            active_timers_.erase(it);
+            ++active_timers_generation_;
+            should_notify = true;
+        }
+    }
+]==])
+
+    # The FILE is normalised to the bare marker before anything is compared against it. That is
+    # what makes the decision below marker-agnostic: whichever revision stamped this tree, the
+    # sweep either is present or it is not, and asking which tag it happens to carry is exactly
+    # the mistake the outer gate made -- enumerate the shapes you know about, and the first
+    # shape you did not think of (a tree stamped by the revision before the next bump) falls
+    # through to "pristine" and aborts the configure blaming Fast-DDS.
+    string(REGEX REPLACE "\\[provizio_dds r[0-9]+\\]" "${_marker}" _contents "${_contents}")
+
+    # Both sides of this comparison carry the BARE marker -- the literal above spells no
+    # revision at all, and the file was just normalised -- so it holds whatever revision either
+    # was stamped with. The literal used to spell "r2", which meant deriving its bare form
+    # silently produced nothing once _revision moved on: every existing tree then took the
+    # pre-sweep branch below and aborted the configure.
+    string(FIND "${_contents}" "${_wait_tail_swept}" _swept_pos)
+    if(_swept_pos EQUAL -1)
+        # The sweep really is absent, so this is the pre-sweep shape: insert it. Where it is
+        # already there the content needs nothing and the stamp below is the whole migration.
+        _provizio_replace_or_fail("${RESOURCE_EVENT_CPP}" "unregister_timer post-wait sweep"
+                                  "${_wait_tail_r1}" "${_wait_tail_swept}")
+    endif()
+    # Every marker in the file, not only the one the r2 tail carries: the whole file records
+    # which revision produced it, so the next bump can tell this tree from the one before it.
+    _provizio_stamp_revision(_contents)
+    set(${_out} "${_contents}" PARENT_SCOPE)
     return()
 endif()
 
@@ -270,6 +427,31 @@ void ResourceEvent::unregister_timer(
                 {
                     return executing_timer_ != event;
                 });
+
+        // [provizio_dds] That wait RELEASED the mutex, and a callback is free to restart its
+        // own timer while it runs -- ResourceEvent::notify() then puts this very pointer back
+        // into pending_timers_ behind us. Erasing it before the wait is therefore not enough
+        // on its own: TimedEvent::~TimedEvent deletes the event the moment this returns, and
+        // the requeued pointer is dereferenced on the execution thread's next pass, through
+        // event_compare() and TimedEventImpl::next_trigger_time() (heap-use-after-free, seen
+        // under ASan with a callback that rearms while another thread unregisters it). So
+        // sweep both collections again here, where the callback has provably finished and the
+        // mutex is held again, and nothing can put it back. Dropping that late restart is the
+        // correct outcome: the caller is destroying the timer.
+        it = std::find(pending_timers_.begin(), pending_timers_.end(), event);
+        if (it != pending_timers_.end())
+        {
+            pending_timers_.erase(it);
+            should_notify = true;
+        }
+
+        it = std::find(active_timers_.begin(), active_timers_.end(), event);
+        if (it != active_timers_.end())
+        {
+            active_timers_.erase(it);
+            ++active_timers_generation_;
+            should_notify = true;
+        }
     }
 
     if (should_notify)
@@ -517,6 +699,7 @@ _provizio_replace_or_fail("${RESOURCE_EVENT_CPP}" "init_thread" [==[
     resize_collections();
 ]==])
 
+_provizio_stamp_revision(_contents)
 set(${_out} "${_contents}" PARENT_SCOPE)
 endfunction()
 
@@ -525,9 +708,19 @@ endfunction()
 # ---------------------------------------------------------------------------------------------
 function(_provizio_patch_writer_proxy_cpp _out)
 file(READ "${WRITER_PROXY_CPP}" _contents)
-string(FIND "${_contents}" "${_marker}" _already_pos)
-if(NOT _already_pos EQUAL -1)
-    message(STATUS "resource_event_per_timer_wait: WriterProxy.cpp already patched -- no-op")
+string(FIND "${_contents}" "${_revision_marker}" _current_pos)
+_provizio_find_stale_marker(_contents)
+if(NOT _current_pos EQUAL -1 AND _provizio_stale_pos EQUAL -1)
+    message(STATUS "resource_event_per_timer_wait: WriterProxy.cpp already patched at revision "
+                   "${_revision} -- no-op")
+    return()
+endif()
+if(NOT _provizio_stale_pos EQUAL -1)
+    # Patched by an earlier revision; stamp it. See ResourceEvent.h for why every file this
+    # script writes is gated on the revision and not on the bare marker.
+    message(STATUS "resource_event_per_timer_wait: stamping WriterProxy.cpp at revision ${_revision}")
+    _provizio_stamp_revision(_contents)
+    set(${_out} "${_contents}" PARENT_SCOPE)
     return()
 endif()
 
@@ -553,6 +746,7 @@ _provizio_replace_or_fail("${WRITER_PROXY_CPP}" "WriterProxy::stop" [==[
     }
 ]==])
 
+_provizio_stamp_revision(_contents)
 set(${_out} "${_contents}" PARENT_SCOPE)
 endfunction()
 

@@ -45,6 +45,20 @@ endif()
 
 file(READ "${REGISTRY_HPP}" _contents)
 
+# NO REVISION MARKER HERE, deliberately, and there is a rule attached to that. A tree
+# carries no record of WHICH revision of a patch script wrote it, so a bare "already patched"
+# marker means only "some revision did" -- and the moment the replacement text below changes,
+# every existing build tree keeps the OLD text while reporting itself patched, and the
+# corrected defect ships. resource_event_per_timer_wait.cmake hit exactly that and now carries
+# a _revision / _revision_marker pair plus a migration. This script does not, because its
+# replacement text has never changed and a version nobody has had to bump buys nothing.
+#
+# So: IF YOU CHANGE THE REPLACEMENT TEXT BELOW, add that mechanism first, and make the
+# migration decide from what the file CONTAINS rather than from which marker it carries --
+# deciding from the marker is the second bug resource_event_per_timer_wait.cmake had, because
+# a tree patched after the new text was written but before the marker existed then looks like
+# an old one and the configure aborts blaming Fast-DDS for a shape change.
+
 # The replacement carries this tag in a comment; a file that has it is already patched.
 string(FIND "${_contents}" "[provizio_dds]" _already_pos)
 if(NOT _already_pos EQUAL -1)
