@@ -532,6 +532,14 @@ add_test(NAME python_per_type_qos_parity COMMAND
     "${CMAKE_SOURCE_DIR}/src/qos_defaults_checks.cpp"
     WORKING_DIRECTORY "${TEST_PATH}"
 )
+# The bundled-vs-system C++ runtime preference in the package's __init__ (see the test).
+add_test(NAME python_stdlib_preference COMMAND
+    "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
+    ./python_stdlib_preference_test.py
+    WORKING_DIRECTORY "${TEST_PATH}"
+)
+set_tests_properties(python_stdlib_preference PROPERTIES TIMEOUT 60)
+
 if(WIN32)
     set_tests_properties(python_per_type_qos_parity PROPERTIES TIMEOUT 30
         ENVIRONMENT "PATH=${PROVIZIO_DDS_TEST_PATH}")
