@@ -484,6 +484,93 @@ def test_reset_refreshes_fastdds_interface_cache():
     return 0
 
 
+def test_matched_counts_cleared_on_teardown():
+    """A torn-down endpoint must not keep reporting the peers it had before.
+
+    _build_state zeroes the matched count before creating the endpoint, but teardown
+    used not to, so the count from before a reset stood until a rebuild replaced it --
+    INDEFINITELY if the rebuild failed, since nothing else clears it. Neither
+    get_num_matched_subscribers nor get_num_matched_publishers has a liveness guard, so
+    a service readiness check would read a peer count for an endpoint that no longer
+    exists, report the service up, and the very next publish() correctly fail. Mirrors
+    publisher_handle / subscriber_handle::zero_matched_count in C++.
+
+    Driven through the stale-generation branch, which needs no live peer: it is also the
+    branch a FAILED rebuild leaves an endpoint in, which is the case that never recovers."""
+
+    participant = provizio_dds.make_domain_participant(
+        0, provizio_dds.NetworkRecoveryMode.OFF
+    )
+    publisher = provizio_dds.Publisher(
+        participant,
+        "provizio_dds_python_matched_clear_topic",
+        provizio_dds.StringPubSubType,
+    )
+    subscriber = provizio_dds.Subscriber(
+        participant,
+        "provizio_dds_python_matched_clear_topic",
+        provizio_dds.StringPubSubType,
+        provizio_dds.String,
+        lambda _msg: None,
+        reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
+    )
+
+    # Stand in for peers discovered before the reset. Set directly rather than by
+    # matching a real endpoint: what is under test is that teardown CLEARS the count,
+    # not how it came to be non-zero.
+    with publisher._listener._num_matched_cv:
+        publisher._listener._num_matched_subscribers = 3
+    with subscriber._listener._num_matched_cv:
+        subscriber._listener._num_matched_publishers = 2
+    assert publisher.get_num_matched_subscribers(0.0, 0.0) == 3
+    assert subscriber.get_num_matched_publishers(0.0, 0.0) == 2
+
+    # Take the stale-generation branch: the participant we built against is gone, so
+    # the endpoint only clears its handles -- and must clear the count with them.
+    publisher._built_against_generation += 1000
+    subscriber._built_against_generation += 1000
+    publisher._teardown_state_for_reset()
+    subscriber._teardown_state_for_reset()
+
+    assert publisher.get_num_matched_subscribers(0.0, 0.0) == 0, (
+        "the DataWriter is gone but its matched-subscriber count still stands; a "
+        "readiness check would report the service up"
+    )
+    assert subscriber.get_num_matched_publishers(0.0, 0.0) == 0, (
+        "the DataReader is gone but its matched-publisher count still stands"
+    )
+
+    # A waiter blocked on the old value must be woken, not left until its timeout.
+    with publisher._listener._num_matched_cv:
+        publisher._listener._num_matched_subscribers = 5
+    woke = threading.Event()
+
+    def _waiter():
+        # Waits for a CHANGE from 5, which only the notify inside the teardown delivers.
+        with publisher._listener._num_matched_cv:
+            if publisher._listener._num_matched_cv.wait_for(
+                lambda: publisher._listener._num_matched_subscribers != 5, timeout=10.0
+            ):
+                woke.set()
+
+    waiter = threading.Thread(target=_waiter, daemon=True)
+    waiter.start()
+    time.sleep(0.2)
+    # The LIVE-participant branch this time, not the stale one above: a participant that has
+    # never been reset is at generation 1, so this matches and teardown takes its other exit.
+    # Both exits are then covered, which is the point -- the count has to be cleared whichever
+    # one runs, and only one of them was ever reached by the assertions above.
+    publisher._built_against_generation = publisher._participant.participant_generation()
+    publisher._teardown_state_for_reset()
+    waiter.join(timeout=10.0)
+    assert woke.is_set(), "zeroing the matched count did not notify a blocked waiter"
+
+    del publisher
+    del subscriber
+    _log("matched_counts_cleared_on_teardown: writer and reader counts cleared + notified OK")
+    return 0
+
+
 def test_discovery_event_owner_release_is_scoped():
     """The participant reference _DiscoveryListener._invoke resolves for every SEDP
     event must be released INSIDE the callback scope.
@@ -2220,6 +2307,7 @@ _TESTS = {
     "reset_refreshes_fastdds_interface_cache": test_reset_refreshes_fastdds_interface_cache,
     "teardown_deferred": test_teardown_deferred,
     "discovery_event_owner_release_is_scoped": test_discovery_event_owner_release_is_scoped,
+    "matched_counts_cleared_on_teardown": test_matched_counts_cleared_on_teardown,
     "coalescer_resets_on_transient_flap": test_coalescer_resets_on_transient_flap,
     "no_rebuild_on_address_loss": test_no_rebuild_on_address_loss,
     "unreadable_interfaces_are_not_a_change": test_unreadable_interfaces_are_not_a_change,

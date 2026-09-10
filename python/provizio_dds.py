@@ -3881,6 +3881,19 @@ class Publisher(_TopicHandle):
 
         self._built_against_generation = self._participant.participant_generation()
 
+    def _zero_matched_count(self):
+        """Forget the matched-subscriber count as the endpoint is torn down.
+
+        _build_state zeroes it before creating the writer; teardown has to zero it too, or
+        the count from before the reset stands until a rebuild replaces it -- INDEFINITELY
+        if the rebuild fails, since nothing else clears it. get_num_matched_subscribers has
+        no liveness guard at all, so a service readiness check then reads a peer count for a
+        writer that no longer exists, reports the service up, and the very next publish()
+        correctly fails. Notified because a waiter blocked on the old value must re-evaluate."""
+        with self._listener._num_matched_cv:
+            self._listener._num_matched_subscribers = 0
+            self._listener._num_matched_cv.notify_all()
+
     def _teardown_state_for_reset(self):
         """Tear down Fast-DDS state without releasing user-visible
         attributes. Caller holds the lifecycle lock. Generation check
@@ -3892,11 +3905,13 @@ class Publisher(_TopicHandle):
             # Stale — the participant we built against is already gone.
             # Just clear our handles; delete_contained_entities already
             # freed the underlying Fast-DDS objects.
+            self._zero_matched_count()
             self._writer = None
             self._publisher = None
             self._topic = None
             self._built_against_generation = 0
             return
+        self._zero_matched_count()
         if self._writer is not None and self._publisher is not None:
             self._publisher.delete_datawriter(self._writer)
         self._writer = None
@@ -4345,16 +4360,28 @@ class Subscriber(_TopicHandle):
         self._build_state(fastdds_participant)
         self._participant._deregister_deferred_subscriber(self._topic_name, self)
 
+    def _zero_matched_count(self):
+        """Forget the matched-publisher count as the endpoint is torn down.
+
+        See Publisher._zero_matched_count. The reader side needs it just as much: its
+        generation guard is `self._reader is not None and ...`, and after a failed rebuild
+        _reader IS None, so the guard does not fire and the stale count is returned."""
+        with self._listener._num_matched_cv:
+            self._listener._num_matched_publishers = 0
+            self._listener._num_matched_cv.notify_all()
+
     def _teardown_state_for_reset(self):
         """Tear down Fast-DDS state. See Publisher._teardown_state_for_reset."""
         if self._built_against_generation == 0:
             return
         if self._built_against_generation != self._participant.participant_generation():
+            self._zero_matched_count()
             self._reader = None
             self._subscriber = None
             self._topic = None
             self._built_against_generation = 0
             return
+        self._zero_matched_count()
         if self._reader is not None and self._subscriber is not None:
             self._subscriber.delete_datareader(self._reader)
         self._reader = None

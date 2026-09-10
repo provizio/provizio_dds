@@ -362,6 +362,15 @@ namespace
         return false;
     }
 
+    /// A torn-down endpoint must not keep reporting the peers it had before.
+    ///
+    /// build_state zeroes the matched count before creating the endpoint, but teardown used
+    /// not to, so the count from before a reset stood until a rebuild replaced it --
+    /// INDEFINITELY if the rebuild failed, since nothing else clears it. Neither
+    /// get_num_matched_subscribers nor get_num_matched_publishers has a liveness guard, so a
+    /// service readiness check would read a peer count for an endpoint that no longer exists,
+    /// report the service up, and the very next publish() correctly fail. Mirrors
+    /// test_matched_counts_cleared_on_teardown in test/python/python_network_recovery_test.py.
     /// A monitor's change callback throwing must be reported once per STREAK, and the streak
     /// must be latched only by a report that actually got out.
     ///
@@ -524,6 +533,72 @@ namespace
 
         provizio::dds::set_log_callback(std::move(previous));
         std::cout << "monitor_callback_failure_reported_once_per_streak: " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
+    }
+
+    int test_matched_counts_cleared_on_teardown()
+    {
+        bool passed = true;
+
+        // Two independent phases, each tearing down ONE endpoint while its peer stays alive
+        // and untouched. Doing both in one fixture makes the second assertion vacuous:
+        // deleting the writer unmatches the reader, so the reader's count reaches zero on its
+        // own and the check passes whether or not teardown clears it (measured -- with the
+        // fix removed, the writer's assertion failed and the reader's still passed).
+        const auto run_phase = [&passed](const bool tear_down_the_writer) {
+            pub_sub_fixture fixture;
+            const std::string topic_name{tear_down_the_writer ? "provizio_dds_matched_clear_writer_topic"
+                                                              : "provizio_dds_matched_clear_reader_topic"};
+
+            fixture.participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+            fixture.subscriber = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
+                fixture.participant, topic_name, [](const std_msgs::msg::String &) {},
+                eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS);
+            fixture.publisher =
+                provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(fixture.participant, topic_name);
+
+            // A real match, so the counts under test were not merely poked into place.
+            passed &= EXPECT(fixture.publisher->get_num_matched_subscribers(std::chrono::seconds{10},
+                                                                            std::chrono::milliseconds{0}) > 0);
+            passed &= EXPECT(fixture.subscriber->get_num_matched_publishers(std::chrono::seconds{10},
+                                                                            std::chrono::milliseconds{0}) > 0);
+
+            // The teardown half of a reset, on its own -- no rebuild follows, which is exactly
+            // the state a FAILED rebuild leaves an endpoint in and the one that never recovers.
+            // Read back with a zero timeout: get_num_matched_* floors its first wait at 50 ms
+            // regardless, so this is a bounded wait rather than a plain read, but nothing can
+            // re-match an endpoint that no longer exists -- so what it returns is the stored
+            // count, and the case costs 50 ms rather than the full timeout.
+            auto locked = fixture.participant->fastdds_participant();
+            passed &= EXPECT(locked.get() != nullptr);
+            if (locked.get() == nullptr)
+            {
+                return;
+            }
+
+            // Through the resettable_endpoint interface: the override is private on the handle
+            // (it is the reset path's entry point, not part of the user-facing API), and public
+            // on the base that declares it.
+            if (tear_down_the_writer)
+            {
+                static_cast<provizio::dds::detail::resettable_endpoint &>(*fixture.publisher)
+                    .on_participant_reset(*locked);
+                passed &= EXPECT(fixture.publisher->get_num_matched_subscribers(std::chrono::milliseconds{0},
+                                                                                std::chrono::milliseconds{0}) == 0);
+            }
+            else
+            {
+                static_cast<provizio::dds::detail::resettable_endpoint &>(*fixture.subscriber)
+                    .on_participant_reset(*locked);
+                passed &= EXPECT(fixture.subscriber->get_num_matched_publishers(std::chrono::milliseconds{0},
+                                                                                std::chrono::milliseconds{0}) == 0);
+            }
+        };
+
+        run_phase(true);
+        run_phase(false);
+
+        std::cout << "matched_counts_cleared_on_teardown: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;
     }
 
@@ -2098,6 +2173,10 @@ int main(int argc, char **argv)
     if (subcommand == "reset_roundtrip")
     {
         return test_reset_roundtrip();
+    }
+    if (subcommand == "matched_counts_cleared_on_teardown")
+    {
+        return test_matched_counts_cleared_on_teardown();
     }
     if (subcommand == "monitor_callback_failure_reported_once_per_streak")
     {

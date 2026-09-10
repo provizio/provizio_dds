@@ -84,6 +84,8 @@ _nr_add_test(network_recovery_env_explicit_off ARGS env_explicit_request no
     TIMEOUT ${_NR_TIMEOUT_FAST} ENV "PROVIZIO_DDS_NETWORK_RECOVERY=off")  # a request to switch OFF is not one to watch
 
 _nr_add_test(network_recovery_reset_roundtrip ARGS reset_roundtrip TIMEOUT ${_NR_TIMEOUT_DDS})
+_nr_add_test(network_recovery_matched_counts_cleared ARGS matched_counts_cleared_on_teardown
+    TIMEOUT ${_NR_TIMEOUT_DDS})
 _nr_add_test(network_recovery_monitor_callback_streak
     ARGS monitor_callback_failure_reported_once_per_streak TIMEOUT ${_NR_TIMEOUT_FAST})
 

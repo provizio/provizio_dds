@@ -280,7 +280,7 @@ add_test(NAME accumulation_test COMMAND
 set(_PYTHON_NETWORK_RECOVERY_TEST_NAMES_NO_ENV)
 foreach(_nrt_case logging env_recovery snapshot reset_roundtrip reset_disabled
         reset_refreshes_fastdds_interface_cache teardown_deferred
-        discovery_event_owner_release_is_scoped
+        discovery_event_owner_release_is_scoped matched_counts_cleared_on_teardown
         coalescer_resets_on_transient_flap no_rebuild_on_address_loss
         unreadable_interfaces_are_not_a_change no_baseline_rebuilds_for_first_readable_list
         rebuild_on_address_change snapshot_prefix_length

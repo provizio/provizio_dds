@@ -216,6 +216,13 @@ namespace provizio::dds
         void build_state(eprosima::fastdds::dds::DomainParticipant &on_participant);
         void teardown_state(eprosima::fastdds::dds::DomainParticipant &on_participant) noexcept;
 
+        /// @brief Forget the matched-publisher count as the endpoint is torn down.
+        ///
+        /// See publisher_handle::zero_matched_count. The reader side needs it just as much:
+        /// its liveness is `data_reader != nullptr`, and after a failed rebuild data_reader IS
+        /// null while the count from before the reset still stands.
+        void zero_matched_count() noexcept;
+
         std::shared_ptr<domain_participant> participant;
         dds::TypeSupport type_support;
         std::shared_ptr<detail::data_reader_listener> data_listener;
@@ -443,11 +450,7 @@ namespace provizio::dds
         // because the underlying matched state never changed again — leaving
         // get_num_matched_publishers stuck at 0 forever and request/response
         // clients timing out waiting for the service.
-        {
-            const std::lock_guard<std::mutex> lock{data_listener->num_matched_publishers_mutex};
-            data_listener->num_matched_publishers = 0;
-        }
-        data_listener->num_matched_publishers_cv.notify_all();
+        zero_matched_count();
         data_listener->drain.reattach();
 
         data_reader = subscriber->create_datareader(the_topic->get(), datareader_qos, data_listener.get());
@@ -461,6 +464,19 @@ namespace provizio::dds
         }
 
         built_against_generation = participant->participant_generation();
+    }
+
+    template <typename data_pub_sub_type> void subscriber_handle<data_pub_sub_type>::zero_matched_count() noexcept
+    {
+        if (data_listener == nullptr)
+        {
+            return;
+        }
+        {
+            const std::lock_guard<std::mutex> lock{data_listener->num_matched_publishers_mutex};
+            data_listener->num_matched_publishers = 0;
+        }
+        data_listener->num_matched_publishers_cv.notify_all();
     }
 
     template <typename data_pub_sub_type>
@@ -477,6 +493,7 @@ namespace provizio::dds
             // See publisher_handle::teardown_state for the rationale: our state
             // points into a participant that's already been freed by a reset we
             // missed. Just clear the local pointers.
+            zero_matched_count();
             data_reader = nullptr;
             subscriber = nullptr;
             the_topic.reset();
@@ -484,6 +501,7 @@ namespace provizio::dds
             return;
         }
 
+        zero_matched_count();
         if (data_reader != nullptr && subscriber != nullptr)
         {
             subscriber->delete_datareader(data_reader);

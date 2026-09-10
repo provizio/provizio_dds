@@ -270,6 +270,17 @@ namespace provizio::dds
         /// concurrent reset that excluded us — we just clear the local pointers.
         void teardown_state(eprosima::fastdds::dds::DomainParticipant &on_participant) noexcept;
 
+        /// @brief Forget the matched-subscriber count as the endpoint is torn down.
+        ///
+        /// build_state zeroes it before creating the DataWriter; teardown has to zero it too,
+        /// or the count from before the reset stands until a rebuild replaces it --
+        /// INDEFINITELY if the rebuild fails, since nothing else clears it.
+        /// get_num_matched_subscribers has no liveness guard at all, so a service readiness
+        /// check then reads a peer count for a DataWriter that no longer exists, reports the
+        /// service up, and the very next publish() correctly fails. Notified because a waiter
+        /// blocked on the old value must re-evaluate.
+        void zero_matched_count() noexcept;
+
         int num_matched_subscribers{0};
         mutable std::mutex num_matched_subscribers_mutex;
         mutable std::condition_variable num_matched_subscribers_cv;
@@ -619,11 +630,7 @@ namespace provizio::dds
         // because the underlying matched state never changed again — leaving
         // get_num_matched_subscribers stuck at 0 forever and request/response
         // clients timing out waiting for the service.
-        {
-            const std::lock_guard<std::mutex> lock{num_matched_subscribers_mutex};
-            num_matched_subscribers = 0;
-        }
-        num_matched_subscribers_cv.notify_all();
+        zero_matched_count();
         match_drain.reattach();
 
         data_writer = publisher->create_datawriter(the_topic->get(), datawriter_qos, listener.get());
@@ -641,6 +648,16 @@ namespace provizio::dds
         }
 
         built_against_generation = participant->participant_generation();
+    }
+
+    template <typename data_pub_sub_type, typename on_matched_function_type>
+    void publisher_handle<data_pub_sub_type, on_matched_function_type>::zero_matched_count() noexcept
+    {
+        {
+            const std::lock_guard<std::mutex> lock{num_matched_subscribers_mutex};
+            num_matched_subscribers = 0;
+        }
+        num_matched_subscribers_cv.notify_all();
     }
 
     template <typename data_pub_sub_type, typename on_matched_function_type>
@@ -664,6 +681,7 @@ namespace provizio::dds
             // delete_contained_entities() has already freed the Publisher and
             // DataWriter we held raw pointers to — calling delete_publisher /
             // delete_datawriter again would use-after-free.
+            zero_matched_count();
             data_writer = nullptr;
             publisher = nullptr;
             the_topic.reset();
@@ -671,6 +689,7 @@ namespace provizio::dds
             return;
         }
 
+        zero_matched_count();
         if (data_writer != nullptr && publisher != nullptr)
         {
             publisher->delete_datawriter(data_writer);
