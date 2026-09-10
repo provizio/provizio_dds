@@ -145,13 +145,24 @@ def set_log_callback(callback: Optional[LogCallback]) -> Optional[LogCallback]:
     from a participant reset path. Implementations should be brief and
     reentrant; do any heavy work in their own background thread.
 
-    A callback may use provizio_dds entities that already exist -- publishing
-    the line onto a DDS topic is a supported use. It must NOT create or destroy
-    a publisher, subscriber, service or client: some diagnostics are emitted
-    while a participant's registration lock is held, and every endpoint
-    constructor and destructor takes that same non-reentrant lock, so doing so
-    from the callback deadlocks the calling thread. Creating a domain
-    participant is fine. This is the same contract the C++ ``logging.h`` states.
+    A callback must NOT emit a provizio_dds log line of its own, and that rules
+    out more than it first appears: calling :func:`_emit_log` (or the C++
+    ``log_*``) is the obvious half, and the other half is any provizio_dds call
+    that logs -- ``make_domain_participant`` among them, since it can warn about
+    the domain's UDP ports, report the VPN / tunnel interfaces it excluded, or
+    report a monitor that failed to start. Either route re-enters the emitter
+    with no depth limit and overflows the stack, which is a crash rather than an
+    exception, so nothing here can absorb it. Write to your own sink instead and
+    do anything that might log on a thread of your own.
+
+    It must also NOT create or destroy a publisher, subscriber, service or
+    client, for a separate reason: some diagnostics are emitted while a
+    participant's registration lock is held, and every endpoint constructor and
+    destructor takes that same non-reentrant lock, so doing so from the callback
+    deadlocks the calling thread. Publishing the line onto a DDS topic through
+    entities that ALREADY exist is supported and expected.
+
+    This is the same contract the C++ ``logging.h`` states.
     """
 
     global _log_callback
@@ -613,7 +624,8 @@ def _try_capture_address_snapshot() -> "Optional[AddressSnapshot]":
         if first_of_streak:
             _emit_log(
                 LogLevel.WARNING,
-                f"could not read this host's network interfaces ({ex}); keeping the last "
+                f"could not read this host's network interfaces ("
+                    f"{_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}); keeping the last "
                 f"known address set and making no participant rebuild decision until it "
                 f"can be read again (an unreadable interface list is not an interface "
                 f"change)",
@@ -2665,20 +2677,43 @@ _MAX_INTERVAL_SEC = 24 * 60 * 60.0
 _MIN_INTERVAL_SEC = 0.1
 
 
-def _sanitise_env_value_for_log(raw: str) -> str:
-    """Cap and reduce a value to printable ASCII before quoting it in a warning, so a
-    pathological one cannot flood the log, forge log lines downstream, or vanish entirely.
+# Default cap for a value quoted into a log line: long enough to identify an environment
+# variable's value, short enough that a pathological one cannot flood the log.
+_DEFAULT_QUOTED_LOG_LENGTH = 32
+# How much of a raised exception's text a log line keeps. Longer than the identifier cap
+# because a message is the whole diagnostic -- and still bounded, because the text is not ours.
+_MAX_LOGGED_EXCEPTION_TEXT = 200
+
+
+def _sanitise_text_for_log(raw: str, max_quoted_length: int) -> str:
+    """Cap text and reduce it to printable ASCII before quoting it in a log line, so
+    externally-supplied text cannot flood the log, forge log lines downstream, or vanish
+    entirely.
 
     Everything outside ``[0x20, 0x7F)`` is replaced, not only the C0 controls and DEL. That
     mattered once interface identities started reaching this alongside environment values: a
     Windows adapter's friendly name is administrator-settable arbitrary Unicode, and on
     Windows :func:`_emit_log` prints through a cp1252 stdout where a non-ASCII character
     raises ``UnicodeEncodeError`` inside a swallowing ``except`` -- so the whole warning
-    disappears rather than merely mis-rendering. Mirrors ``sanitise_env_value_for_log`` in
-    src/detail/env_utils.h."""
-    capped = raw[:32]
+    disappears rather than merely mis-rendering. Folding the C0 controls is what stops a
+    newline in the text FORGING a second, entirely fabricated ``[provizio_dds]`` line, and an
+    ESC from reaching the operator's terminal as a control sequence.
+
+    A raised exception's ``str(ex)`` is the other caller, and it is neither ours nor
+    necessarily ASCII. Mirrors ``sanitise_text_for_log`` in
+    include/provizio/dds/detail/log_nothrow.h."""
+    capped = raw[:max_quoted_length]
     cleaned = "".join(c if 0x20 <= ord(c) < 0x7F else "?" for c in capped)
-    return cleaned + "..." if len(raw) > 32 else cleaned
+    return cleaned + "..." if len(raw) > max_quoted_length else cleaned
+
+
+def _sanitise_env_value_for_log(raw: str) -> str:
+    """:func:`_sanitise_text_for_log` at the default cap, for an identifier -- an environment
+    variable's value, or an OS-supplied interface or adapter name. Exception text uses
+    :func:`_sanitise_text_for_log` directly with the longer
+    :data:`_MAX_LOGGED_EXCEPTION_TEXT`. Mirrors ``sanitise_env_value_for_log`` in
+    include/provizio/dds/detail/log_nothrow.h."""
+    return _sanitise_text_for_log(raw, _DEFAULT_QUOTED_LOG_LENGTH)
 
 
 def _resolve_positive_interval(env_name: str, default: float) -> float:
@@ -2867,7 +2902,11 @@ class _PollingNetworkMonitor:
             try:
                 self._on_safety_net_tick()
             except Exception as ex:
-                _emit_log(LogLevel.ERROR, f"network monitor: safety-net tick raised ({ex})")
+                _emit_log(
+                    LogLevel.ERROR,
+                    f"network monitor: safety-net tick raised "
+                    f"({_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)})",
+                )
         new_snapshot = _try_capture_address_snapshot()
         if new_snapshot is None:
             return  # Unreadable interfaces are not a change — see the helper.
@@ -2884,7 +2923,11 @@ class _PollingNetworkMonitor:
             try:
                 self._on_event(old, new_snapshot, None)  # no burst-start: poll can't see transients
             except Exception as ex:
-                _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
+                _emit_log(
+                    LogLevel.ERROR,
+                    f"network monitor: on_event handler raised "
+                    f"({_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)})",
+                )
 
     def run_safety_net_tick_for_test(self) -> None:
         """Test-only: run one poll synchronously on the calling thread, so the same
@@ -3018,13 +3061,15 @@ class _NetlinkNetworkMonitor:
         try:
             sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_ROUTE)
         except OSError as ex:
-            _emit_log(LogLevel.ERROR, f"network monitor: could not recreate the netlink socket ({ex})")
+            _emit_log(LogLevel.ERROR, f"network monitor: could not recreate the netlink socket ("
+                f"{_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)})")
             return
         try:
             sock.bind((0, self._GROUPS))
         except OSError as ex:
             sock.close()
-            _emit_log(LogLevel.ERROR, f"network monitor: could not rebind the netlink socket ({ex})")
+            _emit_log(LogLevel.ERROR, f"network monitor: could not rebind the netlink socket ("
+                f"{_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)})")
             return
         self._sock = sock
         # Silent: died and was repaired here, with the missed events covered by this same check.
@@ -3041,7 +3086,11 @@ class _NetlinkNetworkMonitor:
             try:
                 self._on_safety_net_tick()
             except Exception as ex:
-                _emit_log(LogLevel.ERROR, f"network monitor: safety-net tick raised ({ex})")
+                _emit_log(
+                    LogLevel.ERROR,
+                    f"network monitor: safety-net tick raised "
+                    f"({_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)})",
+                )
 
         new_snapshot = _try_capture_address_snapshot()
         if new_snapshot is None:
@@ -3063,7 +3112,11 @@ class _NetlinkNetworkMonitor:
         try:
             self._on_event(self._last_known, new_snapshot, None)
         except Exception as ex:
-            _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
+            _emit_log(
+                LogLevel.ERROR,
+                f"network monitor: on_event handler raised "
+                f"({_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)})",
+            )
         self._last_known = new_snapshot
 
     def _run(self) -> None:
@@ -3141,7 +3194,8 @@ class _NetlinkNetworkMonitor:
                 # snapshot or reset hook is still running) there is nothing left to watch
                 # and retrying would spin, one ERROR log per iteration. Terminal.
                 if ex.errno == errno.EBADF:
-                    _emit_log(LogLevel.ERROR, f"network monitor: select() on a closed descriptor ({ex}); stopping")
+                    _emit_log(LogLevel.ERROR, f"network monitor: select() on a closed descriptor ("
+                        f"{_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}); stopping")
                     self._close_socket()
                     break
                 # Anything else is terminal for this socket, but not for recovery:
@@ -3150,7 +3204,8 @@ class _NetlinkNetworkMonitor:
                 # without auto-recovery for the rest of its life.
                 _emit_log(
                     LogLevel.ERROR,
-                    f"network monitor: select() failed ({ex}); falling back to the periodic "
+                    f"network monitor: select() failed ("
+                        f"{_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}); falling back to the periodic "
                     f"safety-net check and retrying the netlink channel",
                 )
                 self._close_socket(sock)
@@ -3180,7 +3235,9 @@ class _NetlinkNetworkMonitor:
                     # Terminal for this socket only — see the select() branch above.
                     _emit_log(
                         LogLevel.ERROR,
-                        f"network monitor: recv() failed ({ex}); falling back to the periodic "
+                        f"network monitor: recv() failed ("
+                            f"{_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}); "
+                            "falling back to the periodic "
                         f"safety-net check and retrying the netlink channel",
                     )
                     self._close_socket(sock)
@@ -3292,7 +3349,11 @@ class _NetlinkNetworkMonitor:
                 try:
                     self._on_event(self._last_known, end_snapshot, burst_start)
                 except Exception as ex:
-                    _emit_log(LogLevel.ERROR, f"network monitor: on_event handler raised ({ex})")
+                    _emit_log(
+                        LogLevel.ERROR,
+                        f"network monitor: on_event handler raised "
+                        f"({_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)})",
+                    )
                 self._last_known = end_snapshot
                 pending = False
                 (
@@ -3387,7 +3448,8 @@ def _make_network_monitor(
         except OSError as ex:
             _emit_log(
                 LogLevel.WARNING,
-                f"network monitor: netlink unavailable ({ex}); falling back to polling "
+                f"network monitor: netlink unavailable ("
+                    f"{_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}); falling back to polling "
                 f"(sub-interval transient flaps may be missed)",
             )
     return _PollingNetworkMonitor(on_event, interval_sec, on_safety_net_tick)
@@ -3524,7 +3586,7 @@ class _NetworkRecoveryCoordinator:
                     self._on_network_event, init_poll_interval, self._on_safety_net_tick
                 )
             except Exception as ex:
-                init_error = str(ex)
+                init_error = _sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)
 
         with self._registry_lock:
             # GC expired entries inline.
@@ -3623,7 +3685,8 @@ class _NetworkRecoveryCoordinator:
                     try:
                         hook(snapshot, snapshot)
                     except Exception as ex:
-                        _emit_log(LogLevel.ERROR, f"participant reset retry failed: {ex}")
+                        _emit_log(LogLevel.ERROR, f"participant reset retry failed: "
+                            f"{_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}")
         finally:
             with self._idle_lock:
                 self.reset_count += 1
@@ -3731,7 +3794,8 @@ class _NetworkRecoveryCoordinator:
                     try:
                         hook(old, new)
                     except Exception as ex:
-                        _emit_log(LogLevel.ERROR, f"participant reset failed: {ex}")
+                        _emit_log(LogLevel.ERROR, f"participant reset failed: "
+                            f"{_sanitise_text_for_log(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}")
 
             # No completion line: the change was already announced, and a failure logs its own
             # error.

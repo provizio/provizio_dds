@@ -76,18 +76,28 @@ namespace provizio::dds
      * the coalescer thread, and a participant's reset path. Implementations should
      * be brief and reentrant; do any heavy work in their own background thread.
      *
-     * A callback may use provizio_dds entities that already exist — publishing a log
-     * line onto a DDS topic is a supported and expected use, and every diagnostic but
-     * one is emitted with no lifecycle lock held. The one exception is the
-     * listener-drain stall warning (see detail/listener_drain.h), emitted while the
-     * participant's endpoint-registration lock is held: it reports a user data callback
-     * that has stopped returning — an unbounded stall, so deferring it until the lock is
-     * released would mean never emitting it at all. A callback must therefore NOT create
-     * or destroy a publisher, subscriber or service: doing so takes that same lock, and a
-     * callback that does it on receiving that warning deadlocks on the calling thread.
-     * Creating a @c domain_participant is fine: participant creation takes the recovery
-     * coordinator's registry lock, a different lock, and no diagnostic is ever emitted
-     * while it is held.
+     * A callback must not emit a provizio_dds log line of its own, and that rules out more
+     * than it first appears. Calling @c log_info / @c log_warning / @c log_error directly is
+     * the obvious half; the other half is any provizio_dds call that logs, and
+     * @c make_domain_participant is one -- it can warn about the domain's UDP ports, report
+     * the VPN / tunnel interfaces it excluded, or report a monitor that failed to start. The
+     * callback is invoked from the log stream's own destructor, so either route re-enters it
+     * with no depth limit and overflows the stack. That failure is a crash, not an exception,
+     * so none of the library's exception guards can absorb it.
+     *
+     * Write to your own sink instead -- a queue, a file, a socket -- and do anything that
+     * might log on a thread of your own, outside the callback. Publishing a log line onto a
+     * DDS topic remains supported and expected, on entities that ALREADY exist: publishing
+     * does not log, and every diagnostic but one is emitted with no lifecycle lock held.
+     *
+     * Creating or destroying a publisher, subscriber or service from the callback is
+     * separately forbidden, for a second reason. The listener-drain stall warning (see
+     * detail/listener_drain.h) is the one diagnostic emitted while the participant's
+     * endpoint-registration lock is held -- it reports a user data callback that has stopped
+     * returning, an unbounded stall, so deferring it until the lock is released would mean
+     * never emitting it at all -- and creating or destroying an endpoint takes that same
+     * lock. A callback that does it on receiving that warning deadlocks on the calling
+     * thread.
      */
     using log_callback = std::function<void(log_level level, std::string_view message)>;
 

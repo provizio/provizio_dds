@@ -35,6 +35,7 @@
 #include "provizio/dds/common.h"
 #include "provizio/dds/detail/bounded_wait.h"
 #include "provizio/dds/detail/listener_drain.h"
+#include "provizio/dds/detail/log_nothrow.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/function_traits.h"
@@ -466,23 +467,16 @@ namespace provizio::dds
                     {
                         // Guard the logging too — it can throw std::bad_alloc on stream growth,
                         // which must not escape into the Fast-DDS listener thread.
-                        try
-                        {
-                            log_error() << "publisher on_matched callback threw: " << exception.what();
-                        }
-                        catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                        {
-                        }
+                        detail::emit_log_nothrow([&] {
+                            log_error() << "publisher on_matched callback threw: "
+                                        << detail::sanitise_text_for_log(exception.what(),
+                                                                         detail::max_logged_exception_text);
+                        });
                     }
                     catch (...)
                     {
-                        try
-                        {
-                            log_error() << "publisher on_matched callback threw a non-std::exception";
-                        }
-                        catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                        {
-                        }
+                        detail::emit_log_nothrow(
+                            [&] { log_error() << "publisher on_matched callback threw a non-std::exception"; });
                     }
                 }
             }

@@ -35,6 +35,7 @@
 #include "provizio/dds/common.h"
 #include "provizio/dds/detail/bounded_wait.h"
 #include "provizio/dds/detail/listener_drain.h"
+#include "provizio/dds/detail/log_nothrow.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/function_traits.h"
@@ -614,26 +615,19 @@ namespace provizio::dds
             // The streaming logger can itself throw (allocation/stream growth); guard it with an inner
             // try/catch(...) so nothing escapes onto the Fast-DDS discovery thread. Mirrors the
             // request_handler logging guards elsewhere in this codebase.
-            try
-            {
+            detail::emit_log_nothrow([&] {
                 log_error() << "start_deferred_build: failed to launch deferred reader build for topic "
-                            << captured_topic_name << ": " << exception.what();
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+                            << captured_topic_name << ": "
+                            << detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text);
+            });
         }
         catch (...)
         {
             // A non-std::exception must not escape this Fast-DDS-thread entry point either.
-            try
-            {
+            detail::emit_log_nothrow([&] {
                 log_error() << "start_deferred_build: failed to launch deferred reader build for topic "
                             << captured_topic_name << " (non-std::exception)";
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+            });
         }
     }
 
@@ -801,23 +795,16 @@ namespace provizio::dds
                             // The logging path itself can allocate and throw (std::bad_alloc on
                             // ostringstream growth); guard it so nothing escapes into the Fast-DDS
                             // reception thread. Mirrors the discovery dispatch path.
-                            try
-                            {
-                                log_error() << "subscriber on_data callback threw: " << exception.what();
-                            }
-                            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                            {
-                            }
+                            detail::emit_log_nothrow([&] {
+                                log_error() << "subscriber on_data callback threw: "
+                                            << detail::sanitise_text_for_log(exception.what(),
+                                                                             detail::max_logged_exception_text);
+                            });
                         }
                         catch (...)
                         {
-                            try
-                            {
-                                log_error() << "subscriber on_data callback threw a non-std::exception";
-                            }
-                            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                            {
-                            }
+                            detail::emit_log_nothrow(
+                                [&] { log_error() << "subscriber on_data callback threw a non-std::exception"; });
                         }
                     }
                 }
@@ -897,23 +884,17 @@ namespace provizio::dds
                 {
                     // Guard the logging too — it can throw std::bad_alloc on stream growth,
                     // which must not escape into the Fast-DDS listener thread.
-                    try
-                    {
-                        log_error() << "subscriber on_has_publisher_changed callback threw: " << exception.what();
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow([&] {
+                        log_error() << "subscriber on_has_publisher_changed callback threw: "
+                                    << detail::sanitise_text_for_log(exception.what(),
+                                                                     detail::max_logged_exception_text);
+                    });
                 }
                 catch (...)
                 {
-                    try
-                    {
+                    detail::emit_log_nothrow([&] {
                         log_error() << "subscriber on_has_publisher_changed callback threw a non-std::exception";
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    });
                 }
             }
 

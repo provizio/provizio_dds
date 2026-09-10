@@ -40,6 +40,7 @@
 
 #include "provizio/dds/common.h"
 #include "provizio/dds/detail/bounded_wait.h"
+#include "provizio/dds/detail/log_nothrow.h"
 #include "provizio/dds/function_traits.h"
 #include "provizio/dds/ignore_request.h"
 #include "provizio/dds/logging.h"
@@ -551,13 +552,7 @@ namespace provizio::dds::detail
         // deadlock / unbounded blocking on a hot publish path.
         if (queue_full)
         {
-            try
-            {
-                log_error() << requests_queue_full_error_message;
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+            detail::emit_log_nothrow([&] { log_error() << requests_queue_full_error_message; });
         }
         cv.notify_all();
     }
@@ -592,23 +587,17 @@ namespace provizio::dds::detail
                     // user log callback may safely re-enter provizio_dds) and keep the thread
                     // alive for the next request. The logging itself can allocate/throw, so
                     // guard it too — nothing may escape this handler thread.
-                    try
-                    {
-                        log_error() << "service request handler threw: " << exception.what() << "; request dropped";
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow([&] {
+                        log_error() << "service request handler threw: "
+                                    << detail::sanitise_text_for_log(exception.what(),
+                                                                     detail::max_logged_exception_text)
+                                    << "; request dropped";
+                    });
                 }
                 catch (...)
                 {
-                    try
-                    {
-                        log_error() << "service request handler threw a non-std::exception; request dropped";
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow(
+                        [&] { log_error() << "service request handler threw a non-std::exception; request dropped"; });
                 }
                 lock.lock();
             }
@@ -679,7 +668,9 @@ namespace provizio::dds::detail
                     try
                     {
                         handler_error =
-                            std::string{"service request handler threw: "} + exception.what() + "; request dropped";
+                            std::string{"service request handler threw: "} +
+                            detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text) +
+                            "; request dropped";
                     }
                     catch (...)  // NOLINT(bugprone-empty-catch): a formatting failure must not escape
                     {
@@ -710,23 +701,11 @@ namespace provizio::dds::detail
         // std::bad_alloc from the streaming logger must not escape into Fast-DDS.
         if (!handler_error.empty())
         {
-            try
-            {
-                log_error() << handler_error;
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+            detail::emit_log_nothrow([&] { log_error() << handler_error; });
         }
         if (queue_full)
         {
-            try
-            {
-                log_error() << requests_queue_full_error_message;
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+            detail::emit_log_nothrow([&] { log_error() << requests_queue_full_error_message; });
         }
     }
 
@@ -766,8 +745,10 @@ namespace provizio::dds::detail
                         // let an allocation failure escape.
                         try
                         {
-                            handler_errors.emplace_back(std::string{"service request handler threw: "} +
-                                                        exception.what() + "; request dropped");
+                            handler_errors.emplace_back(
+                                std::string{"service request handler threw: "} +
+                                detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text) +
+                                "; request dropped");
                         }
                         catch (...)  // NOLINT(bugprone-empty-catch): a formatting failure must not escape
                         {
@@ -796,13 +777,7 @@ namespace provizio::dds::detail
                 {
                     // Best-effort: a std::bad_alloc from the streaming logger must not
                     // escape this handler thread.
-                    try
-                    {
-                        log_error() << message;
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow([&] { log_error() << message; });
                 }
                 lock.lock();
             }

@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "detail/env_utils.h"
+#include "provizio/dds/detail/log_nothrow.h"
 #include "provizio/dds/detail/network_recovery_coordinator.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/detail/shm_cleanup.h"
@@ -937,23 +938,16 @@ namespace provizio::dds
                     // mirroring the Python side. The logging path itself allocates
                     // (std::ostringstream growth) and can throw std::bad_alloc under
                     // memory pressure, so it is wrapped too — nothing may escape here.
-                    try
-                    {
-                        log_error() << "on_discovered_endpoint dispatch threw: " << exception.what();
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow([&] {
+                        log_error() << "on_discovered_endpoint dispatch threw: "
+                                    << detail::sanitise_text_for_log(exception.what(),
+                                                                     detail::max_logged_exception_text);
+                    });
                 }
                 catch (...)
                 {
-                    try
-                    {
-                        log_error() << "on_discovered_endpoint dispatch threw a non-std::exception";
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow(
+                        [&] { log_error() << "on_discovered_endpoint dispatch threw a non-std::exception"; });
                 }
             }
 
@@ -2586,7 +2580,7 @@ namespace provizio::dds
         catch (const std::exception &exception)
         {
             log_error() << "deferred match-publisher subscriber build failed on domain " << domain_id << ": "
-                        << exception.what()
+                        << detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text)
                         << "; this subscriber stays inactive (get_num_matched_publishers returns 0) until the "
                            "next discovered writer on its topic retries the build (or a network-recovery reset "
                            "rebuilds it)";
@@ -2813,11 +2807,12 @@ namespace provizio::dds
                 {
                     any_endpoint_failed = true;
                     // Stashed: see the recreate-failure report above.
-                    stash_vpn_blocklist_log(log_level::error,
-                                            "endpoint rebuild failed on domain " + std::to_string(domain_id) + ": " +
-                                                exception.what() +
-                                                "; this endpoint stays inactive (publish/take return failure) until "
-                                                "the network-recovery safety-net check retries the reset");
+                    stash_vpn_blocklist_log(
+                        log_level::error,
+                        "endpoint rebuild failed on domain " + std::to_string(domain_id) + ": " +
+                            detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text) +
+                            "; this endpoint stays inactive (publish/take return failure) until "
+                            "the network-recovery safety-net check retries the reset");
                 }
             }
 

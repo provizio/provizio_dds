@@ -23,6 +23,7 @@
 #include <string>
 
 #include "detail/env_utils.h"
+#include "provizio/dds/detail/log_nothrow.h"
 #include "provizio/dds/detail/vpn_interfaces.h"
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/logging.h"
@@ -247,7 +248,7 @@ namespace provizio::dds::detail
                     // throughout, so nothing else touched the vector since the
                     // emplace_back). A later register_participant retries init.
                     registered_participants.pop_back();
-                    init_error = exception.what();
+                    init_error = detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text);
                 }
             }
         }
@@ -409,9 +410,9 @@ namespace provizio::dds::detail
                 if (deferred_warning != nullptr)
                 {
                     // A caller holding a lifecycle lock takes the text and emits it once it
-                    // does not: the log callback is documented as free to create a
-                    // participant, which would re-enter register_participant and block on
-                    // the non-recursive registry_mutex this runs under. Every other
+                    // does not: anything a callback does that re-enters register_participant
+                    // -- creating a participant is the obvious way -- blocks on the
+                    // non-recursive registry_mutex this runs under. Every other
                     // diagnostic on that path (init_error, env_warning) is deferred for the
                     // same reason, and this is the one read that can fail on it -- the
                     // macOS sysctl(NET_RT_IFLIST) race this feature exists to tolerate.
@@ -563,13 +564,21 @@ namespace provizio::dds::detail
                     // reset_in_progress stuck true, hanging every wait_for_idle() for
                     // the rest of the process' life. Swallow, report, tick again next
                     // period.
-                    log_error() << "network auto-recovery: periodic safety-net check failed (" << exception.what()
-                                << "); will retry next period";
+                    // Through emit_log_nothrow, for the reason given on the reset handler
+                    // below: the report must not become the escape route it exists to close.
+                    detail::emit_log_nothrow([&exception] {
+                        log_error() << "network auto-recovery: periodic safety-net check failed ("
+                                    << detail::sanitise_text_for_log(exception.what(),
+                                                                     detail::max_logged_exception_text)
+                                    << "); will retry next period";
+                    });
                 }
                 catch (...)
                 {
-                    log_error() << "network auto-recovery: periodic safety-net check failed (unknown exception); "
-                                   "will retry next period";
+                    detail::emit_log_nothrow([] {
+                        log_error() << "network auto-recovery: periodic safety-net check failed (unknown exception); "
+                                       "will retry next period";
+                    });
                 }
                 lock.lock();
                 reset_in_progress = false;
@@ -627,13 +636,22 @@ namespace provizio::dds::detail
                 // true, hanging every wait_for_idle() for the rest of the process' life -- so
                 // bad_alloc under memory pressure would abort the process here while the
                 // identical condition arriving through the tick is caught, logged and retried.
-                log_error() << "network auto-recovery: participant reset pass failed (" << exception.what()
-                            << "); the periodic safety-net check will try again";
+                // Through emit_log_nothrow: this handler's whole purpose is to keep an
+                // exception off a thread with no boundary above it, and composing the line
+                // allocates and calls the user's log callback -- so the report must not become
+                // the escape route.
+                detail::emit_log_nothrow([&exception] {
+                    log_error() << "network auto-recovery: participant reset pass failed ("
+                                << detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text)
+                                << "); the periodic safety-net check will try again";
+                });
             }
             catch (...)
             {
-                log_error() << "network auto-recovery: participant reset pass failed (unknown exception); "
-                               "the periodic safety-net check will try again";
+                detail::emit_log_nothrow([] {
+                    log_error() << "network auto-recovery: participant reset pass failed (unknown exception); "
+                                   "the periodic safety-net check will try again";
+                });
             }
             lock.lock();
             reset_in_progress = false;
@@ -948,7 +966,8 @@ namespace provizio::dds::detail
             }
             catch (const std::exception &exception)
             {
-                log_error() << "participant reset failed: " << exception.what();
+                log_error() << "participant reset failed: "
+                            << detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text);
             }
 
             // The participant reports this itself: an exception is not the only way a
@@ -1069,7 +1088,7 @@ namespace provizio::dds::detail
             catch (const std::exception &exception)
             {
                 monitor.reset();
-                reopen_error = exception.what();
+                reopen_error = detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text);
             }
         }
 

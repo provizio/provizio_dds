@@ -402,10 +402,14 @@ namespace provizio::dds::detail
         /// @param deferred_warning When non-null, the "could not read this host's network
         /// interfaces" line is written here instead of being logged, for a caller that
         /// holds a lock the log callback could re-enter. @c register_participant must pass
-        /// it: the callback is free to create a participant (see logging.h), which would
-        /// re-enter that function and block on the non-recursive @c registry_mutex it holds
-        /// across this call. The threads that read the interfaces with no lifecycle lock
-        /// held pass nothing and let it log.
+        /// it: a callback is under no obligation to be trivial, and anything it does that
+        /// re-enters @c register_participant -- creating a participant is the obvious way --
+        /// blocks on the non-recursive @c registry_mutex held across this call. Deferring
+        /// the line costs nothing and removes the question. (The callback contract in
+        /// logging.h forbids a callback from LOGGING, which rules out participant creation
+        /// as a side effect of that rule; this deferral does not depend on the contract, and
+        /// is what keeps the lock safe whatever a callback does.) The threads that read the
+        /// interfaces with no lifecycle lock held pass nothing and let it log.
         std::optional<address_snapshot> current_snapshot(std::string *deferred_warning = nullptr);
         void apply_reset(reset_scope scope);
         void safety_net_tick();

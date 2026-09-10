@@ -24,6 +24,8 @@
 #include <string_view>
 #include <vector>
 
+#include "provizio/dds/detail/log_nothrow.h"
+
 // Shared helpers for reading configuration from environment variables — used by every
 // PROVIZIO_DDS_* resolver so validation and log hygiene stay identical across them —
 // together with the small text utilities that parsing those values, and matching names
@@ -31,48 +33,6 @@
 
 namespace provizio::dds::detail
 {
-    /**
-     * @brief Caps and de-control-characters an environment variable value before quoting it in a log
-     * message, so a pathological value can neither flood the log nor forge log lines in whatever
-     * ingests them.
-     *
-     * @param raw The raw environment variable value
-     * @return The value truncated to 32 characters (with a "..." suffix when longer), ASCII control
-     * characters replaced with '?'
-     */
-    inline std::string sanitise_env_value_for_log(const std::string &raw)
-    {
-        // Printable ASCII is [0x20, 0x7F): the C0 controls sit below it and DEL at its top,
-        // and everything from 0x80 up is outside it altogether.
-        constexpr unsigned char first_printable_ascii = 0x20;
-        constexpr unsigned char ascii_delete = 0x7F;
-        constexpr std::size_t max_quoted_length = 32;
-
-        std::string result = raw.substr(0, std::min(raw.size(), max_quoted_length));
-        for (auto &chr : result)
-        {
-            const auto value = static_cast<unsigned char>(chr);
-            // Everything outside printable ASCII, not only the C0 controls and DEL. Bytes at
-            // 0x80 and above used to pass through, which was survivable while every caller fed
-            // this an environment value -- but interface identities reach it now, and a Windows
-            // adapter's friendly name is administrator-settable arbitrary Unicode. On Windows
-            // the Python mirror prints through a cp1252 stdout, where a non-ASCII byte raises
-            // UnicodeEncodeError inside a swallowing except, so the whole warning DISAPPEARS
-            // rather than merely mis-rendering. Replacing here also removes the second half of
-            // that hazard: the cap is a byte count, so a multi-byte sequence straddling it was
-            // truncated into an invalid one.
-            if (value < first_printable_ascii || value >= ascii_delete)
-            {
-                chr = '?';
-            }
-        }
-        if (raw.size() > max_quoted_length)
-        {
-            result += "...";
-        }
-        return result;
-    }
-
     /**
      * @brief Parses a string as a uint32 (zero accepted): leading whitespace and a single leading
      * '+', then ASCII digits to end-of-string.

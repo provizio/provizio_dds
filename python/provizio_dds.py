@@ -88,6 +88,12 @@ else:
     import network_recovery as _network_recovery
     import shm_cleanup as _shm_cleanup
 
+# Local aliases for the log-text hygiene helpers, which are used at enough call sites here
+# that the qualified names alone push the lines past readability. One definition, in
+# network_recovery, mirroring include/provizio/dds/detail/log_nothrow.h.
+_sanitise_log_text = _network_recovery._sanitise_text_for_log
+_MAX_LOGGED_EXCEPTION_TEXT = _network_recovery._MAX_LOGGED_EXCEPTION_TEXT
+
 # Re-export the network-recovery public surface so user code can import it
 # directly from `provizio_dds`. Mirrors the C++ side where the symbols live
 # under `provizio::dds`. Also expose the underlying module as the
@@ -819,7 +825,8 @@ class _DiscoveryListener(DomainParticipantListener):
                     except Exception as ex:  # noqa: BLE001
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"deferred-subscriber writer resolution threw: {ex}",
+                            f"deferred-subscriber writer resolution threw: "
+                                f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}",
                         )
 
                 if cb is None or not (kinds & kind) or owner is None:
@@ -867,7 +874,8 @@ class _DiscoveryListener(DomainParticipantListener):
                     # than silently dropped.
                     _network_recovery._emit_log(
                         _network_recovery.LogLevel.ERROR,
-                        f"on_discovered_endpoint dispatch threw: {ex}",
+                        f"on_discovered_endpoint dispatch threw: "
+                            f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}",
                     )
             finally:
                 # Release the strong reference INSIDE the scope, explicitly. A
@@ -1210,7 +1218,8 @@ def _build_deferred_subscriber(subscriber, reliability):
     except Exception as ex:  # noqa: BLE001
         _network_recovery._emit_log(
             _network_recovery.LogLevel.ERROR,
-            f"deferred match-publisher subscriber build failed: {ex}; this subscriber "
+            f"deferred match-publisher subscriber build failed: "
+                f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}; this subscriber "
             f"stays inactive (get_num_matched_publishers returns 0) until the next discovered "
             f"writer on its topic retries the build (or a network-recovery reset rebuilds it)",
         )
@@ -1784,9 +1793,9 @@ def _vpn_excluded_transports_profile(
             else:
                 _vpn_transports_profiles[key] = profile_name
 
-    # Deliberately outside the lock: _emit_log calls the user's log callback, which is
-    # documented as free to create participants, and such a callback would re-enter
-    # this function and deadlock on a non-reentrant Lock. The participant that calls
+    # Deliberately outside the lock: _emit_log calls the user's log callback, and anything
+    # it does that re-enters this function -- creating a participant is the obvious way --
+    # deadlocks on a non-reentrant Lock. The participant that calls
     # this from under its OWN lifecycle locks hands in its pending list instead, and
     # emits the line once those are released; a direct caller gets it emitted here.
     if warning is not None:
@@ -2201,8 +2210,8 @@ def make_domain_participant(domain_id: int = 0,
             # library is what put it there -- so it happens under one lock (see
             # _builtin_transports_lock for the drift two threads produce without it). The
             # warning is only composed here and emitted after the lock is released: it goes
-            # through the user's log callback, which is free to create another participant
-            # and would then re-enter this very block.
+            # through the user's log callback, and anything that callback does which creates
+            # another participant would re-enter this very block.
             transport_override_warning = None
             with _builtin_transports_lock:
                 existing_transports = os.environ.get("FASTDDS_BUILTIN_TRANSPORTS")
@@ -3429,7 +3438,8 @@ def make_domain_participant(domain_id: int = 0,
                 except Exception as ex:
                     _network_recovery._emit_log(
                         _network_recovery.LogLevel.ERROR,
-                        f"endpoint detach failed during reset: {ex}",
+                        f"endpoint detach failed during reset: "
+                            f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}",
                     )
 
             # Phase 3: take the lifecycle lock for the whole reset.
@@ -3444,7 +3454,8 @@ def make_domain_participant(domain_id: int = 0,
                     except Exception as ex:
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"endpoint teardown failed during reset: {ex}",
+                            f"endpoint teardown failed during reset: "
+                                f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}",
                         )
 
                 # Drop topic handles — they reference the OLD participant.
@@ -3545,7 +3556,8 @@ def make_domain_participant(domain_id: int = 0,
                         any_endpoint_failed = True
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"endpoint rebuild failed during reset: {ex}; this endpoint stays "
+                            f"endpoint rebuild failed during reset: "
+                                f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}; this endpoint stays "
                             f"inactive until the network-recovery safety-net check retries the reset",
                         )
 
@@ -3719,7 +3731,8 @@ class Publisher(_TopicHandle):
                         except Exception as exception:  # noqa: BLE001
                             _network_recovery._emit_log(
                                 _network_recovery.LogLevel.ERROR,
-                                f"publisher on_has_subscriber_changed callback threw: {exception}",
+                                f"publisher on_has_subscriber_changed callback threw: "
+                                f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}",
                             )
                 finally:
                     # Drop the transient reference now — after the drain scope
@@ -4127,7 +4140,8 @@ class Subscriber(_TopicHandle):
                     except Exception as exception:  # noqa: BLE001
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"subscriber on_data callback threw: {exception}",
+                            f"subscriber on_data callback threw: "
+                            f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}",
                         )
 
         def on_subscription_matched(self, _, info):
@@ -4153,7 +4167,8 @@ class Subscriber(_TopicHandle):
                     except Exception as exception:  # noqa: BLE001
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"subscriber on_has_publisher_changed callback threw: {exception}",
+                            f"subscriber on_has_publisher_changed callback threw: "
+                            f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}",
                         )
 
     def __init__(
@@ -5038,7 +5053,8 @@ class Service:
                     # logger and keep processing the next request.
                     _network_recovery._emit_log(
                         _network_recovery.LogLevel.ERROR,
-                        f"service request handler threw: {exception}; request dropped",
+                        f"service request handler threw: "
+                        f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}; request dropped",
                     )
 
     class _AsyncRequestHandler:
@@ -5107,7 +5123,8 @@ class Service:
                 # through the configurable logger.
                 _network_recovery._emit_log(
                     _network_recovery.LogLevel.ERROR,
-                    f"service request handler threw: {exception}; request dropped",
+                    f"service request handler threw: "
+                    f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}; request dropped",
                 )
 
     def __init__(
