@@ -108,6 +108,14 @@ if [ ! -f /etc/machine-id ]; then
     exit 77
 fi
 
+# Reclaim what a SIGKILLed earlier run left behind (a ctest TIMEOUT, or a cancelled CI job):
+# the trap below cannot run on that path, so its namespaces -- and, in one narrow window, its
+# host-namespace veth pair -- survive. Only names whose pid is gone are touched, so a
+# concurrently running sibling is never disturbed. See netns_reaper.sh.
+# shellcheck source=test/network_recovery/netns_reaper.sh
+. "$(dirname "$0")/netns_reaper.sh"
+provizio_reap_stale_test_netns
+
 created_a=0
 created_b=0
 # Set while the veth pair still sits in the host namespace (created, not yet moved): only

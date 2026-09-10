@@ -21,6 +21,19 @@
       "Bash(systemctl is-active *)",
       "Bash(systemctl list-units *)",
       "Bash(systemctl show *)"
+    ],
+    "deny": [
+      "Bash(ctest*network_recovery_carrier*)",
+      "Bash(ctest*network_recovery_cold_start_hosts*)",
+      "Bash(*ENABLE_PRIVILEGED_TESTS*)",
+      "Bash(bash *carrier_recovery_test.sh*)",
+      "Bash(bash *cold_start_hosts_test.sh*)",
+      "Bash(sh *carrier_recovery_test.sh*)",
+      "Bash(sh *cold_start_hosts_test.sh*)",
+      "Bash(./*carrier_recovery_test.sh*)",
+      "Bash(./*cold_start_hosts_test.sh*)",
+      "Bash(test/network_recovery/carrier_recovery_test.sh*)",
+      "Bash(test/network_recovery/cold_start_hosts_test.sh*)"
     ]
   }
 }

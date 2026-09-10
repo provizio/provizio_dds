@@ -49,7 +49,7 @@ ctest --output-on-failure
 ctest --output-on-failure -R simplest_pub_sub
 ```
 
-Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `shm_cleanup`, `callback_exceptions`, `point_cloud2`, `accumulation`, `vpn_interfaces`, `listener_drain`, `bounded_wait`, `keyless_topic_history`.
+Tests are defined in `test/CMakeLists.txt`. Each test launches paired publisher/subscriber processes via bash. Test names include: `simplest_pub_sub`, `reliable_pub_sub`, `pub_sub_type_reuse`, `request_response`, `request_response_concurrent`, `ros_interop`, `legacy_api_compat`, `network_recovery`, `discovered_endpoints`, `match_publisher_default`, `discovery_tuning`, `transport_tuning`, `shm_cleanup`, `callback_exceptions`, `point_cloud2`, `accumulation`, `vpn_interfaces`, `listener_drain`, `bounded_wait`, `keyless_topic_history`. Two further network-recovery cases (`network_recovery_carrier`, `network_recovery_cold_start_hosts`) are registered only with `-DENABLE_PRIVILEGED_TESTS=ON` — see that option.
 
 ### CI Build Scripts
 
@@ -125,6 +125,7 @@ A prebuilt binary cache system exists for Linux (x86_64, aarch64) in `cache/`. I
 | Option | Default | Description |
 |--------|---------|-------------|
 | `ENABLE_TESTS` | OFF | Build and enable CTest tests |
+| `ENABLE_PRIVILEGED_TESTS` | OFF | Also register the two tests that need root / passwordless sudo (`network_recovery_carrier`, `network_recovery_cold_start_hosts`): they create network namespaces. Off by default so that selecting tests cannot reach them — a test chosen by regex cannot be excluded by name, so not registering it is the only reliable answer. It does not make `ctest` itself safe: `ctest -S script.cmake` and `--build-and-test … --test-command` run arbitrary commands whatever is registered. CI turns it on explicitly in the `test-nix` matrix, which is the only place these two run |
 | `PYTHON_BINDINGS` | OFF | Generate SWIG Python bindings |
 | `PYTHON_PACKAGES_INSTALL_DIR` | "" | Install directory for Python artifacts (empty uses default sysconfig path) |
 | `LOOK_FOR_FAST_DDS` | FALSE | Try system Fast-DDS before building from source |

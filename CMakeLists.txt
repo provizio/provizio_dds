@@ -33,6 +33,15 @@ set(PROVIZIO_CODING_STANDARDS_VERSION "1.10.5" CACHE STRING "Provizio Coding Sta
 set(DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS OFF CACHE BOOL "Disable all provizio/coding_standards checks")
 set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, without v prefix")
 set(ENABLE_TESTS OFF CACHE BOOL "Defines whether tests are built and enabled")
+# OFF by default so an ordinary `ctest` run cannot escalate. The two cases it gates
+# (network_recovery_carrier, network_recovery_cold_start_hosts) run their helpers as root
+# -- directly when already root, otherwise through `sudo -n` -- to create network
+# namespaces. Registering them unconditionally meant a plain `ctest`, or any `-R` regex
+# reaching them, did that silently on every host with passwordless sudo; a test the caller
+# selects by regex cannot be excluded by name, so the registration itself is the gate.
+# See test/network_recovery/CMakeLists.txt.
+set(ENABLE_PRIVILEGED_TESTS OFF CACHE BOOL
+    "Register the tests that need root / passwordless sudo (they create network namespaces)")
 set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be generated")
 set(PYTHON_PACKAGES_INSTALL_DIR "" CACHE STRING "Defines an install directory for Python artifacts (or use default if empty)")
 if(PYTHON_PACKAGES_INSTALL_DIR)

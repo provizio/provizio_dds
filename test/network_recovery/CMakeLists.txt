@@ -189,12 +189,26 @@ _nr_add_test(network_recovery_safety_net_no_rebuild_on_address_loss
     ARGS safety_net_no_rebuild_on_address_loss TIMEOUT ${_NR_TIMEOUT_DDS}
     ENV "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
 
+# The two cases below are registered only under ENABLE_PRIVILEGED_TESTS (see the option's
+# declaration in the top-level CMakeLists.txt). They run their helpers as root -- directly
+# when already root, otherwise through `sudo -n` -- to create network namespaces, bind-mount
+# over /etc/machine-id and give a peer its own /dev/shm. Everything else here is an ordinary
+# unprivileged test, so leaving these two in the default ctest list meant a plain
+# `ctest` or `ctest -R network_recovery` silently escalated on any host with passwordless
+# sudo. Not being in the list at all is the only reliable way to say no: a caller selects
+# tests with a regex, so no allowlist or denylist of test NAMES can decide the question --
+# `ctest -R network_recover[y]_c` names neither and selects both.
+#
+# To run them: configure with -DENABLE_PRIVILEGED_TESTS=ON, as root or with passwordless
+# sudo plus iproute2 (and util-linux for the cold-start case). Each still reports ctest SKIP
+# when the privileges or the tools are missing.
+
 # End-to-end against a REAL kernel interface transition inside a throw-away network
 # namespace: a link coming up with its address already assigned (emitting only
 # RTM_NEWLINK), and carrier appearing on an interface whose address and
 # administrative state never change. Both used to go undetected. Needs root or
 # passwordless sudo plus iproute2, and reports ctest SKIP otherwise.
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND ENABLE_PRIVILEGED_TESTS)
     add_test(NAME network_recovery_carrier
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/carrier_recovery_test.sh" "$<TARGET_FILE:network_recovery_test>")
     set_tests_properties(network_recovery_carrier PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
@@ -208,7 +222,7 @@ endif()
 # other's shared-memory locators for its own (fixed by
 # cmake/fast_dds/host_id_without_interfaces.cmake). Needs root or passwordless sudo plus
 # iproute2 and util-linux, and reports ctest SKIP otherwise.
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND ENABLE_PRIVILEGED_TESTS)
     add_test(NAME network_recovery_cold_start_hosts
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/cold_start_hosts_test.sh" "$<TARGET_FILE:network_recovery_test>")
     set_tests_properties(network_recovery_cold_start_hosts PROPERTIES TIMEOUT 240 SKIP_RETURN_CODE 77)
