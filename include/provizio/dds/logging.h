@@ -17,6 +17,7 @@
 
 #include <functional>
 #include <sstream>
+#include <string>
 #include <string_view>
 
 #include "provizio/dds/common.h"
@@ -117,6 +118,23 @@ namespace provizio::dds
     namespace detail
     {
         /**
+         * @brief Emits one already-composed log line, and says whether it got out.
+         *
+         * The emission half of @c log_stream, split out because a caller that suppresses
+         * repeated reports has to know whether the last one reached the operator. Composing a
+         * line and having it silently discarded looks identical to composing and emitting it
+         * from the outside -- @c log_stream's destructor swallows an emission failure, as a
+         * destructor must -- and a suppressor keyed on that would go quiet after a report
+         * nobody saw.
+         *
+         * @param level Severity
+         * @param message The fully composed line, without the "[provizio_dds] " prefix
+         * @return Whether the message reached the callback (or the default emitter) without
+         * an exception. False means nothing was reported.
+         */
+        PROVIZIO_DDS_API bool emit_log_line(log_level level, const std::string &message) noexcept;
+
+        /**
          * @brief Streaming-style log message builder; emits when destroyed.
          *
          * @code
@@ -170,6 +188,7 @@ namespace provizio::dds
     {
         return detail::log_stream{log_level::error};
     }
+
 }  // namespace provizio::dds
 
 #endif  // DDS_LOGGING

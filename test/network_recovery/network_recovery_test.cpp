@@ -32,6 +32,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../../src/detail/monitor_callback_guard.h"
 #include "provizio/dds/detail/address_snapshot.h"
 #include "provizio/dds/detail/network_recovery_coordinator.h"
 #include "provizio/dds/domain_participant.h"
@@ -359,6 +360,171 @@ namespace
             }
         }
         return false;
+    }
+
+    /// A monitor's change callback throwing must be reported once per STREAK, and the streak
+    /// must be latched only by a report that actually got out.
+    ///
+    /// Latching on the attempt instead would mean the FIRST report failing silences every
+    /// later one for the rest of the streak -- and what makes a report fail (memory pressure)
+    /// is the same condition that makes the callback fail, so the two arrive together. The
+    /// result is a monitor dropping every interface-change event with not one line to say so,
+    /// and with the safety-net tick disabled (which this suite's own cases do) that is network
+    /// auto-recovery silently dead.
+    int test_monitor_callback_failure_reported_once_per_streak()
+    {
+        bool passed = true;
+        std::vector<std::string> errors;
+        std::mutex errors_mutex;
+        auto previous = provizio::dds::set_log_callback(
+            [&errors, &errors_mutex](const provizio::dds::log_level level, const std::string_view message) {
+                if (level == provizio::dds::log_level::error)
+                {
+                    const std::lock_guard<std::mutex> lock{errors_mutex};
+                    errors.emplace_back(message);
+                }
+            });
+        const auto reported = [&errors, &errors_mutex] {
+            const std::lock_guard<std::mutex> lock{errors_mutex};
+            return errors.size();
+        };
+        const auto clear = [&errors, &errors_mutex] {
+            const std::lock_guard<std::mutex> lock{errors_mutex};
+            errors.clear();
+        };
+
+        std::atomic<bool> latch{false};
+        bool should_throw = true;
+        // Control character and a byte above 0x7F: both must reach the log folded to '?', or a
+        // what() could forge a line / break a cp1252 console. \x01 and \xff written as escapes
+        // so this source stays ASCII.
+        const std::string message{"boom\x01\xff"};
+        // std::function, as every real caller passes: the guard checks the callback for
+        // emptiness, which a bare lambda has no answer for.
+        const std::function<void()> callback = [&should_throw, &message] {
+            if (should_throw)
+            {
+                throw std::runtime_error{message};
+            }
+        };
+
+        // First failure of a streak: reported.
+        provizio::dds::detail::invoke_monitor_callback(callback, latch);
+        passed &= EXPECT(reported() == 1);
+        const bool folded = !errors.empty() && errors.front().find("boom??") != std::string::npos;
+        passed &= EXPECT(folded);
+        // Same streak: silent.
+        provizio::dds::detail::invoke_monitor_callback(callback, latch);
+        provizio::dds::detail::invoke_monitor_callback(callback, latch);
+        passed &= EXPECT(reported() == 1);
+
+        // A success ends the streak, so the next failure is reported again.
+        clear();
+        should_throw = false;
+        provizio::dds::detail::invoke_monitor_callback(callback, latch);
+        should_throw = true;
+        provizio::dds::detail::invoke_monitor_callback(callback, latch);
+        passed &= EXPECT(reported() == 1);
+
+        // THE point of the fix: a report that never got out must not latch the streak.
+        //
+        // Two ways it can fail to get out, and both must keep the streak open. Composing the
+        // message can throw (it allocates, while reporting what may be an allocation
+        // failure), and the EMISSION can fail inside log_stream's destructor, which swallows
+        // it -- the second is why this goes through emit_log_line rather than the streaming
+        // form, and it is driven here by a log callback that throws.
+        clear();
+        latch.store(false);
+        int compose_failures_left = 2;
+        std::size_t composed = 0;
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            provizio::dds::detail::report_once_per_streak(latch, [&compose_failures_left, &composed] {
+                if (compose_failures_left > 0)
+                {
+                    --compose_failures_left;
+                    throw std::runtime_error{"composing the report failed"};
+                }
+                ++composed;
+                return std::string{"composed at last"};
+            });
+        }
+        // Composed exactly once: the two failures left the streak open, the third got through.
+        // With the latch set on the attempt, the third never runs.
+        passed &= EXPECT(composed == 1);
+        passed &= EXPECT(latch.load());
+
+        // Now the emission half: a log callback that throws makes emit_log_line report
+        // failure, so the streak must stay open even though composing succeeded. Latching on
+        // "composing did not throw" -- which looks like a fix and is not -- fails here.
+        clear();
+        latch.store(false);
+        int sink_failures_left = 2;
+        std::size_t reached_sink = 0;
+        auto throwing_sink = provizio::dds::set_log_callback(
+            [&sink_failures_left, &reached_sink](const provizio::dds::log_level, const std::string_view) {
+                if (sink_failures_left > 0)
+                {
+                    --sink_failures_left;
+                    throw std::runtime_error{"the sink refused it"};
+                }
+                ++reached_sink;
+            });
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            provizio::dds::detail::report_once_per_streak(
+                latch, [] { return std::string{"a report that the sink may refuse"}; });
+        }
+        provizio::dds::set_log_callback(std::move(throwing_sink));
+        passed &= EXPECT(reached_sink == 1);
+        passed &= EXPECT(latch.load());
+
+        // An empty callback is a no-op, not a report.
+        clear();
+        latch.store(false);
+        provizio::dds::detail::invoke_monitor_callback(std::function<void()>{}, latch);
+        passed &= EXPECT(reported() == 0);
+        passed &= EXPECT(!latch.load());
+
+        // A what() that returns nullptr. The standard requires a non-null NTBS, but a
+        // consumer-derived exception type is free to be wrong about it, and constructing a
+        // string_view from a null pointer is undefined behaviour -- in the reporting of a
+        // crash, which is the worst place to find out. Reported as "(null)" instead.
+        clear();
+        latch.store(false);
+        struct null_what final : std::exception
+        {
+            const char *what() const noexcept override
+            {
+                return nullptr;
+            }
+        };
+        const std::function<void()> throws_null_what = [] { throw null_what{}; };
+        provizio::dds::detail::invoke_monitor_callback(throws_null_what, latch);
+        passed &= EXPECT(reported() == 1);
+        passed &= EXPECT(!errors.empty() && errors.front().find("(null)") != std::string::npos);
+
+        // Hostile what(): a newline that would forge a whole second log line, an ESC that
+        // would reach the operator's terminal as a control sequence, and a byte above 0x7F
+        // that a cp1252 console drops. All must arrive folded to '?'.
+        clear();
+        latch.store(false);
+        const std::string hostile{"boom\n[provizio_dds] reset pass succeeded\x1b[2Jtail\xc3\xa9"};
+        const std::function<void()> throws_hostile = [&hostile] { throw std::runtime_error{hostile}; };
+        provizio::dds::detail::invoke_monitor_callback(throws_hostile, latch);
+        passed &= EXPECT(reported() == 1);
+        const bool single_line = !errors.empty() && errors.front().find('\n') == std::string::npos &&
+                                 errors.front().find('\x1b') == std::string::npos;
+        passed &= EXPECT(single_line);
+        const bool ascii_only =
+            !errors.empty() && std::all_of(errors.front().begin(), errors.front().end(), [](const char chr) {
+                return static_cast<unsigned char>(chr) >= 0x20 && static_cast<unsigned char>(chr) < 0x7F;
+            });
+        passed &= EXPECT(ascii_only);
+
+        provizio::dds::set_log_callback(std::move(previous));
+        std::cout << "monitor_callback_failure_reported_once_per_streak: " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
     }
 
     int test_reset_roundtrip()
@@ -1932,6 +2098,10 @@ int main(int argc, char **argv)
     if (subcommand == "reset_roundtrip")
     {
         return test_reset_roundtrip();
+    }
+    if (subcommand == "monitor_callback_failure_reported_once_per_streak")
+    {
+        return test_monitor_callback_failure_reported_once_per_streak();
     }
     if (subcommand == "reset_disabled")
     {

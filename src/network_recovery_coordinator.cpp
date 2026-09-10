@@ -398,12 +398,27 @@ namespace provizio::dds::detail
             // Warned once per streak, not once per attempt: a poller asks every few
             // seconds, and a host that has genuinely lost the ability to enumerate would
             // otherwise fill the log with the same line for the life of the process. The
-            // exchange makes the "first of the streak" decision atomic, because this runs on
-            // whichever thread is reading the interfaces — the coalescer for a reset
+            // compare-exchange makes the "first of the streak" decision atomic, because this
+            // runs on whichever thread is reading the interfaces — the coalescer for a reset
             // decision, the notification thread for a burst-start snapshot.
-            if (!enumeration_failure_reported.exchange(true, std::memory_order_relaxed))
+            //
+            // Claimed, not simply set: the claim is released below if the line never reached
+            // the operator, so a report lost to the same pressure that caused the failure
+            // does not silence the whole streak. Same reasoning as report_once_per_streak in
+            // detail/monitor_callback_guard.h; the message here is a literal, so only the
+            // emission can fail.
+            bool unreported = false;
+            bool delivered_warning = false;
+            if (enumeration_failure_reported.compare_exchange_strong(unreported, true, std::memory_order_relaxed))
             {
-                constexpr const char *const message =
+                // static, so the lambdas below can name it with NO capture at all. That is the
+                // only form all three compilers accept: as a plain block-scope constexpr it
+                // needs an explicit capture on MSVC (C3493 -- gcc and clang call reading it a
+                // non-odr-use and want none), and adding that capture then fails clang with
+                // -Wunused-lambda-capture, which is -Werror here. A static local has static
+                // storage duration, so no compiler asks for it to be captured and none can
+                // call the capture unused. Measured both ways, one CI round each.
+                static constexpr const char *const message =
                     "could not read this host's network interfaces; keeping the last known "
                     "address set and making no participant rebuild decision until it can be read "
                     "again (an unreadable interface list is not an interface change)";
@@ -416,11 +431,26 @@ namespace provizio::dds::detail
                     // diagnostic on that path (init_error, env_warning) is deferred for the
                     // same reason, and this is the one read that can fail on it -- the
                     // macOS sysctl(NET_RT_IFLIST) race this feature exists to tolerate.
-                    *deferred_warning = message;
+                    //
+                    // Handing the text over counts as reported: whoever takes it emits it,
+                    // and this is not the place that can tell whether they managed to. The
+                    // assignment can still throw, which releases the claim like any other
+                    // undelivered report.
+                    if (!detail::emit_log_nothrow([deferred_warning] { *deferred_warning = message; }))
+                    {
+                        enumeration_failure_reported.store(false, std::memory_order_relaxed);
+                    }
                 }
-                else
+                // Wrapped like the branch above, not called bare: `message` is a literal, but
+                // the std::string it converts to is built in THIS frame, outside the noexcept
+                // callee's try -- so a bad_alloc there would escape past the release below and
+                // leave the streak latched after a report nobody saw.
+                else if (!detail::emit_log_nothrow([&delivered_warning] {
+                             delivered_warning = detail::emit_log_line(log_level::warning, message);
+                         }) ||
+                         !delivered_warning)
                 {
-                    log_warning() << message;
+                    enumeration_failure_reported.store(false, std::memory_order_relaxed);
                 }
             }
             return std::nullopt;

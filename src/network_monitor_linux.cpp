@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <linux/rtnetlink.h>
 #include <stdexcept>
 #include <sys/eventfd.h>
@@ -33,6 +34,8 @@
 #include <vector>
 
 #include "provizio/dds/logging.h"
+
+#include "detail/monitor_callback_guard.h"
 
 namespace provizio::dds::detail
 {
@@ -54,6 +57,10 @@ namespace provizio::dds::detail
         // that window would tear down a perfectly healthy monitor. See run().
         std::atomic<bool> alive{false};
         on_event_callback callback;
+        /// Streak latch for invoke_monitor_callback: one report per run of failures, not one
+        /// per event. See its documentation. Mutable because run_loop() is const and this is
+        /// diagnostic state, not part of the monitor's observable configuration.
+        mutable std::atomic<bool> callback_failure_reported{false};
         // NOLINTEND(misc-non-private-member-variables-in-classes)
 
         bool open_channel()
@@ -273,22 +280,9 @@ namespace provizio::dds::detail
                     }
                 }
 
-                if (any_event && callback)
+                if (any_event)
                 {
-                    // The callback reads the host's interfaces and allocates as it goes, so it can throw --
-                    // bad_alloc under the memory pressure a network change is quite capable of
-                    // coinciding with. There is no exception boundary between here and this
-                    // thread's entry point, so an escape is std::terminate. The coalescer thread
-                    // guards its own loop body for the same reason, and every Python mirror of this
-                    // path wraps its equivalent; a dropped event costs one missed wake-up, which the
-                    // periodic safety-net tick then catches.
-                    try
-                    {
-                        callback();
-                    }
-                    catch (...)
-                    {
-                    }
+                    invoke_monitor_callback(callback, callback_failure_reported);
                 }
             }
         }

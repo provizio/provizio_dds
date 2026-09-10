@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
+#include <exception>
 #include <fcntl.h>
 #include <net/if.h>
 #include <net/route.h>
@@ -34,6 +35,8 @@
 #include <vector>
 
 #include "provizio/dds/logging.h"
+
+#include "detail/monitor_callback_guard.h"
 
 namespace provizio::dds::detail
 {
@@ -66,6 +69,9 @@ namespace provizio::dds::detail
         // see network_monitor::is_alive() and the Linux backend's equivalent.
         std::atomic<bool> alive{false};
         on_event_callback callback;
+        /// Streak latch for invoke_monitor_callback: one report per run of failures, not one
+        /// per event. See its documentation.
+        std::atomic<bool> callback_failure_reported{false};
 
         bool open_channel()
         {
@@ -204,20 +210,7 @@ namespace provizio::dds::detail
                 // The coordinator's snapshot diff absorbs the extra wake-ups.
                 if (hdr->rtm_type == RTM_NEWADDR || hdr->rtm_type == RTM_DELADDR || hdr->rtm_type == RTM_IFINFO)
                 {
-                    if (callback)
-                    {
-                        // See the same guard in network_monitor_linux.cpp: the callback can throw,
-                        // nothing between here and this thread's entry point would catch it, and an
-                        // escape is std::terminate. A dropped event costs one missed wake-up, which
-                        // the periodic safety-net tick catches.
-                        try
-                        {
-                            callback();
-                        }
-                        catch (...)
-                        {
-                        }
-                    }
+                    invoke_monitor_callback(callback, callback_failure_reported);
                 }
             }
         }

@@ -84,6 +84,8 @@ _nr_add_test(network_recovery_env_explicit_off ARGS env_explicit_request no
     TIMEOUT ${_NR_TIMEOUT_FAST} ENV "PROVIZIO_DDS_NETWORK_RECOVERY=off")  # a request to switch OFF is not one to watch
 
 _nr_add_test(network_recovery_reset_roundtrip ARGS reset_roundtrip TIMEOUT ${_NR_TIMEOUT_DDS})
+_nr_add_test(network_recovery_monitor_callback_streak
+    ARGS monitor_callback_failure_reported_once_per_streak TIMEOUT ${_NR_TIMEOUT_FAST})
 
 # xml_loopback_profile: a caller's XML profile that confines the transports to loopback keeps
 # the participant out of auto-recovery in the default mode, and only there. The two entries are
