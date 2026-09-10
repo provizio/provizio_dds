@@ -46,9 +46,23 @@ set(_decorated "    FASTDDS_EXPORTED_API static bool update_interfaces();")
 
 file(READ "${SYSTEMINFO_HPP}" _contents)
 
+# NO REVISION MARKER HERE, deliberately, and there is a rule attached to that. A tree
+# carries no record of WHICH revision of a patch script wrote it, so a bare "already patched"
+# marker means only "some revision did" -- and the moment the replacement text below changes,
+# every existing build tree keeps the OLD text while reporting itself patched, and the
+# corrected defect ships. resource_event_per_timer_wait.cmake hit exactly that and now carries
+# a _revision / _revision_marker pair plus a migration. This script does not, because its
+# replacement text has never changed and a version nobody has had to bump buys nothing.
+#
+# So: IF YOU CHANGE THE REPLACEMENT TEXT BELOW, add that mechanism first, and make the
+# migration decide from what the file CONTAINS rather than from which marker it carries --
+# deciding from the marker is the second bug resource_event_per_timer_wait.cmake had, because
+# a tree patched after the new text was written but before the marker existed then looks like
+# an old one and the configure aborts blaming Fast-DDS for a shape change.
+
 string(FIND "${_contents}" "${_decorated}" _already_pos)
 if(NOT _already_pos EQUAL -1)
-    message(STATUS "export_system_info: update_interfaces already exported — no-op")
+    message(STATUS "export_system_info: update_interfaces already exported -- no-op")
     return()
 endif()
 
@@ -60,7 +74,7 @@ if(_pos EQUAL -1)
         "in ${SYSTEMINFO_HPP}. Fast-DDS may have changed SystemInfo's layout; "
         "update this patch so the Windows export of "
         "eprosima::SystemInfo::update_interfaces is preserved (provizio_dds "
-        "network auto-recovery depends on it — see APT-11792).")
+        "network auto-recovery depends on it -- see APT-11792).")
 endif()
 
 string(REPLACE "${_undecorated}" "${_decorated}" _contents "${_contents}")

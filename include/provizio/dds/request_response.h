@@ -29,6 +29,7 @@
 #include <unordered_set>
 
 #include "provizio/dds/common.h"
+#include "provizio/dds/detail/bounded_wait.h"
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/request_response_details.h"
@@ -530,7 +531,21 @@ namespace provizio::dds
           subscriber(make_subscriber<request_pub_sub_type>(
               participant, request_topic_name,
               [this](const typename request_pub_sub_type::type &data, const SampleInfo &info) { on_data(data, info); },
-              RELIABLE_RELIABILITY_QOS, endpoint_history_depth, durability_kind)),
+              RELIABLE_RELIABILITY_QOS,
+              // Defaulted the same way the response writer above is, and for the mirror-image
+              // reason. Passing endpoint_history_depth straight through meant that with no
+              // explicit depth the request READER fell to qos_defaults<request type>::
+              // datareader_keep_last_history_depth -- zero for any type a service uses, i.e.
+              // Fast-DDS' own KEEP_LAST(1) -- while service_client sizes its request WRITER at
+              // service_client_default_history_depth (10) and documents that as how many
+              // requests may be in flight. A burst of 10 into a history of 1 evicts unread
+              // requests, and silently: eviction happens after the reliability contract is
+              // satisfied, so there is no NACK, no log and no counter, only clients whose
+              // future_response times out.
+              (endpoint_history_depth == use_default_history_depth)
+                  ? static_cast<std::int32_t>(detail::to_max_queue_size(use_default_history_depth))
+                  : endpoint_history_depth,
+              durability_kind)),
           dispatch_responses_thread(&service::dispatch_responses, this)
     {
     }
@@ -879,7 +894,10 @@ namespace provizio::dds
     std::future_status future_response<request_pub_sub_type, response_pub_sub_type>::wait_for(
         const std::chrono::duration<rep, period> &timeout_duration) const
     {
-        return wait_until(std::chrono::system_clock::now() + timeout_duration);
+        // Saturating rather than a plain add: system_clock::now() + a near-max duration
+        // overflows into the PAST, which would report an instant timeout to a caller who
+        // asked to wait essentially forever (see detail/bounded_wait.h).
+        return wait_until(detail::saturating_deadline<std::chrono::system_clock>(timeout_duration));
     }
 
     template <typename request_pub_sub_type, typename response_pub_sub_type>
@@ -894,7 +912,11 @@ namespace provizio::dds
 
         std::unique_lock<std::mutex> lock{data->mutex()};
         std::exception_ptr error{};
-        if (data->cv().wait_until(lock, timeout_time, [&]() {
+        // Sliced rather than handed straight to the condition variable: this is a public
+        // API taking a time_point of ANY clock, so a caller may pass
+        // steady_clock::time_point::max() to mean "no deadline" -- which makes libstdc++
+        // spin at 100% of a core instead of waiting (see detail/bounded_wait.h).
+        if (detail::wait_until_bounded(data->cv(), lock, timeout_time, [&]() {
                 return (error = data->get_error_mutex_prelocked()) != nullptr || data->is_set_mutex_prelocked();
             }))
         {

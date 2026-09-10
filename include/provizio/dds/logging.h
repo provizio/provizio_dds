@@ -17,6 +17,7 @@
 
 #include <functional>
 #include <sstream>
+#include <string>
 #include <string_view>
 
 #include "provizio/dds/common.h"
@@ -41,11 +42,16 @@ namespace provizio::dds
      */
     enum class log_level
     {
-        /// Something happened that affects the caller, but nothing is wrong — currently only a
-        /// network change that rebuilt the participants, which briefly interrupts communication.
+        /// Something happened that affects the caller, but nothing is wrong: a network change
+        /// that rebuilt the participants (which briefly interrupts communication), or -- once
+        /// per distinct set, at participant creation on a host with a tunnel up -- which VPN /
+        /// tunnel interfaces the transports leave out and whether netmask filtering came with
+        /// it (see "VPN and tunnel interfaces" in DETAILS.md).
         info,
-        /// The caller should act: a rejected @c PROVIZIO_DDS_* value, or a host limit the
-        /// library cannot work around on its own (capped socket buffers, a full /dev/shm).
+        /// The caller should act: a rejected @c PROVIZIO_DDS_* value, a host limit the
+        /// library cannot work around on its own (capped socket buffers, a full /dev/shm),
+        /// or a requested @c transport_mode the participant could not honour because the
+        /// transports are the caller's.
         warning,
         /// Functionality was lost: a participant that could not be created or rebuilt, a
         /// monitor that could not start, or an exception thrown out of a caller's callback.
@@ -55,7 +61,10 @@ namespace provizio::dds
     // Note on what is NOT logged: provizio_dds stays silent about its own internals — start-up
     // state, successful operations, and anomalies it handled itself (a coalesced network event
     // that changed nothing, a retried internal fallback). A healthy process produces no output
-    // at all, so anything that does appear is worth reading.
+    // about them, so anything that does appear is worth reading; what a healthy process CAN
+    // say is limited to the info lines above, and a callback that forwards every line to an
+    // alerting channel should expect the VPN-exclusion report at start-up on every host with a
+    // tunnel up.
 
     /**
      * @brief Callback signature for custom log emitters.
@@ -67,6 +76,29 @@ namespace provizio::dds
      * May be invoked from any thread, including the network-monitor worker thread,
      * the coalescer thread, and a participant's reset path. Implementations should
      * be brief and reentrant; do any heavy work in their own background thread.
+     *
+     * A callback must not emit a provizio_dds log line of its own, and that rules out more
+     * than it first appears. Calling @c log_info / @c log_warning / @c log_error directly is
+     * the obvious half; the other half is any provizio_dds call that logs, and
+     * @c make_domain_participant is one -- it can warn about the domain's UDP ports, report
+     * the VPN / tunnel interfaces it excluded, or report a monitor that failed to start. The
+     * callback is invoked from the log stream's own destructor, so either route re-enters it
+     * with no depth limit and overflows the stack. That failure is a crash, not an exception,
+     * so none of the library's exception guards can absorb it.
+     *
+     * Write to your own sink instead -- a queue, a file, a socket -- and do anything that
+     * might log on a thread of your own, outside the callback. Publishing a log line onto a
+     * DDS topic remains supported and expected, on entities that ALREADY exist: publishing
+     * does not log, and every diagnostic but one is emitted with no lifecycle lock held.
+     *
+     * Creating or destroying a publisher, subscriber or service from the callback is
+     * separately forbidden, for a second reason. The listener-drain stall warning (see
+     * detail/listener_drain.h) is the one diagnostic emitted while the participant's
+     * endpoint-registration lock is held -- it reports a user data callback that has stopped
+     * returning, an unbounded stall, so deferring it until the lock is released would mean
+     * never emitting it at all -- and creating or destroying an endpoint takes that same
+     * lock. A callback that does it on receiving that warning deadlocks on the calling
+     * thread.
      */
     using log_callback = std::function<void(log_level level, std::string_view message)>;
 
@@ -85,6 +117,23 @@ namespace provizio::dds
 
     namespace detail
     {
+        /**
+         * @brief Emits one already-composed log line, and says whether it got out.
+         *
+         * The emission half of @c log_stream, split out because a caller that suppresses
+         * repeated reports has to know whether the last one reached the operator. Composing a
+         * line and having it silently discarded looks identical to composing and emitting it
+         * from the outside -- @c log_stream's destructor swallows an emission failure, as a
+         * destructor must -- and a suppressor keyed on that would go quiet after a report
+         * nobody saw.
+         *
+         * @param level Severity
+         * @param message The fully composed line, without the "[provizio_dds] " prefix
+         * @return Whether the message reached the callback (or the default emitter) without
+         * an exception. False means nothing was reported.
+         */
+        PROVIZIO_DDS_API bool emit_log_line(log_level level, const std::string &message) noexcept;
+
         /**
          * @brief Streaming-style log message builder; emits when destroyed.
          *
@@ -139,6 +188,7 @@ namespace provizio::dds
     {
         return detail::log_stream{log_level::error};
     }
+
 }  // namespace provizio::dds
 
 #endif  // DDS_LOGGING

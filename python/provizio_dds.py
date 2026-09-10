@@ -27,7 +27,8 @@ import threading
 import weakref
 from collections import deque
 from enum import Enum, IntFlag
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Collection, List, Optional, Tuple
+from xml.sax.saxutils import quoteattr
 import time
 from queue import Queue
 
@@ -86,6 +87,12 @@ else:
     import accumulation
     import network_recovery as _network_recovery
     import shm_cleanup as _shm_cleanup
+
+# Local aliases for the log-text hygiene helpers, which are used at enough call sites here
+# that the qualified names alone push the lines past readability. One definition, in
+# network_recovery, mirroring include/provizio/dds/detail/log_nothrow.h.
+_sanitise_log_text = _network_recovery._sanitise_text_for_log
+_MAX_LOGGED_EXCEPTION_TEXT = _network_recovery._MAX_LOGGED_EXCEPTION_TEXT
 
 # Re-export the network-recovery public surface so user code can import it
 # directly from `provizio_dds`. Mirrors the C++ side where the symbols live
@@ -195,11 +202,105 @@ if MATCH_PUBLISHER_RELIABILITY_QOS in (
 ):
     raise RuntimeError(
         "MATCH_PUBLISHER_RELIABILITY_QOS sentinel collides with a real "
-        "ReliabilityQosPolicyKind — pick an unused value for the sentinel"
+        "ReliabilityQosPolicyKind -- pick an unused value for the sentinel"
     )
 
 
-class QosDefaults:
+# The KEEP_LAST depth every DataWriter gets unless its type asks for something else. Fast-DDS's own
+# writer default is KEEP_LAST(1), which turns a RELIABLE writer into stop-and-wait: the single slot
+# is overwritten by the next sample, so a sample a reader has not yet acknowledged can no longer be
+# retransmitted, and rather than lose it the writer blocks the publishing thread until the
+# acknowledgement arrives or max_blocking_time (Fast-DDS's inherited 100 ms — deliberately left
+# alone) runs out. Eight slots let the emitter keep publishing across a NACK/repair round trip.
+# Mirrors detail::default_datawriter_keep_last_history_depth in include/provizio/dds/qos_defaults.h.
+_DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH = 8
+
+# The KEEP_LAST depth given to the DataReader of a topic several emitters share. KEEP_LAST depth is
+# a PER INSTANCE budget and a keyless topic has exactly one instance, so on a Provizio fleet topic —
+# every radar publishing point clouds to rt/provizio_radar_point_cloud, freespace polygons to
+# rt/provizio_freespace_poly, told apart only by frame_id — a reader's depth covers the whole fleet
+# rather than each emitter: at 6 radars publishing 15 Hz a depth of 4 is about 44 ms of traffic for
+# all of them together. 32 is roughly two frames from each of a 16-emitter fleet, and since these
+# types are all KB-scale (one history slot costs one serialized sample) the whole reader history
+# stays single-digit MB. Mirrors detail::fleet_shared_datareader_keep_last_history_depth.
+_FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH = 32
+
+# Reader and writer depth for a large sample type that no Provizio fleet topic shares. Deliberately
+# shallow: one history slot costs one serialized sample (measured on a KEEP_LAST writer, RSS grew by
+# 200 KB per slot for a 200 KB sample and 500 KB per slot for a 500 KB one, linear in depth), and
+# these are the types whose samples run to megabytes. Mirrors detail::large_sample_qos_defaults.
+_LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH = 4
+
+# CompressedImage reader depth: two frames from each of at most three cameras sharing one keyless
+# camera topic. The fleet-shared 32 is unaffordable for a frame one to two orders of magnitude
+# larger than a point cloud — measured, depth 6 costs 1.2 MB per endpoint at 200 KB frames and
+# 3.0 MB at 500 KB, against 6.4/16.0 MB at depth 32. Mirrors the C++ CompressedImage
+# specialization.
+_COMPRESSED_IMAGE_DATAREADER_KEEP_LAST_HISTORY_DEPTH = 6
+
+
+# Attributes removed from QosDefaults, and what to do instead. QosDefaults is public API whose
+# per-type dicts consumers are meant to write into, so an entry left in a dict that is no longer
+# read would be a silent misconfiguration — exactly the failure mode the split exists to prevent.
+# The metaclass below turns both reading and assigning such an attribute into a loud error, which
+# is what the C++ side gets from a static_assert.
+_REMOVED_QOS_DEFAULTS_ATTRIBUTES = {
+    "keep_last_history_depth_per_type": (
+        "QosDefaults.keep_last_history_depth_per_type no longer exists. It was split into "
+        "QosDefaults.datareader_keep_last_history_depth_per_type (the reader's jitter buffer, "
+        "shared by every writer on the topic) and "
+        "QosDefaults.datawriter_keep_last_history_depth_per_type (the writer's retransmission "
+        "buffer for its own samples), which are read independently -- so an entry left in the "
+        "old dict would have no effect at all. Register your per-type depth in whichever of the "
+        "two you meant, or in both."
+    ),
+    "keep_last_history_depth": (
+        "QosDefaults.keep_last_history_depth no longer exists. It was split into "
+        "QosDefaults.datareader_keep_last_history_depth (the reader's jitter buffer, shared by "
+        "every writer on the topic) and QosDefaults.datawriter_keep_last_history_depth (the "
+        "writer's retransmission buffer for its own samples). Read whichever of the two applies "
+        "to the endpoint you are configuring."
+    ),
+}
+
+
+class _QosDefaultsMeta(type):
+    """Metaclass that rejects the QosDefaults attributes removed by the reader/writer history
+    split, instead of letting a stale override be created and silently ignored.
+
+    Both halves are needed. Reading is the common case: ``QosDefaults.keep_last_history_depth_per_type[T] = 4``
+    is a *get* of the dict followed by a setitem on it, so it goes through ``__getattr__``.
+    Assigning the whole attribute is the dangerous case: without ``__setattr__`` it would simply
+    create a new class attribute that nothing ever reads.
+    """
+
+    def __getattr__(cls, name):
+        """Raises AttributeError, with removal guidance for a removed attribute.
+
+        :param str name: The attribute that ordinary lookup did not find.
+        :raises AttributeError: Always -- with the migration message for a removed attribute.
+        """
+        removed = _REMOVED_QOS_DEFAULTS_ATTRIBUTES.get(name)
+        if removed is not None:
+            raise AttributeError(removed)
+        raise AttributeError(
+            f"type object '{cls.__name__}' has no attribute '{name}'"
+        )
+
+    def __setattr__(cls, name, value):
+        """Sets a class attribute, refusing the ones removed by the history-depth split.
+
+        :param str name: The attribute being assigned.
+        :param value: The value being assigned.
+        :raises AttributeError: If the attribute was removed by the split.
+        """
+        removed = _REMOVED_QOS_DEFAULTS_ATTRIBUTES.get(name)
+        if removed is not None:
+            raise AttributeError(removed)
+        super().__setattr__(name, value)
+
+
+class QosDefaults(metaclass=_QosDefaultsMeta):
     """Defines default QOS policies. They can be overriden for specific types"""
 
     """Per type defaults for datawriter_reliability_kind. RELIABLE_RELIABILITY_QOS by default in Fast DDS"""
@@ -218,15 +319,47 @@ class QosDefaults:
     large sample types (images, point clouds) override this to ASYNCHRONOUS_PUBLISH_MODE so a multi-MB write
     hands off to the participant's async sender thread instead of blocking the publishing thread. Writer-local —
     NOT an RxO QoS, so it never affects reader/writer matching or ROS 2 interop. Registered lazily for the large
-    sample types by _register_large_sample_qos_defaults() below."""
+    sample types by _register_per_type_qos_defaults() below."""
     datawriter_publish_mode_per_type = {None: SYNCHRONOUS_PUBLISH_MODE}
 
-    """Per type default KEEP_LAST history depth, applied to both datawriter and datareader only when the caller
-    doesn't request an explicit positive history_depth / max_history_depth. 0 means "no per-type override" (keep
-    the Fast-DDS default). Large sample types override this to a small depth (4) so a momentarily slow consumer
-    doesn't drop big frames. Sets history depth only — durability is controlled separately, so it is NOT an RxO
-    QoS and doesn't affect matching or ROS 2 interop. Registered lazily by _register_large_sample_qos_defaults()."""
-    keep_last_history_depth_per_type = {None: 0}
+    """Per type default KEEP_LAST history depth for a DATAREADER, applied only when the caller doesn't request an
+    explicit positive max_history_depth. 0 means "no per-type override": Fast-DDS's own reader default,
+    KEEP_LAST(1), stands.
+
+    Reader and writer depth are separate dicts because the two endpoints do unrelated jobs, usually on different
+    machines. A writer's history is a retransmission buffer holding one emitter's own recent samples, paid for on
+    a frequently memory-constrained sensor. A reader's history is a jitter buffer shared by every writer on the
+    topic, paid for on the consuming host, and it has to absorb the combined rate of the whole fleet. One dict for
+    both forced a single value to be simultaneously too deep for the sensor and far too shallow for the consumer.
+
+    KEEP_LAST depth is a PER INSTANCE budget and a keyless topic has exactly one instance, so on a topic several
+    emitters share — every Provizio fleet topic, distinguished only by frame_id — a reader's depth is divided
+    across the whole fleet rather than granted per emitter. Types published that way are registered with
+    _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH below. Overrunning a reader history is silent: the sample
+    arrived and was acknowledged, and then the reader's own history discarded it, so no RTPS loss is recorded and
+    nothing is counted or logged — the callback simply never fires.
+
+    Sets history depth only — durability is controlled separately, so it is NOT an RxO QoS and doesn't affect
+    matching or ROS 2 interop. Registered lazily by _register_per_type_qos_defaults()."""
+    datareader_keep_last_history_depth_per_type = {None: 0}
+
+    """Per type default KEEP_LAST history depth for a DATAWRITER, applied only when the caller doesn't request an
+    explicit positive history_depth.
+
+    _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH (8) rather than 0 ("keep the Fast-DDS default"), because
+    Fast-DDS's writer default of KEEP_LAST(1) makes a RELIABLE writer stop-and-wait: the single history slot is
+    overwritten by the next sample, so a sample a reader has not yet acknowledged can no longer be retransmitted,
+    and rather than lose it the writer blocks the publishing thread until the acknowledgement arrives or
+    max_blocking_time (Fast-DDS's inherited 100 ms, deliberately left untouched) runs out. A writer's history
+    holds only that one emitter's own samples, so the cost doesn't scale with the number of peers — but types
+    whose samples are megabyte-scale are still registered back down below, trading retransmission head-room for
+    memory on the emitting device.
+
+    Sets history depth only — durability is controlled separately, so it is NOT an RxO QoS and doesn't affect
+    matching or ROS 2 interop. Registered lazily by _register_per_type_qos_defaults()."""
+    datawriter_keep_last_history_depth_per_type = {
+        None: _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH
+    }
 
     """Default count of the INITIAL discovery-announcement burst sent once at participant creation.
     De-escalated from a former 200 to a modest burst that still beats best-effort multicast loss on
@@ -286,26 +419,73 @@ class QosDefaults:
                 QosDefaults.datawriter_publish_mode_per_type[None]
             )
         try:
-            self.keep_last_history_depth = (
-                QosDefaults.keep_last_history_depth_per_type[pub_sub_type]
+            self.datareader_keep_last_history_depth = (
+                QosDefaults.datareader_keep_last_history_depth_per_type[pub_sub_type]
             )
         except KeyError:
-            self.keep_last_history_depth = (
-                QosDefaults.keep_last_history_depth_per_type[None]
+            self.datareader_keep_last_history_depth = (
+                QosDefaults.datareader_keep_last_history_depth_per_type[None]
+            )
+        try:
+            self.datawriter_keep_last_history_depth = (
+                QosDefaults.datawriter_keep_last_history_depth_per_type[pub_sub_type]
+            )
+        except KeyError:
+            self.datawriter_keep_last_history_depth = (
+                QosDefaults.datawriter_keep_last_history_depth_per_type[None]
             )
 
+    def __getattr__(self, name):
+        """Raises AttributeError, with migration guidance for an attribute the history-depth
+        split removed.
 
-def _register_large_sample_qos_defaults():
-    """Register per-type QoS defaults for the "large sample" message types
-    (camera frames, point clouds, occupancy grids): ASYNCHRONOUS datawriter
-    publish mode + a modest KEEP_LAST(4) history so a multi-MB write hands off
-    to the participant's async sender thread and a momentarily slow consumer
-    doesn't drop big frames. Mirrors the C++ ``qos_defaults<T>`` specializations
-    (``detail::large_sample_qos_defaults`` in include/provizio/dds/qos_defaults.h).
+        Only reached for attributes ordinary lookup did not find, so it costs nothing on the
+        normal path. It exists so code that still reads the pre-split ``keep_last_history_depth``
+        is told what to read instead, rather than getting a bare "no attribute" from Python.
 
-    The publish mode is writer-local and the history depth is set without
-    touching durability, so neither is an RxO QoS — reader/writer matching and
-    ROS 2 interop are unaffected.
+        :param str name: The attribute that ordinary lookup did not find.
+        :raises AttributeError: Always -- with the migration message for a removed attribute.
+        """
+        removed = _REMOVED_QOS_DEFAULTS_ATTRIBUTES.get(name)
+        if removed is not None:
+            raise AttributeError(removed)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
+
+def _register_per_type_qos_defaults():
+    """Register the per-type QoS defaults that differ from the primary (None) ones.
+
+    Mirrors the ``qos_defaults<T>`` specializations in include/provizio/dds/qos_defaults.h,
+    tier for tier and value for value:
+
+    * **Fleet-shared types** — the ones every sensor publishes to one keyless topic, told
+      apart only by ``frame_id``: point clouds, freespace polygons, odometry, transforms,
+      radar info, camera intrinsics, GNSS fixes and the open-schema per-frame metadata on
+      rt/provizio_metadata. Their reader history is raised to
+      ``_FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH`` because a reader's depth covers
+      the whole fleet rather than each emitter. Point clouds and polygons additionally
+      publish asynchronously, being large enough to fragment over UDP; the small types stay
+      synchronous, since handing a few hundred bytes to the async sender thread would only
+      add latency.
+    * **Large samples nothing shares** (multi-echo laser scans, occupancy grids): the
+      asynchronous publish mode, plus a deliberately shallow history — one history slot
+      costs one serialized sample, and these run to megabytes.
+    * **Raw ``Image``**: the same shallow large-sample history, and the one type whose
+      writer defaults to BEST_EFFORT. The product is migrating off it — raw camera frames
+      are superseded by ``CompressedImage`` and raw-image freespace by the polygonal
+      freespace on rt/provizio_freespace_poly — so a raw frame is at once the heaviest
+      sample on the wire and the right one to drop first. A consumer that needs lossless
+      raw images passes an explicit RELIABLE_RELIABILITY_QOS; a ROS 2 subscriber must ask
+      for SensorDataQoS or it will not match at all (see DETAILS.md).
+    * **``CompressedImage``**: reliable, with a reader history sized for up to three
+      cameras sharing the topic rather than for a whole fleet.
+
+    Publish mode is writer-local and the history depths are set without touching
+    durability, so none of this is an RxO QoS — reader/writer matching and ROS 2 interop
+    are unaffected. Reliability IS an RxO policy, which is why raw ``Image`` is the only
+    type whose reliability is changed here and why that change is documented as breaking.
 
     Registration is lazy and defensive: the generated message bindings come from
     ``provizio_dds_python_types`` (wildcard-imported above), but not every build
@@ -315,37 +495,147 @@ def _register_large_sample_qos_defaults():
     # Bare names resolve against this module's globals, populated by the
     # `from provizio_dds_python_types import *` at the top of the file (the same
     # mechanism by which user code reaches e.g. provizio_dds.PointCloud2PubSubType).
-    large_sample_pub_sub_type_names = (
-        "ImagePubSubType",            # sensor_msgs/msg/Image
-        "CompressedImagePubSubType",  # sensor_msgs/msg/CompressedImage
-        "MultiEchoLaserScanPubSubType",  # sensor_msgs/msg/MultiEchoLaserScan
-        "PointCloud2PubSubType",      # sensor_msgs/msg/PointCloud2
-        "OccupancyGridPubSubType",    # nav_msgs/msg/OccupancyGrid
-        # A freespace polygon is a sequence of vertices, so a dense one runs to several
-        # KB and fragments over UDP; without the async + KEEP_LAST(4) override a
-        # reliable writer's single history slot is overwritten before a momentarily
-        # slow reader has acknowledged the previous sample's fragments.
-        "PolygonStampedPubSubType",   # geometry_msgs/msg/PolygonStamped
-        "PolygonInstanceStampedPubSubType",  # geometry_msgs/msg/PolygonInstanceStamped
+    # Each entry is (pub/sub type name, publish mode, datawriter reliability,
+    # datareader history depth, datawriter history depth).
+    per_type_qos_defaults = (
+        # Fleet-shared and large enough to fragment over UDP.
+        # sensor_msgs/msg/PointCloud2: rt/provizio_radar_point_cloud and the entity clouds.
+        (
+            "PointCloud2PubSubType",
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # geometry_msgs/msg/PolygonInstanceStamped: rt/provizio_freespace_poly and the
+        # camera variant. A polygon is a sequence of vertices, so a dense one runs to
+        # several KB, and several polygons can share one frame.
+        (
+            "PolygonInstanceStampedPubSubType",
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "PolygonStampedPubSubType",  # geometry_msgs/msg/PolygonStamped
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # Fleet-shared but small: a few hundred bytes never fragments, so synchronous.
+        (
+            "OdometryPubSubType",  # nav_msgs/msg/Odometry
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "TransformStampedPubSubType",  # geometry_msgs/msg/TransformStamped
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "NavSatFixPubSubType",  # sensor_msgs/msg/NavSatFix
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "nav_sat_fix_with_headingPubSubType",  # provizio/msg/nav_sat_fix_with_heading
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "radar_infoPubSubType",  # provizio/msg/radar_info
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "camera_intrinsicsPubSubType",  # provizio/msg/camera_intrinsics
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "metadataPubSubType",  # provizio/msg/metadata, on rt/provizio_metadata
+            SYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _FLEET_SHARED_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _DEFAULT_DATAWRITER_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # Large samples that no Provizio fleet topic shares.
+        (
+            "MultiEchoLaserScanPubSubType",  # sensor_msgs/msg/MultiEchoLaserScan
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        (
+            "OccupancyGridPubSubType",  # nav_msgs/msg/OccupancyGrid
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # Raw camera frames (rt/provizio_camera) and raw-image freespace
+        # (rt/provizio_freespace): the one best-effort writer in the library.
+        (
+            "ImagePubSubType",  # sensor_msgs/msg/Image
+            ASYNCHRONOUS_PUBLISH_MODE,
+            BEST_EFFORT_RELIABILITY_QOS,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+        ),
+        # The successor to raw Image, so it keeps a reliable writer and a reader history
+        # worth having. The writer keeps the shallow large-sample depth: it buffers only
+        # its own camera's stream, so it needs no per-camera multiplier.
+        (
+            "CompressedImagePubSubType",  # sensor_msgs/msg/CompressedImage
+            ASYNCHRONOUS_PUBLISH_MODE,
+            RELIABLE_RELIABILITY_QOS,
+            _COMPRESSED_IMAGE_DATAREADER_KEEP_LAST_HISTORY_DEPTH,
+            _LARGE_SAMPLE_KEEP_LAST_HISTORY_DEPTH,
+        ),
     )
-    for type_name in large_sample_pub_sub_type_names:
+    for (
+        type_name,
+        publish_mode,
+        datawriter_reliability_kind,
+        datareader_history_depth,
+        datawriter_history_depth,
+    ) in per_type_qos_defaults:
         try:
             cls = globals()[type_name]
         except KeyError:
             # The generated binding for this type isn't available in this build;
-            # leave it on the (synchronous, no-override) primary defaults.
+            # leave it on the primary (None) defaults.
             continue
-        QosDefaults.datawriter_publish_mode_per_type[cls] = ASYNCHRONOUS_PUBLISH_MODE
-        QosDefaults.keep_last_history_depth_per_type[cls] = 4
-        # Reader reliability default = match-publisher, same as the primary
-        # (None) default. The large-sample types inherit it via the None
-        # fallback anyway, but the C++ large_sample_qos_defaults sets it
-        # explicitly, so mirror that here so a future change to the primary
-        # default can't silently flip these types to a different reliability.
+        QosDefaults.datawriter_publish_mode_per_type[cls] = publish_mode
+        QosDefaults.datawriter_reliability_kind_per_type[cls] = datawriter_reliability_kind
+        QosDefaults.datareader_keep_last_history_depth_per_type[cls] = datareader_history_depth
+        QosDefaults.datawriter_keep_last_history_depth_per_type[cls] = datawriter_history_depth
+        # Reader reliability default = match-publisher, same as the primary (None) default.
+        # These types inherit it via the None fallback anyway, but the C++ tiers set it
+        # explicitly, so mirror that here: a future change to the primary default must not
+        # silently flip these types to a different reliability. It matters most for Image,
+        # whose writer is best-effort — a match-publisher subscriber adopts that and keeps
+        # matching, which is exactly why only the writer side of that decision is stated.
         QosDefaults.datareader_reliability_kind_per_type[cls] = MATCH_PUBLISHER_RELIABILITY_QOS
 
 
-_register_large_sample_qos_defaults()
+_register_per_type_qos_defaults()
 
 
 USE_DEFAULT_HISTORY_DEPTH = -1
@@ -372,8 +662,17 @@ def _get_stable_match_count(
     timeout_sec: float,
     settle_time_sec: float,
 ) -> int:
-    settle_time_sec = max(0.0, settle_time_sec)
-    timeout_sec = max(timeout_sec, 0.0) if timeout_sec is not None else 0.0
+    # Clamped at BOTH ends. The lower bound is the obvious one; the upper is not, and without
+    # it this diverges from the C++ contract it mirrors. threading.Condition.wait_for converts
+    # its timeout to a platform time_t, which raises OverflowError above threading.TIMEOUT_MAX
+    # (9223372036.0 s, ~292 years) -- so math.inf, or the numeric mirror of the
+    # milliseconds::max() that subscriber_handle::get_num_matched_publishers accepts as "wait
+    # as long as it takes", raises instead of waiting. The float arithmetic above cannot
+    # overflow, which is true but checks the wrong mechanism: the loss happens in the
+    # conversion, not the addition. TIMEOUT_MAX is longer than any process will live, so
+    # clamping to it IS "wait forever" for every practical purpose.
+    settle_time_sec = min(max(0.0, settle_time_sec), threading.TIMEOUT_MAX)
+    timeout_sec = min(max(timeout_sec, 0.0) if timeout_sec is not None else 0.0, threading.TIMEOUT_MAX)
     start_time = time.monotonic()
     timeout_point = start_time + timeout_sec
     wait_for_match = max(timeout_sec - settle_time_sec, _MIN_MATCH_WAIT_SEC)
@@ -465,11 +764,12 @@ class _DiscoveryListener(DomainParticipantListener):
 
     def _invoke(self, info, kind, discovered):
         # Snapshot under the lock so a concurrent set_callback can't swap
-        # the function out mid-call.
+        # the function out mid-call. The weakref itself is taken here; it is
+        # DEREFERENCED below, inside the callback scope -- see there.
         with self._lock:
             cb = self._callback
             kinds = self._kinds
-            owner = self._owner_ref() if self._owner_ref is not None else None
+            owner_ref = self._owner_ref
 
         # Convert the topic name at most once per call: it's needed by the internal deferred
         # resolution (writers) and again by the user callback, and to_string() allocates on the
@@ -483,81 +783,111 @@ class _DiscoveryListener(DomainParticipantListener):
                 _topic_name = info.topic_name.to_string()
             return _topic_name
 
-        # Internal match-publisher resolution runs FIRST and UNCONDITIONALLY of the
-        # user callback: a discovered DataWriter must resolve any subscriber parked
-        # on its topic regardless of whether the user opted into on_discovered_endpoint
-        # (the listener is now installed eagerly precisely so no SEDP writer event is
-        # missed). resolve_for_writer only records the reliability and submits the build
-        # to the process-wide reaper — it never builds an endpoint on this discovery
-        # thread. Mirrors the C++ invoke(): owner.resolve_deferred_for_writer
-        # before the user callback. Wrapped so a (defensive) failure can't escape the
-        # Fast-DDS director.
-        if owner is not None and (kind & EndpointKind.DATA_WRITER):
-            try:
-                with _fastdds_callback_scope():
-                    if discovered:
-                        owner._resolve_deferred_for_writer(
-                            topic_name(), info.reliability.kind
-                        )
-                    else:
-                        # REMOVED writer: maintain the per-reliability live-writer count so the
-                        # adopted reliability is re-derived / dropped as writers leave. The removed
-                        # writer's offered reliability is carried on the same discovery info.
-                        owner._on_writer_removed(topic_name(), info.reliability.kind)
-            except Exception as ex:  # noqa: BLE001
-                _network_recovery._emit_log(
-                    _network_recovery.LogLevel.ERROR,
-                    f"deferred-subscriber writer resolution threw: {ex}",
-                )
-
-        if cb is None or not (kinds & kind) or owner is None:
-            # owner is None either because set_owner hasn't run yet (extremely
-            # tight window between listener construction and the wrapper
-            # assigning self as owner) or because the wrapper has been garbage-
-            # collected. Drop the event — there's nothing meaningful the user
-            # callback could do with a dead participant.
-            return
-        # Mark this thread as running a Fast-DDS listener callback so any
-        # endpoint __del__ fired from inside the user callback (e.g. via a
-        # dropped strong reference) defers its Fast-DDS-side teardown to the
-        # reaper thread instead of self-joining the discovery thread. Matches
-        # the convention used by the publisher / subscriber listener
-        # callbacks elsewhere in this module.
+        # ONE scope around everything that holds a strong reference to the participant,
+        # entered before the weakref is dereferenced and left only after the last name
+        # bound to it has gone out of scope.
+        #
+        # The listener is installed eagerly now, so this resolves `owner` on EVERY SEDP
+        # event -- and that transient reference can be the last one: an application whose
+        # only remaining handle is the participant itself drops it while a discovery event
+        # is in flight, and the refcount then reaches zero HERE, on the Fast-DDS reception
+        # thread. _DomainParticipant.__del__ -> _cleanup() would run on that thread, where
+        # the bounded listener detach cannot succeed (we ARE the executing callback, so it
+        # burns its whole 30 s and returns non-OK) and delete_participant then joins the
+        # very thread running it. The scope is what lets __del__ see it is on a callback
+        # thread and defer to the reaper, exactly as Publisher/Subscriber already do -- and
+        # it has to span the early return below, which is where the reference was being
+        # dropped OUTSIDE any scope. The `finally` at the bottom is what makes "inside"
+        # true: see the note there.
         with _fastdds_callback_scope():
+            owner = owner_ref() if owner_ref is not None else None
             try:
-                # Convert type_name only now that the callback is known to fire (topic_name()
-                # reuses the at-most-once conversion above), inside the guard: info.*.to_string()
-                # can raise (MemoryError, or a SWIG-translated C++ exception), and that must not
-                # escape the Fast-DDS director callback either.
-                #
-                # The reliability / durability kinds are plain enum reads off
-                # the discovery info — Publication/SubscriptionBuiltinTopicData
-                # expose them as the public ``reliability`` / ``durability`` QoS
-                # policy members (offered for a discovered DataWriter, requested
-                # for a discovered DataReader). They are SWIG attributes (not
-                # methods — no parentheses), each carrying a ``.kind`` directly
-                # comparable to the module-level ``*_RELIABILITY_QOS`` /
-                # ``*_DURABILITY_QOS`` constants. Forwarded as the two trailing
-                # callback arguments so a recording bridge can match QoS per
-                # topic. Mirrors the C++ on_discovered_endpoint invoke().
-                cb(
-                    owner,
-                    topic_name(),
-                    info.type_name.to_string(),
-                    kind,
-                    discovered,
-                    info.reliability.kind,
-                    info.durability.kind,
-                )
-            except Exception as ex:
-                # A throwing user callback (or a failed name conversion) must
-                # not propagate out of the Fast-DDS discovery thread (mirrors
-                # the C++ logging convention). Log so it's debuggable rather
-                # than silently dropped.
-                _network_recovery._emit_log(
-                    _network_recovery.LogLevel.ERROR,
-                    f"on_discovered_endpoint dispatch threw: {ex}",
-                )
+                # Internal match-publisher resolution runs FIRST and UNCONDITIONALLY of the
+                # user callback: a discovered DataWriter must resolve any subscriber parked
+                # on its topic regardless of whether the user opted into on_discovered_endpoint
+                # (the listener is now installed eagerly precisely so no SEDP writer event is
+                # missed). resolve_for_writer only records the reliability and submits the build
+                # to the process-wide reaper — it never builds an endpoint on this discovery
+                # thread. Mirrors the C++ invoke(): owner.resolve_deferred_for_writer
+                # before the user callback. Wrapped so a (defensive) failure can't escape the
+                # Fast-DDS director.
+                if owner is not None and (kind & EndpointKind.DATA_WRITER):
+                    try:
+                        if discovered:
+                            owner._resolve_deferred_for_writer(
+                                topic_name(), info.reliability.kind
+                            )
+                        else:
+                            # REMOVED writer: maintain the per-reliability live-writer count so the
+                            # adopted reliability is re-derived / dropped as writers leave. The removed
+                            # writer's offered reliability is carried on the same discovery info.
+                            owner._on_writer_removed(topic_name(), info.reliability.kind)
+                    except Exception as ex:  # noqa: BLE001
+                        _network_recovery._emit_log(
+                            _network_recovery.LogLevel.ERROR,
+                            f"deferred-subscriber writer resolution threw: "
+                                f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}",
+                        )
+
+                if cb is None or not (kinds & kind) or owner is None:
+                    # owner is None either because set_owner hasn't run yet (extremely
+                    # tight window between listener construction and the wrapper
+                    # assigning self as owner) or because the wrapper has been garbage-
+                    # collected. Drop the event — there's nothing meaningful the user
+                    # callback could do with a dead participant.
+                    return
+
+                # Still inside the one callback scope opened above. It marks this thread as
+                # running a Fast-DDS listener callback, so any endpoint __del__ fired from
+                # inside the user callback (a dropped strong reference) defers its Fast-DDS
+                # teardown to the reaper rather than self-joining the discovery thread --
+                # the convention the publisher / subscriber listeners follow too.
+                try:
+                    # Convert type_name only now that the callback is known to fire (topic_name()
+                    # reuses the at-most-once conversion above), inside the guard: info.*.to_string()
+                    # can raise (MemoryError, or a SWIG-translated C++ exception), and that must not
+                    # escape the Fast-DDS director callback either.
+                    #
+                    # The reliability / durability kinds are plain enum reads off
+                    # the discovery info — Publication/SubscriptionBuiltinTopicData
+                    # expose them as the public ``reliability`` / ``durability`` QoS
+                    # policy members (offered for a discovered DataWriter, requested
+                    # for a discovered DataReader). They are SWIG attributes (not
+                    # methods — no parentheses), each carrying a ``.kind`` directly
+                    # comparable to the module-level ``*_RELIABILITY_QOS`` /
+                    # ``*_DURABILITY_QOS`` constants. Forwarded as the two trailing
+                    # callback arguments so a recording bridge can match QoS per
+                    # topic. Mirrors the C++ on_discovered_endpoint invoke().
+                    cb(
+                        owner,
+                        topic_name(),
+                        info.type_name.to_string(),
+                        kind,
+                        discovered,
+                        info.reliability.kind,
+                        info.durability.kind,
+                    )
+                except Exception as ex:
+                    # A throwing user callback (or a failed name conversion) must
+                    # not propagate out of the Fast-DDS discovery thread (mirrors
+                    # the C++ logging convention). Log so it's debuggable rather
+                    # than silently dropped.
+                    _network_recovery._emit_log(
+                        _network_recovery.LogLevel.ERROR,
+                        f"on_discovered_endpoint dispatch threw: "
+                            f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}",
+                    )
+            finally:
+                # Release the strong reference INSIDE the scope, explicitly. A
+                # plain function local would not do: on `return` (and on falling
+                # off the end) CPython runs the with-statement's __exit__ first
+                # and only then tears down the frame, so `owner`'s refcount would
+                # reach zero AFTER the depth is back to 0 and __del__ would take
+                # the inline branch on this very thread -- the exact deadlock the
+                # scope exists to prevent. `finally` runs before __exit__, so
+                # dropping the name here keeps the destruction inside the scope on
+                # every path out, including the early return and an exception.
+                owner = None
 
     def on_data_writer_discovery(self, participant, reason, info, should_be_ignored):
         # should_be_ignored is intentionally not assigned: SWIG passes it as an
@@ -645,16 +975,38 @@ def _parse_positive_u32(raw):
 _DEFAULT_UDP_SOCKET_BUFFER_SIZE = 16 * 1024 * 1024
 
 
+# Ceiling on PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE, mirroring max_udp_socket_buffer_size in
+# src/domain_participant.cpp. Not a taste judgement about buffer sizes: Fast-DDS derives the
+# shared-memory segment from this as max(send, listen) x 2 in uint32, so anything above it
+# WRAPS -- 2 GiB lands on a segment_size of 0, and 3 GiB on a real 2 GiB /dev/shm allocation
+# per participant. It applies to the value this layer resolves, whichever route the transports
+# then take: the clamp inside _vpn_excluded_transports_xml covers only the generated-profile
+# route, i.e. only a host that happens to have a tunnel up, and only the derived segment size
+# rather than the four socket-buffer elements beside it.
+_MAX_UDP_SOCKET_BUFFER_SIZE = 0x7FFFFFFF
+
+
 def _resolve_udp_socket_buffer_size():
     """UDP socket send/recv buffer ceiling in bytes (default 16 MiB).
 
     Override via the ``PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE`` env variable. It's a
-    ceiling — the OS clamps it to ``net.core.rmem_max``/``wmem_max``. Mirrors
-    ``src/domain_participant.cpp``.
+    ceiling — the OS clamps it to ``net.core.rmem_max``/``wmem_max`` — and it is itself
+    capped at :data:`_MAX_UDP_SOCKET_BUFFER_SIZE`. Mirrors
+    ``resolve_udp_socket_buffer_size`` in ``src/domain_participant.cpp``.
     """
     raw = os.environ.get("PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE")
     if raw:
         value = _parse_positive_u32(raw)
+        if value and value > _MAX_UDP_SOCKET_BUFFER_SIZE:
+            _network_recovery._emit_log(
+                _network_recovery.LogLevel.WARNING,
+                f"PROVIZIO_DDS_UDP_SOCKET_BUFFER_SIZE="
+                f"'{_network_recovery._sanitise_env_value_for_log(raw)}' exceeds the largest "
+                f"usable value {_MAX_UDP_SOCKET_BUFFER_SIZE} (above it, Fast-DDS's "
+                f"shared-memory segment size overflows and the transport ends up with none); "
+                f"using that instead",
+            )
+            return _MAX_UDP_SOCKET_BUFFER_SIZE
         if value:
             return value
         _network_recovery._emit_log(
@@ -866,7 +1218,8 @@ def _build_deferred_subscriber(subscriber, reliability):
     except Exception as ex:  # noqa: BLE001
         _network_recovery._emit_log(
             _network_recovery.LogLevel.ERROR,
-            f"deferred match-publisher subscriber build failed: {ex}; this subscriber "
+            f"deferred match-publisher subscriber build failed: "
+                f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}; this subscriber "
             f"stays inactive (get_num_matched_publishers returns 0) until the next discovered "
             f"writer on its topic retries the build (or a network-recovery reset rebuilds it)",
         )
@@ -919,6 +1272,540 @@ def _create_participant_with_listener(factory, domain_id, participant_qos, liste
     return participant
 
 
+# How long a listener detach waits for an in-flight callback. ANY finite value is the
+# point: see _detach_participant_listener. Generous enough that a discovery dispatch of
+# ours always finishes inside it, so the bound is never what ends the wait in practice.
+# Mirrors domain_participant::listener_swap_timeout() in src/domain_participant.cpp.
+_LISTENER_SWAP_TIMEOUT_SEC = 30
+
+# Whether this build's fastdds bindings wrap set_listener's timeout overload. Resolved once,
+# on first use, because the answer is a property of the extension module rather than of any
+# participant -- and because probing it per teardown would put a TypeError on the path that
+# runs while the interpreter is shutting down.
+_listener_detach_supported = None
+
+
+def _detach_participant_listener(participant, domain_id):
+    """Detach ``participant``'s listener with a FINITE timeout, before Fast-DDS detaches it
+    with an infinite one.
+
+    ``domain_id`` is only ever used to identify the participant in the timeout warning, and it
+    is passed in rather than read back off ``participant`` because this runs on the teardown
+    path, where a call into a participant mid-destruction is worth avoiding for a log field.
+
+    "Infinite" here is not a blocking wait -- on some standard libraries it is a busy loop
+    that starves the thread it waits for. ``DomainParticipantImpl::set_listener`` waits on a
+    condition variable until no listener callback is executing, and its default timeout of
+    ``std::chrono::seconds::max()`` becomes a deadline of ``steady_clock::time_point::max()``.
+    libstdc++ has a conversion-free ``wait_until`` only for its own ``__clock_t``, which is
+    ``steady_clock`` only when ``_GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT`` is defined (GCC 10+
+    with glibc 2.30+). Below that -- Ubuntu 20.04 / GCC 9, i.e. the jetson-20.04 devices and
+    CI runners -- ``steady_clock`` is a foreign clock and the deadline is converted as
+    ``system_clock::now() + ceil(deadline - steady_clock::now())``, which overflows that far
+    out. The underlying wait returns at once, the re-check against the caller's clock says the
+    deadline has not passed, and the predicate loop goes round again immediately: a spin that
+    also monopolises the mutex the callback needs in order to finish, so it withholds the very
+    thing that would end it. Measured by driving that same conversion path deliberately (a
+    clock libstdc++ must convert, so the arithmetic is identical on any version): 93 million
+    predicate evaluations in 5 seconds, and the callback thread never acquired the mutex in
+    4.7 of them, where a finite deadline needed 2 evaluations and 300 ms.
+
+    ``DomainParticipantFactory::delete_participant`` reaches that default through
+    ``DomainParticipantImpl::disable()``, which calls the one-argument ``set_listener(nullptr)``.
+    Detaching here first, with a finite timeout, takes libstdc++'s ordinary blocking path --
+    and once it returns, no new callback can start, so ``disable()``'s own infinite wait finds
+    its predicate already true and never enters the loop.
+
+    Mirrors ``domain_participant::detach_participant_listener`` in src/domain_participant.cpp.
+
+    Temporary, and not alone: this, that, and the SWIG patch in CMakeLists.txt that makes the
+    timeout overload callable at all exist only to keep Fast-DDS' unbounded deadline from
+    being reached. The defect is reported to eProsima; when a Fast-DDS release stops building
+    that deadline, all three retire together -- see the note on the patch in CMakeLists.txt
+    for how to tell, and why a green CI run is not the way.
+
+    Safe with respect to the listener's own lifetime, and in fact tidier than not doing it.
+    The wrapped ``set_listener`` INCREFs the incoming listener and DECREFs the outgoing one,
+    so detaching here releases the reference C++ took when the listener was attached --
+    which nothing released before, because the detach inside Fast-DDS' ``disable()`` is an
+    internal C++ call that never passes through the binding. The participant holds
+    ``self._discovery_listener`` throughout either way, so the object cannot be freed early;
+    on a network-recovery reset the same listener is then re-attached to the new participant,
+    INCREFing it again, so the two now balance instead of accumulating one reference per
+    reset.
+
+    Best-effort by design: a participant that cannot be quiesced must still be deleted, so
+    every failure here falls through to the deletion the caller is about to do. That is what
+    the code did before this existed."""
+    global _listener_detach_supported
+    if participant is None or _listener_detach_supported is False:
+        return
+    try:
+        detached = participant.set_listener(None, StatusMask.none(), _LISTENER_SWAP_TIMEOUT_SEC)
+        # The overload answered, so these bindings carry it, whatever the outcome was.
+        _listener_detach_supported = True
+        if detached != RETCODE_OK:
+            # The bounded wait expired: a listener callback is still running after the whole
+            # timeout. What happens next is the thing this function exists to prevent --
+            # delete_participant reaches Fast-DDS' own detach with its infinite deadline and
+            # busy-loops on it -- and without this line an operator watching a core pegged
+            # inside participant destruction has nothing whatever to go on. Mirrors the
+            # warning domain_participant::detach_participant_listener emits for the same
+            # return, in the same words including the domain, because it is the same event on
+            # the same topic seen from the other binding -- and the domain is the only field
+            # that says WHICH participant is about to peg a core, which matters because a
+            # network-recovery reset recreates participants and a process can hold several.
+            _network_recovery._emit_log(
+                _network_recovery.LogLevel.WARNING,
+                f"a participant listener callback on domain {domain_id} has not returned "
+                f"within {_LISTENER_SWAP_TIMEOUT_SEC} s; participant destruction will block "
+                f"until it does. Discovery callbacks must not block and must not create "
+                f"publishers / subscribers / services.",
+            )
+    except TypeError:
+        # Bindings without the timeout overload -- an externally built fastdds module, since
+        # provizio_dds patches its own to carry it (see CMakeLists.txt). Deliberately NOT
+        # retried through the two-argument form: that one carries the infinite default, so it
+        # would move the spin from Fast-DDS' teardown to ours rather than remove it, and
+        # skipping leaves exactly the behaviour these bindings had before.
+        _listener_detach_supported = False
+    except Exception:
+        # Anything else (a participant already being torn down, a Fast-DDS error) is not worth
+        # failing a teardown over, and says nothing about the binding, so the answer above is
+        # left unresolved rather than latched to False.
+        pass
+
+
+# Fast-DDS' DomainParticipantFactory.load_profiles() auto-loads this file from the
+# working directory, in addition to whatever FASTDDS_DEFAULT_PROFILES_FILE names —
+# unless SKIP_DEFAULT_XML_FILE is "1", which switches that auto-load off
+# (XMLProfileManager::loadDefaultXMLFile). Keep both in sync with
+# src/domain_participant.cpp.
+_DEFAULT_FASTDDS_PROFILES_FILE_NAME = "DEFAULT_FASTDDS_PROFILES.xml"
+_SKIP_DEFAULT_XML_FILE_ENV = "SKIP_DEFAULT_XML_FILE"
+
+# Whether a DEFAULT_FASTDDS_PROFILES.xml in the WORKING DIRECTORY is what configured the
+# transports. Resolved once per process and cached, because that is when Fast-DDS decides it
+# too: load_profiles() reads the working directory on its FIRST call only and ignores every
+# later one, so the file state at that moment is the state that actually took effect.
+# Recomputing per creation would let a network-recovery rebuild disagree with what Fast-DDS
+# loaded, in both directions — a file deleted (or a chdir) after startup would make the
+# rebuild believe the caller owns nothing and hand the whole QoS to our generated profile,
+# discarding the caller's discovery configuration; a file created after startup would stop
+# the exclusion over a profile Fast-DDS never read.
+#
+# Deliberately NOT the whole answer: a profile named by FASTDDS_DEFAULT_PROFILES_FILE is a
+# per-participant fact and is re-read on every call — see
+# _xml_profile_owns_transports. Mirrors the working-directory half of
+# transports_come_from_user_xml in src/domain_participant.cpp.
+_xml_profile_owns_transports_cache: "Optional[bool]" = None
+# The working-directory profile resolved to an ABSOLUTE path, captured in the same breath as
+# the answer above and for the same reason. The decision is cached because it is made once,
+# at the process' first load_profiles(); returning the bare relative name alongside it would
+# undo that, because an os.chdir afterwards makes the same name a DIFFERENT file -- and the
+# one consumer, the loopback-confinement check, would then read a profile Fast-DDS never
+# loaded and could switch auto-recovery off for a participant that is not confined at all.
+_working_directory_profile_path: "Optional[str]" = None
+_xml_profile_owns_transports_lock = threading.Lock()
+
+
+def _owning_xml_profile_path(xml_profiles_env_variable: str) -> "Optional[str]":
+    """The XML profiles file that configured the transports, when one did (see
+    :func:`_xml_profile_owns_transports`): the file ``FASTDDS_DEFAULT_PROFILES_FILE`` names,
+    else the ``DEFAULT_FASTDDS_PROFILES.xml`` of the working directory, else ``None``."""
+    if not _xml_profile_owns_transports(xml_profiles_env_variable):
+        return None
+    path = os.environ.get(xml_profiles_env_variable)
+    if bool(path) and os.path.isfile(path):
+        return path
+    # The absolute path captured when the answer was cached, not the bare name -- see
+    # _working_directory_profile_path.
+    return _working_directory_profile_path
+
+
+def _xml_profile_owns_transports(xml_profiles_env_variable: str) -> bool:
+    """Whether an XML profile the caller supplied is what configured the transports —
+    the profile named by ``FASTDDS_DEFAULT_PROFILES_FILE``, or a
+    ``DEFAULT_FASTDDS_PROFILES.xml`` that ``load_profiles()`` auto-loaded from the
+    working directory.
+
+    Only the working-directory half is resolved once, on the first call, which always lands
+    immediately after the process' first ``load_profiles()``; see
+    :data:`_xml_profile_owns_transports_cache` for why that half must not be re-derived
+    later. The env-named profile is a per-participant fact, so it is re-read every call:
+    folding it into the cache made the first participant's answer bind every later one, in
+    both directions -- a participant created after the variable was set would still have
+    been told the transports were this library's to rewrite, and one created after a first
+    participant that HAD it set would skip the exclusion for good."""
+    global _xml_profile_owns_transports_cache
+
+    path = os.environ.get(xml_profiles_env_variable)
+    if bool(path) and os.path.isfile(path):
+        return True
+
+    global _working_directory_profile_path
+
+    with _xml_profile_owns_transports_lock:
+        if _xml_profile_owns_transports_cache is None:
+            _xml_profile_owns_transports_cache = not os.environ.get(
+                _SKIP_DEFAULT_XML_FILE_ENV, ""
+            ).startswith("1") and os.path.isfile(_DEFAULT_FASTDDS_PROFILES_FILE_NAME)
+            if _xml_profile_owns_transports_cache:
+                # Pinned to the directory Fast-DDS read it from, before any later chdir can
+                # make the same name mean another file.
+                _working_directory_profile_path = os.path.abspath(
+                    _DEFAULT_FASTDDS_PROFILES_FILE_NAME
+                )
+        return _xml_profile_owns_transports_cache
+
+def _sanitised_interface_list(entries) -> str:
+    """``entries`` joined for a log line, each one sanitised first.
+
+    Every interface identity this library echoes goes through here, for the reason a rejected
+    environment value does: the text comes from the OS, and on Windows an adapter's friendly
+    name is administrator-settable and far less constrained than a POSIX device name, which
+    the kernel already refuses to give whitespace or control characters. An unsanitised one
+    can flood the log or forge lines in whatever ingests it. Shared rather than written out
+    per site because two of the three sites had it and one did not, which is how they came to
+    disagree about the same values."""
+    return ", ".join(_network_recovery._sanitise_env_value_for_log(entry) for entry in entries)
+
+
+_VPN_TRANSPORTS_PROFILE_PREFIX = "provizio_dds_vpn_excluded_transports"
+# Ceiling on how many distinct transport profiles one process may register. Fast-DDS
+# keeps XML profiles and transport descriptors in a process-wide registry with no way
+# to unload one, so every genuinely new blocked-address set costs a permanent entry.
+# One is normally all a process ever needs — a tunnel address is stable — but a VPN
+# that reconnects onto a new address each time would otherwise grow the registry for
+# the life of the process. 64 is far beyond any legitimate churn while still bounded;
+# past it the participant falls back to the default transports with a warning, which
+# reinstates the duplicate-traffic behaviour but is at least loud about it. Stale sets
+# are deliberately NOT merged into one ever-growing blocklist: an address that has left
+# the host can be handed to a real interface later, and blocking it then would break
+# real DDS traffic.
+_VPN_TRANSPORTS_PROFILE_LIMIT = 64
+# The FASTDDS_BUILTIN_TRANSPORTS value this library itself put in the environment, if
+# any. Needed to tell "the caller configured transports, leave them alone" from "an
+# earlier participant of ours pinned the default", which look identical in os.environ.
+_builtin_transports_set_by_library: "Optional[str]" = None
+# Guards the read-the-variable / setdefault / remember-what-we-set sequence below as one
+# step. Without it, two threads constructing participants with different transport modes
+# near process start both read the variable as absent, os.environ.setdefault fixes it to
+# whichever of them ran first, and the loser then records ITS value here -- after which a
+# later participant compares the environment against a value nobody set, concludes the
+# caller owns the transports and silently skips the VPN exclusion.
+_builtin_transports_lock = threading.Lock()
+_vpn_transports_profiles: dict = {}
+_vpn_transports_profiles_lock = threading.Lock()
+# Whether the ceiling below has already been reported. A flag rather than a cache
+# entry per refused configuration: once the ceiling is reached it is permanent for the
+# process, so remembering every set refused afterwards would grow
+# _vpn_transports_profiles without bound on a tunnel that reconnects onto a new address
+# each time — and would repeat a warning whose remedy never changes.
+_vpn_transports_profile_limit_warned = False
+
+
+def _caller_configured_transports(factory: "DomainParticipantFactory") -> bool:
+    """Whether the process' default participant QoS already carries transports the caller
+    configured.
+
+    This is the one form of caller ownership that is visible in the QoS itself rather than
+    inferred from the environment: ``load_XML_profiles_file`` / ``load_XML_profiles_string``
+    with a default participant profile puts their descriptors there (once
+    ``load_profiles()`` has run, which this library does before building any QoS), and no
+    environment variable or working-directory probe can see it. Fast-DDS' own default
+    carries no descriptors and leaves ``use_builtin_transports`` true, so either signal
+    means the transports are not this library's to replace.
+
+    An unreadable default QoS is reported as caller-owned: the safe answer is to leave
+    the transports alone rather than guess."""
+    qos = DomainParticipantQos()
+    if factory.get_default_participant_qos(qos) != RETCODE_OK:
+        return True
+    transport_config = qos.transport()
+    return len(transport_config.user_transports) > 0 or not transport_config.use_builtin_transports
+
+
+def _transports_selection(value: str) -> str:
+    """The transport SET a FASTDDS_BUILTIN_TRANSPORTS value selects, without its options.
+
+    ``TransportMode`` decides which set is in force — shared memory alongside UDP, or UDP
+    alone — and nothing else about the value, so this is the part of it that has to match
+    for a request to have been honoured. Options of ours that a caller's value does not
+    carry (the socket buffer sizes) are not a contradiction of the request: they set the
+    variable themselves, and their choice is documented as the one that wins."""
+    return value.split("?", 1)[0]
+
+
+def _shared_memory_in_transports_value(value: str) -> bool:
+    """Whether a FASTDDS_BUILTIN_TRANSPORTS value selects a transport set that includes
+    shared memory.
+
+    Only values :meth:`_DomainParticipant._builtin_transports_value` produces are ever
+    passed here — ``DEFAULT?...`` or ``UDPv4?...`` — so the selection decides it. A value
+    the caller set is never classified: that case is answered earlier, by refusing to
+    touch their transport selection at all."""
+    return _transports_selection(value) == "DEFAULT"
+
+
+def _vpn_excluded_transports_xml(
+    use_shared_memory: bool,
+    sockets_size: int,
+    blocked_addresses: "Collection[str]",
+    allowed: "Optional[List[Tuple[str, bool]]]" = None,
+    profile_name: str = _VPN_TRANSPORTS_PROFILE_PREFIX,
+    shm_transport_id: str = f"{_VPN_TRANSPORTS_PROFILE_PREFIX}_shm",
+    udp_transport_id: str = f"{_VPN_TRANSPORTS_PROFILE_PREFIX}_udpv4",
+) -> str:
+    """An XML profiles document defining the transports FASTDDS_BUILTIN_TRANSPORTS
+    would have produced, plus an interface blocklist for ``blocked_addresses``.
+
+    Why XML rather than the env variable used everywhere else: the SWIG bindings
+    expose neither ``setup_transports()`` nor the concrete transport descriptors, so
+    there is no way to reach ``interface_blocklist`` from Python — but
+    ``load_XML_profiles_string`` is exposed, and an XML transport descriptor can
+    express the blocklist. This function therefore has to reproduce what
+    ``setup_transports(DEFAULT | UDPv4, {sockets_buffer_size})`` builds in
+    RTPSParticipantAttributes.cpp:
+
+      - UDPv4 with sendBufferSize == receiveBufferSize == sockets_size, and the
+        participant's own socket buffer sizes set to the same value;
+      - on Linux (shared memory in play), an SHM transport FIRST — the order
+        setup_transports uses — with segment_size = max(send, listen) * 2, Fast-DDS's
+        "UDP doubles the socket buffer in kernel" equivalence.
+
+    Everything else (discovery timing, the fastdds.max_message_size property) is
+    applied to the resulting QoS in Python exactly as on the env-variable path, so it
+    stays in one place. Mirrors ``refresh_vpn_interface_blocklist`` in
+    src/domain_participant.cpp, which does the same job by editing the descriptors
+    the C++ ``setup_transports`` left behind — including the ``netmask_filter``, which
+    is not optional alongside a blocklist: any non-empty interface list puts UDPv4 into
+    whitelist mode, and whitelist mode replaces the single any-address output socket
+    with one socket per remaining interface, each of which sends every unicast datagram.
+    ``ON`` is what makes each destination the business of the one socket whose subnet
+    contains it; without it the blocklist would move the duplicate traffic from the
+    tunnel onto the LAN instead of removing it."""
+    # Materialised once: a generator argument would be consumed by the first pass and
+    # silently yield an empty blocklist afterwards.
+    # Falsy entries dropped defensively: Fast-DDS rejects <interface name=""/> and
+    # fails the WHOLE document, which would silently take the tunnel-carrying path. Both
+    # backends already guard against empty names and addresses, so this is belt and
+    # braces for a future caller.
+    entries = sorted({entry for entry in blocked_addresses if entry})
+    # quoteattr() escapes and quotes each value. Today every entry is an interface
+    # name or a socket.inet_ntop() result, neither of which can contain XML
+    # metacharacters — but an unescaped attribute in a generated document is exactly
+    # the kind of thing that stops being true later, and a malformed document would
+    # fail to load and silently take the tunnel-carrying path.
+    blocklist_entries = "\n".join(
+        f"                    <interface name={quoteattr(entry)}/>" for entry in entries
+    )
+    # Fast-DDS parses segment_size as uint32, and sockets_size may legitimately be up
+    # to 0xFFFFFFFF (see _parse_positive_u32), so the doubling has to be clamped:
+    # an out-of-range value would make the whole document fail to parse, which is the
+    # one failure mode that silently reinstates the duplicate traffic.
+    segment_size = min(sockets_size * 2, 0xFFFFFFFF)
+    shm_descriptor = ""
+    shm_user_transport = ""
+    if use_shared_memory:
+        shm_descriptor = f"""        <transport_descriptor>
+            <transport_id>{shm_transport_id}</transport_id>
+            <type>SHM</type>
+            <segment_size>{segment_size}</segment_size>
+        </transport_descriptor>
+"""
+        shm_user_transport = f"                <transport_id>{shm_transport_id}</transport_id>\n"
+
+    # Netmask filtering, decided PER INTERFACE, because the interfaces this leaves behind
+    # need opposite answers. Any non-empty interface list turns Fast-DDS' single
+    # any-address output socket into one socket per allowed interface, and every one of
+    # them sends unless its own filter says otherwise.
+    #
+    # LOOPBACK is in that set (nothing blocks it, and it is how same-host participants
+    # reach each other where shared memory is off) and cannot carry a datagram to another
+    # host at all, so every attempt it makes at one costs a failed sendto and a Fast-DDS
+    # warning -- per datagram. ON stops that with nothing lost.
+    #
+    # A REAL interface is the opposite: ON there means a peer outside its subnet silently
+    # receives nothing (eProsimaUDPSocket::should_filter), so it is worth switching on only
+    # where two or more real interfaces would each send their own copy. Mirrors
+    # refresh_vpn_interface_blocklist in src/domain_participant.cpp.
+    # Read here only when the caller did not: the profile CACHE keys on this same
+    # reading, and a second walk could see a different host -- keying on one state while
+    # generating a document for another.
+    if allowed is None:
+        allowed = _network_recovery.allowed_interfaces(blocked_addresses)
+    filter_real_interfaces = (
+        sum(1 for _address, is_loopback in allowed if not is_loopback) > 1
+    )
+    # Written only alongside a non-empty blocklist: an allowlist ALONE would put UDPv4 into
+    # whitelist mode, costing the any-address socket for no reason. Empty when the host
+    # could not be read, since an allowlist matching nothing leaves Fast-DDS' whitelist
+    # empty and it then fills it with a sentinel that allows nothing through.
+    allowlist_entries = ""
+    if entries and allowed:
+        allowlist_entries = "\n".join(
+            f"                    <interface name={quoteattr(address)}"
+            f' netmask_filter="{"ON" if is_loopback or filter_real_interfaces else "AUTO"}"/>'
+            for address, is_loopback in sorted(allowed)
+        )
+        allowlist_entries = (
+            "                <allowlist>\n" + allowlist_entries + "\n                </allowlist>\n"
+        )
+
+    return f"""<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com">
+    <transport_descriptors>
+{shm_descriptor}        <transport_descriptor>
+            <transport_id>{udp_transport_id}</transport_id>
+            <type>UDPv4</type>
+            <sendBufferSize>{sockets_size}</sendBufferSize>
+            <receiveBufferSize>{sockets_size}</receiveBufferSize>
+            <netmask_filter>AUTO</netmask_filter>
+            <interfaces>
+{allowlist_entries}                <blocklist>
+{blocklist_entries}
+                </blocklist>
+            </interfaces>
+        </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="{profile_name}">
+        <rtps>
+            <userTransports>
+{shm_user_transport}                <transport_id>{udp_transport_id}</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+            <sendSocketBufferSize>{sockets_size}</sendSocketBufferSize>
+            <listenSocketBufferSize>{sockets_size}</listenSocketBufferSize>
+        </rtps>
+    </participant>
+</profiles>
+"""
+
+
+def _vpn_excluded_transports_profile(
+    factory: "DomainParticipantFactory",
+    use_shared_memory: bool,
+    sockets_size: int,
+    blocked_addresses: "Collection[str]",
+    allowed: "Optional[List[Tuple[str, bool]]]" = None,
+    pending_logs: "Optional[List[Tuple[Any, str, bool]]]" = None,
+) -> "Optional[str]":
+    """Name of a loaded XML profile carrying the VPN-excluding transports, or ``None``
+    if one could not be provided — the caller then falls back to the default
+    transports (today's behaviour) rather than failing to create a participant.
+
+    Resolved once per distinct configuration and cached, including failures: Fast-DDS
+    keeps transport ids and profile names in a process-wide registry and logs an error
+    when one is re-registered, so re-loading the same document on every participant
+    creation (and every network-recovery rebuild) would be pure noise. A configuration
+    that genuinely changes — a tunnel appearing or going away — gets its own profile,
+    up to :data:`_VPN_TRANSPORTS_PROFILE_LIMIT` of them."""
+    global _vpn_transports_profile_limit_warned
+
+    # The allowed interfaces are part of the KEY, not just of the generated document.
+    # The profile bakes in one <interface> entry per allowed address together with the
+    # netmask filter that address needs, so two hosts states that block the same tunnel
+    # but differ in what is left -- Wi-Fi associating after startup, a second NIC coming
+    # up -- must not share a cache entry. Keyed on the blocked set alone, the later state
+    # would be handed the earlier state's document: stale addresses in the allowlist, and
+    # a filter decision taken when there was nothing yet to duplicate across. That is the
+    # duplication this feature exists to remove, reinstated on the LAN. The C++ side has
+    # no equivalent staleness because refresh_vpn_interface_blocklist recomputes the
+    # descriptors on every creation.
+    # The caller's reading of what the transports are left with, so that a failed read
+    # was told apart from "nothing left" BEFORE this document is built (see
+    # _resolve_transports_body, the one production caller, which always passes it). The
+    # fallback read is for direct callers, the tests above all, and performs no such
+    # check itself.
+    if allowed is None:
+        allowed = _network_recovery.allowed_interfaces(blocked_addresses)
+    key = (
+        use_shared_memory,
+        sockets_size,
+        frozenset(blocked_addresses),
+        frozenset(allowed),
+    )
+    entries = sorted(set(blocked_addresses))
+    warning: "Optional[str]" = None
+
+    with _vpn_transports_profiles_lock:
+        if key in _vpn_transports_profiles:
+            # Cached, and a cached None means "already tried and warned about".
+            return _vpn_transports_profiles[key]
+
+        if len(_vpn_transports_profiles) >= _VPN_TRANSPORTS_PROFILE_LIMIT:
+            # Deliberately NOT cached, unlike the load failure below: that one consumes
+            # one of the limited slots and so is self-bounding, whereas every set
+            # refused here would be a new entry for a tunnel that reconnects onto a new
+            # address each time — an unbounded dict keyed by whatever the network
+            # hands us. Nothing is lost by forgetting them: from here on the answer is
+            # None for every configuration alike, and the flag below carries the
+            # once-only duty the cached None used to.
+            if not _vpn_transports_profile_limit_warned:
+                _vpn_transports_profile_limit_warned = True
+                warning = (
+                    f"{_VPN_TRANSPORTS_PROFILE_LIMIT} distinct VPN / tunnel interface "
+                    f"sets have been seen in this process, which is the ceiling on "
+                    f"transport profiles Fast-DDS can be given (it cannot unload one). "
+                    f"From now on participants keep the default transports, so they "
+                    f"WILL bind and announce every tunnel address -- starting with "
+                    f"{_sanitised_interface_list(entries)}. Restart the process to resume excluding "
+                    f"tunnels, or set "
+                    f"{_network_recovery._ALLOW_VPN_INTERFACES_ENV} if that is intended"
+                )
+            profile_name = None
+        else:
+            profile_name = (
+                f"{_VPN_TRANSPORTS_PROFILE_PREFIX}_{len(_vpn_transports_profiles)}"
+            )
+            xml = _vpn_excluded_transports_xml(
+                use_shared_memory=use_shared_memory,
+                sockets_size=sockets_size,
+                blocked_addresses=entries,
+                # The same reading the key above was built from, so the cached document
+                # and the entry it is filed under can never describe different hosts.
+                allowed=allowed,
+                profile_name=profile_name,
+                shm_transport_id=f"{profile_name}_shm",
+                udp_transport_id=f"{profile_name}_udpv4",
+            )
+            # load_XML_profiles_string reports RETCODE_OK even for a document Fast-DDS
+            # rejected (a duplicate transport id only logs), so the load is verified by
+            # asking for the profile back — that is the call whose failure would
+            # otherwise leave a bare, unconfigured QoS behind. The length is in bytes,
+            # not characters, which only differ if a non-ASCII interface name ever
+            # reaches the document.
+            probe = DomainParticipantQos()
+            if (
+                factory.load_XML_profiles_string(xml, len(xml.encode("utf-8"))) != RETCODE_OK
+                or factory.get_participant_qos_from_profile(profile_name, probe) != RETCODE_OK
+            ):
+                _vpn_transports_profiles[key] = None
+                warning = (
+                    "could not load the generated transport profile that excludes VPN "
+                    "interfaces; this participant will bind and announce "
+                    f"{_sanitised_interface_list(entries)} as before, and will keep doing so for the "
+                    f"life of this process (set "
+                    f"{_network_recovery._ALLOW_VPN_INTERFACES_ENV} to silence this)"
+                )
+                profile_name = None
+            else:
+                _vpn_transports_profiles[key] = profile_name
+
+    # Deliberately outside the lock: _emit_log calls the user's log callback, and anything
+    # it does that re-enters this function -- creating a participant is the obvious way --
+    # deadlocks on a non-reentrant Lock. The participant that calls
+    # this from under its OWN lifecycle locks hands in its pending list instead, and
+    # emits the line once those are released; a direct caller gets it emitted here.
+    if warning is not None:
+        if pending_logs is not None:
+            pending_logs.append((_network_recovery.LogLevel.WARNING, warning, False))
+        else:
+            _network_recovery._emit_log(_network_recovery.LogLevel.WARNING, warning)
+    return profile_name
+
+
 class TransportMode(Enum):
     """Network transport selection for :func:`make_domain_participant`, mirroring the
     C++ ``provizio::dds::transport_mode``. Controls only whether shared memory is used
@@ -929,6 +1816,10 @@ class TransportMode(Enum):
     ``FASTDDS_BUILTIN_TRANSPORTS`` env variable (the SWIG bindings expose no
     per-participant transport API), so the first participant created in a process fixes
     the transport for the whole process, and an externally-set value is always honoured.
+
+    That env variable selects a transport stack but cannot express an interface
+    allowlist, so the C++ enum's ``localhost_only`` has no counterpart here: confining a
+    participant to loopback needs per-descriptor configuration this layer cannot reach.
     """
 
     #: Platform default: SHM + UDPv4 on Linux; UDPv4-only on Windows/macOS (where shared
@@ -937,6 +1828,156 @@ class TransportMode(Enum):
     #: UDPv4-only (shared memory disabled) on every platform. For participants bridging
     #: mismatched Fast-DDS major versions (e.g. a recorder relaying 2.x publishers).
     UDP_ONLY = 1
+
+
+# Fast-DDS's well-known port mapping (the RTPS defaults): domain d owns UDP ports
+# 7400 + 250 * d .. + 249. provizio_dds never changes these; an XML profile could, in which
+# case the numbers in the warning describe the default mapping rather than that profile's.
+# Mirrors src/domain_participant.cpp.
+_RTPS_PORT_BASE = 7400
+_RTPS_DOMAIN_GAIN = 250
+
+
+_HIGHEST_PORT = 65535
+# Where the IANA dynamic range starts, and what Windows and macOS actually use.
+_IANA_DYNAMIC_PORT_START = 49152
+# Linux's compiled-in default for net.ipv4.ip_local_port_range, used when the sysctl cannot
+# be read or does not say something a port range can mean.
+_LINUX_DEFAULT_PORT_RANGE_START = 32768
+_LINUX_PORT_RANGE_SYSCTL = "/proc/sys/net/ipv4/ip_local_port_range"
+# The file holds two decimal numbers and a newline -- 12 bytes on any plausible host. Read a
+# bounded prefix rather than the whole file: this is the only reader of the pair that would
+# otherwise consume unbounded memory if the path is not the kernel's file (a masked or
+# bind-mounted /proc in a container, a chroot, a symlink to /dev/zero), where the C++ twin
+# extracts exactly two tokens and stops.
+_PORT_RANGE_READ_BYTES = 64
+# Two whitespace-separated runs of ASCII digits, each with an optional leading '+', and
+# nothing else before them. Shaped to accept exactly what the C++ twin's `istream >>` into a
+# uint32 accepts and no more: \s because >> skips any whitespace including a newline, the
+# optional '+' because >> takes one, and no '-' because a minus must be REJECTED rather than
+# range-checked away (>> wraps it into a huge unsigned, which the bounds below then reject --
+# same verdict by a different route). int() alone would be looser still: it takes "1_0" as 10
+# under PEP 515.
+_PORT_RANGE_PATTERN = re.compile(r"^\s*\+?([0-9]+)\s+\+?([0-9]+)")
+
+
+def _linux_dynamic_port_range() -> "Optional[Tuple[int, int]]":
+    """This host's ``net.ipv4.ip_local_port_range`` as ``(first, last)``, or ``None`` when it
+    cannot be read or does not describe a usable range.
+
+    Both bounds are validated together -- ``0 < first <= last <= 65535`` -- so a caller cannot
+    end up trusting one half of a reading whose other half was nonsense, nor a start above its
+    own end. One read, not two, for the same reason. Mirrors ``dynamic_port_range()`` in
+    src/domain_participant.cpp, which returns the pair and applies the same bounds; the two
+    were separate reads with separate, looser checks on both sides until this was written.
+
+    One deliberate difference remains: this refuses a reading whose last digit sits exactly on
+    the read boundary, where the C++ (whose ``>>`` reads token by token and so needs no cap)
+    would consume it. It takes 55 leading spaces before a real pair to reach that, which is not
+    a file the kernel writes; the cap is worth more than the equivalence, since it is the only
+    thing standing between this and reading an unbounded /proc that is not the kernel's."""
+    try:
+        with open(_LINUX_PORT_RANGE_SYSCTL, encoding="ascii") as sysctl:
+            text = sysctl.read(_PORT_RANGE_READ_BYTES)
+    except (OSError, ValueError):
+        return None
+    match = _PORT_RANGE_PATTERN.match(text)
+    if match is None:
+        return None
+    if match.end() == len(text) == _PORT_RANGE_READ_BYTES:
+        # The second number ends exactly where the read stopped, so it may have been cut in
+        # half -- and a cut number still parses. "<55 spaces>1024 60999" would otherwise yield
+        # 6099, a plausible value that is not what the file says. Refuse the reading instead;
+        # the fallback is the compiled-in default, which is at least true of some host.
+        return None
+    first = int(match.group(1))
+    last = int(match.group(2))
+    if 0 < first <= last <= _HIGHEST_PORT:
+        return first, last
+    return None
+
+
+def _dynamic_port_range_start() -> int:
+    """Where this OS's dynamic (ephemeral) port range begins -- the ports it hands out to any
+    socket that binds without asking for one, and on Windows also the ones Hyper-V / WinNAT
+    reserve. The IANA range from 49152 on Windows and macOS; on Linux a sysctl
+    (net.ipv4.ip_local_port_range, 32768 by default), read here so a host that tuned it is
+    judged by what it actually does."""
+    if sys.platform in ("win32", "darwin"):
+        return _IANA_DYNAMIC_PORT_START
+    port_range = _linux_dynamic_port_range()
+    return port_range[0] if port_range is not None else _LINUX_DEFAULT_PORT_RANGE_START
+
+
+def _dynamic_port_range_end() -> int:
+    """The LAST port of this OS's dynamic range.
+
+    Read as well as the start, because the range has a top and Linux's default one does not
+    reach 65535: /proc/sys/net/ipv4/ip_local_port_range is "32768 60999" on a stock host, so
+    treating the range as "the start and up" warned about every domain from 215 to 231 --
+    whose ports sit ENTIRELY ABOVE the ephemeral range and are therefore the safest a 16-bit
+    port can be. A warning that is factually wrong about the host it is describing is worse
+    than none. Windows and macOS genuinely do run to 65535."""
+    if sys.platform in ("win32", "darwin"):
+        return _HIGHEST_PORT
+    port_range = _linux_dynamic_port_range()
+    return port_range[1] if port_range is not None else _HIGHEST_PORT
+
+
+def _highest_domain_below_dynamic_ports(range_start: int) -> int:
+    """The highest DDS domain whose UDP ports all stay below this OS's dynamic port range:
+    100 on Linux with the default range, 166 on Windows and macOS.
+
+    A domain above it is not an error -- Fast-DDS moves a participant whose port is taken to
+    the next one -- but it does so silently, and peers that look for the participant by
+    unicast initial peers probe the ports its domain and participant index imply, so a
+    participant that has moved far enough is never found. That is a hazard the caller cannot
+    observe, hence the warning at construction. -1 when even domain 0 lies inside the range
+    (nothing a domain choice can fix)."""
+    if range_start <= _RTPS_PORT_BASE:
+        return -1
+    return (range_start - _RTPS_PORT_BASE) // _RTPS_DOMAIN_GAIN - 1
+
+
+def _warn_if_domain_ports_in_dynamic_range(domain_id: int) -> None:
+    """Report, at WARNING, a domain whose ports fall in the OS's dynamic port range.
+
+    Worth a line at every creation on such a domain, because what it warns of leaves no other
+    trace: a taken port costs nothing visible at creation, only a peer that never appears. The
+    advice is cross-platform on purpose -- 100 is the Linux limit and holds everywhere -- so a
+    domain chosen on one OS keeps working on the others. Skipped when even domain 0 is inside
+    the range: then no domain choice helps and the advice would be wrong."""
+    # ONE reading for both ends, as dynamic_port_range() does in C++. Calling the two
+    # accessors here would read the sysctl twice, and a rewrite between them could hand this a
+    # start from the file and an end from the fallback -- a range the host never had. The two
+    # accessors stay for callers that genuinely want one end.
+    port_range = _linux_dynamic_port_range() if sys.platform not in ("win32", "darwin") else None
+    if port_range is not None:
+        range_start, range_end = port_range
+    else:
+        range_start = (
+            _IANA_DYNAMIC_PORT_START
+            if sys.platform in ("win32", "darwin")
+            else _LINUX_DEFAULT_PORT_RANGE_START
+        )
+        range_end = _HIGHEST_PORT
+    highest_safe = _highest_domain_below_dynamic_ports(range_start)
+    first_port = _RTPS_PORT_BASE + _RTPS_DOMAIN_GAIN * domain_id
+    last_port = first_port + _RTPS_DOMAIN_GAIN - 1
+    # An OVERLAP test, not "at or above the start": the range has a top, and a domain whose
+    # ports all sit above it is the safest a 16-bit port can be. Mirrors the C++ check.
+    if highest_safe < 0 or not (last_port >= range_start and first_port <= range_end):
+        return
+    _network_recovery._emit_log(
+        _network_recovery.LogLevel.WARNING,
+        f"DDS domain {domain_id} maps to UDP ports {first_port}-{last_port} "
+        f"(Fast-DDS's default port mapping), overlapping this OS's dynamic port range "
+        f"({range_start}-{range_end}), where any of them may already be taken (Windows reserves whole blocks of them for "
+        f"Hyper-V). A participant whose port is taken moves to another one silently; peers that look "
+        f"for it by unicast initial peers may then never find it, and even with multicast discovery "
+        f"its ports keep colliding with the OS's own use. Prefer a domain of 100 or below, whose ports "
+        f"stay out of the dynamic range on every platform (see Choosing a domain id in DETAILS.md).",
+    )
 
 
 def make_domain_participant(domain_id: int = 0,
@@ -1043,51 +2084,613 @@ def make_domain_participant(domain_id: int = 0,
             kind = "UDPv4" if disable_shm else "DEFAULT"
             return f"{kind}?sockets_size={_resolve_udp_socket_buffer_size()}"
 
-        def __init__(self, domain_id, initial_discovery_callback=None,
-                     initial_discovery_kinds=None, transport=TransportMode.AUTOMATIC):
-            self._cleaned_up = False
-            self._domain_id = domain_id
+        def _resolve_transports(
+            self, factory: "DomainParticipantFactory", transport: "TransportMode"
+        ) -> "Optional[str]":
+            """Decide how this participant's transports are configured, and return the
+            name of a loaded XML profile carrying them — or ``None`` to use Fast-DDS's
+            own builtin-transport setup driven by FASTDDS_BUILTIN_TRANSPORTS.
 
-            # Set before create_participant so Fast-DDS picks it up. FASTDDS_BUILTIN_TRANSPORTS
-            # is process-global, so the FIRST participant (or an external setting) fixes it for
-            # every later one — unlike C++, which applies transports per-participant via
-            # setup_transports(). When the caller explicitly asked for a non-AUTOMATIC transport
-            # but the env var is already set to a different value, that request will be silently
-            # ignored (e.g. a UDP_ONLY participant created to dodge SHM still inherits SHM), so
-            # warn rather than mislead. AUTOMATIC means "no preference" — never warn for it.
+            The profile route is taken only when the host has a VPN / tunnel interface
+            to keep out of the transports (see
+            :func:`network_recovery.vpn_interface_blocklist_entries`), because that is the one
+            thing the env variable cannot express. Hosts without a VPN therefore keep
+            byte-for-byte today's configuration path, and the new one is exercised only
+            where it is needed.
+
+            Re-resolved before every participant creation, including a
+            network-recovery rebuild: a tunnel can come up, go down or change address
+            while the process runs, and a rebuild must bind the interface set that
+            exists at that moment."""
+            # Whether this participant turned out to be the one applying the exclusion, which
+            # decides what the `finally` below does with an interface-kind-lookup report. A
+            # one-element list because the body that decides it is a separate method (it has
+            # to be, so that its several returns all pass through this `finally`) and cannot
+            # rebind a local of this one.
+            applying_the_exclusion = [False]
+            try:
+                return self._resolve_transports_body(factory, transport, applying_the_exclusion)
+            finally:
+                # Consumes whatever interface-kind-lookup report THIS resolution's own
+                # enumerations produced, however it returned. The Python mirror of the
+                # scope_exit guard in refresh_vpn_interface_blocklist, and it has one more
+                # enumeration to cover than the C++ side does: allowed_interfaces() reuses
+                # the same POSIX walk the blocklist read uses, so it runs a SECOND netlink
+                # dump -- one that can fail independently, and that _vpn_excluded_transports_profile
+                # reaches only after the exclusion decision has been taken. A take placed at
+                # that decision would miss it. C++ has no such second dump:
+                # vpn_allowed_interfaces goes through IPFinder::getIPs, which never asks for
+                # interface kinds.
+                #
+                # Leaving a report unconsumed is not merely a lost line: the flag is
+                # process-wide, so the next participant would log it against ITS domain,
+                # having itself classified the host with full kind information. Where this
+                # participant stepped aside, the branch that did so has already said
+                # something strictly more useful about it, so the report is taken and
+                # dropped -- deliberately discarded by the participant it belongs to, rather
+                # than left to mislead the next one.
+                if (
+                    _network_recovery.take_interface_kind_lookup_failure_report()
+                    and applying_the_exclusion[0]
+                ):
+                    self._pending_vpn_blocklist_logs.append(
+                        (
+                            _network_recovery.LogLevel.WARNING,
+                            f"could not read this host's interface kinds while configuring "
+                            f"domain {self._domain_id}: VPN / tunnel interfaces are being "
+                            f"identified by name alone, so one renamed away from the usual "
+                            f"names (tailscale0, wg0, tun0, ...) is treated as ordinary "
+                            f"hardware and DDS will bind and announce it. Name it in "
+                            f"{_network_recovery._ALLOW_VPN_INTERFACES_ENV} if that is "
+                            f"intended, or exclude it in your own transport descriptors' "
+                            f"interface_blocklist.",
+                            # Says an exclusion may be MISSING, so nothing invalidates it.
+                            False,
+                        )
+                    )
+
+        def _resolve_transports_body(self, factory, transport, applying_the_exclusion):
+            """The body of :meth:`_resolve_transports`, split out so that every one of its
+            returns passes through that method's kind-lookup-report guard.
+
+            ``applying_the_exclusion`` is that method's one-element flag holder: set its
+            single element to ``True`` on the path where this participant configures the
+            transports itself."""
+            global _builtin_transports_set_by_library
+
+            # Two ways the caller can own the transport configuration, both of which
+            # this layer must leave alone — matching what src/domain_participant.cpp
+            # does, and what the README promises:
+            #   - an XML profile, either named by FASTDDS_DEFAULT_PROFILES_FILE or
+            #     picked up as DEFAULT_FASTDDS_PROFILES.xml in the working directory,
+            #     which the process' first factory.load_profiles() auto-loads — and
+            #     which is therefore answered once, not per creation (see
+            #     _xml_profile_owns_transports). Taking the profile route then would
+            #     overwrite the whole wire_protocol section (discovery protocol, initial
+            #     peers, lease) with our profile's defaults, silently discarding the
+            #     caller's discovery configuration;
+            #   - FASTDDS_BUILTIN_TRANSPORTS set by someone other than us, which
+            #     selects a transport stack (LARGE_DATA, UDPv6, max_msg_size, ...)
+            #     that our generated profile would replace with plain SHM+UDPv4.
+            xml_profile_in_use = _xml_profile_owns_transports(
+                _DomainParticipant.xml_profiles_env_variable
+            )
+            #   - and a third way, the only one visible in the QoS rather than inferred from
+            #     the environment: descriptors the caller configured through
+            #     DomainParticipantFactory itself (see _caller_configured_transports).
+            #     Handing such a participant a profile of ours would override a transport
+            #     selection they made deliberately, so the exclusion does not reach it —
+            #     the same boundary the C++ side draws by only ever touching descriptors
+            #     its own setup_transports() created.
+            transports_configured_by_caller = _caller_configured_transports(factory)
+
+            # Resolved BEFORE the host is even read for tunnels, and so on EVERY route out
+            # of this method, because the transport stack is a process-wide decision that
+            # must not depend on whether a tunnel happens to be up -- or on whether the
+            # host could be asked. Returning ahead of this would skip the warning and the
+            # env pinning underneath, so the same application code would behave differently
+            # on two hosts: with FASTDDS_BUILTIN_TRANSPORTS already fixed to DEFAULT by an
+            # earlier participant, a later UDP_ONLY one keeps SHM+UDPv4 and is told so --
+            # but on a tunnel-carrying host it would silently get a UDP-only profile
+            # instead, and nothing would say so. A failed interface read used to return
+            # above this point and cost the participant UDP_ONLY and the enlarged socket
+            # buffers outright, which is why the read now happens below it.
+            #
+            # Safe to pin the env variable even when the profile route wins: the
+            # generated profile sets <useBuiltinTransports>false</useBuiltinTransports>,
+            # and Fast-DDS reads FASTDDS_BUILTIN_TRANSPORTS only for participants where
+            # that flag is true (set_builtin_transports_from_env_var, called from
+            # RTPSParticipantImpl::setup_transports). So the value governs later
+            # participants that do not take the profile route — a tunnel going away, say
+            # — which is exactly the consistency wanted.
             desired_transports = _DomainParticipant._builtin_transports_value(transport)
-            existing_transports = os.environ.get("FASTDDS_BUILTIN_TRANSPORTS")
-            if (
-                transport != TransportMode.AUTOMATIC
-                and existing_transports is not None
-                and existing_transports != desired_transports
-            ):
-                _network_recovery._emit_log(
-                    _network_recovery.LogLevel.WARNING,
-                    f"transport={transport} requested but FASTDDS_BUILTIN_TRANSPORTS is already "
-                    f"set to '{existing_transports}' (it is process-global — fixed by the first "
-                    f"participant created in this process or by an external setting). This "
-                    f"participant keeps the existing transport, NOT the requested "
-                    f"'{desired_transports}'.",
+
+            # Reading the variable, pinning it and remembering what we pinned is ONE
+            # decision -- which process-wide transport stack is in force, and whether this
+            # library is what put it there -- so it happens under one lock (see
+            # _builtin_transports_lock for the drift two threads produce without it). The
+            # warning is only composed here and emitted after the lock is released: it goes
+            # through the user's log callback, and anything that callback does which creates
+            # another participant would re-enter this very block.
+            transport_override_warning = None
+            with _builtin_transports_lock:
+                existing_transports = os.environ.get("FASTDDS_BUILTIN_TRANSPORTS")
+                transports_owned_by_caller = (
+                    existing_transports is not None
+                    and existing_transports != _builtin_transports_set_by_library
                 )
-            os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", desired_transports)
+                # Compared as SELECTIONS, not as strings: an externally-set "UDPv4"
+                # delivers exactly what TransportMode.UDP_ONLY asks for even though it
+                # carries none of the options this library would have added, and telling
+                # somebody their request was not applied when it was is noise they cannot
+                # act on. Only a set that really is not the requested one is worth a line.
+                if (
+                    transport != TransportMode.AUTOMATIC
+                    and existing_transports is not None
+                    and _transports_selection(existing_transports)
+                    != _transports_selection(desired_transports)
+                ):
+                    transport_override_warning = (
+                        f"transport={transport} requested but FASTDDS_BUILTIN_TRANSPORTS is already "
+                        f"set to '{existing_transports}' (it is process-global -- fixed by the first "
+                        f"participant created in this process or by an external setting). This "
+                        f"participant keeps the existing transport, NOT the requested "
+                        f"'{desired_transports}'."
+                    )
+                os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", desired_transports)
+                if existing_transports is None:
+                    # Remembered so a later participant can tell this apart from a value
+                    # the caller set, and still take the VPN-excluding profile route.
+                    #
+                    # Keyed on the variable having been ABSENT (existing_transports was read
+                    # just above, before the setdefault), NOT on its value matching what we
+                    # would have chosen. A caller who sets it to that same value owns it
+                    # exactly as much as one who sets it to anything else, and the README
+                    # promises their transports are left alone -- claiming it because the two
+                    # strings happen to agree would take the profile route over a deliberate,
+                    # process-wide choice, on the one configuration where the coincidence
+                    # hides it.
+                    _builtin_transports_set_by_library = desired_transports
+                effective_transports = os.environ["FASTDDS_BUILTIN_TRANSPORTS"]
 
-            # Shared-memory housekeeping BEFORE the participant is created: reclaim the
-            # segments of participants that died without cleaning up (Fast-DDS never
-            # does, so a service restarted in a loop fills the shared-memory filesystem
-            # and silently degrades every participant on the host to UDP), and complain
-            # if it is nearly full anyway. Keyed off the resolved transport rather than
-            # the env variable above, which an external setting may have fixed for the
-            # whole process. Mirrors src/domain_participant.cpp.
-            if not _DomainParticipant._shared_memory_ruled_out(transport):
-                _shm_cleanup.manage_shared_memory_space()
+            # Stashed, not emitted: this runs under both lifecycle locks, where the caller's
+            # log callback may not be invoked (it may publish onto a DDS topic). And said
+            # once per participant, as the C++ constructor says it once: the configuration
+            # it describes is process-wide and no rebuild changes it, so repeating it on
+            # every network-recovery rebuild would only be noise.
+            if transport_override_warning is not None and not self._transport_override_reported:
+                self._transport_override_reported = True
+                self._pending_vpn_blocklist_logs.append(
+                    (_network_recovery.LogLevel.WARNING, transport_override_warning, False)
+                )
 
-            factory = DomainParticipantFactory.get_instance()
-            # It's required so consequent get_default_participant_qos() respects XML profiles
-            factory.load_profiles()
+            # The snapshot has to learn when the exclusion cannot be applied: DDS is about
+            # to bind and announce the tunnel, so change detection must keep watching it.
+            # Reported whether or not a tunnel is up right now -- one can come up later, by
+            # which time this participant's transports are long since fixed. Mirrors the
+            # report_vpn_exclusion_not_applied() calls in src/domain_participant.cpp.
+            allowed = None
+            blocked_entries = _network_recovery.vpn_interface_blocklist_entries()
 
+            if _network_recovery.blocklist_read_failed():
+                # The host could not be read, which is NOT the same as having no tunnel --
+                # and on a rebuild the difference is the whole point: deriving fresh
+                # transports from an empty reading would drop the exclusion this
+                # participant already had, unblocking a tunnel that is still up. Reusing
+                # the profile last applied keeps the last known set excluded until a read
+                # succeeds. Mirrors refresh_vpn_interface_blocklist, which leaves its
+                # interface lists untouched for the same reason.
+                #
+                # Change detection has to learn this, and the first creation is why: there
+                # is no profile to reuse yet, so the participant takes the default
+                # transports and DDS binds and announces every tunnel the host has. Without
+                # the report, vpn_exclusion_applies_to_transports() would keep saying the
+                # exclusion reached the transports and the snapshot filter would keep
+                # dropping that same tunnel, leaving a re-auth or a reconnect with a dead
+                # locator no rebuild replaces -- the one disagreement the two filters may
+                # never have. Reported on a rebuild too, where a profile does stand: the
+                # flag is one-way and conservative by design, a tunnel that came up since
+                # that reading is bound and unwatched exactly as at first creation, and
+                # watching one that is in fact excluded costs an unnecessary rebuild at
+                # worst.
+                _network_recovery.report_vpn_exclusion_not_applied()
+
+                # Said once per participant, for the reason the caller-owns-the-transports
+                # line below is: silence here is what an operator gets when the exclusion is
+                # documented as on by default and did not apply. Not gated on the host
+                # having a tunnel up, unlike that line -- whether it has one is precisely
+                # what could not be read.
+                if not self._vpn_exclusion_skip_reported:
+                    self._vpn_exclusion_skip_reported = True
+                    self._pending_vpn_blocklist_logs.append(
+                        (
+                            _network_recovery.LogLevel.WARNING,
+                            f"could not read this host's network interfaces while "
+                            f"configuring domain {self._domain_id}: this participant keeps "
+                            f"whatever VPN / tunnel exclusion it already had (none, if this "
+                            f"is its first creation) and may bind and announce a tunnel. "
+                            f"The next participant creation, or the next network-recovery "
+                            f"rebuild, reads the host again.",
+                            # Says the exclusion did NOT apply, so nothing invalidates it.
+                            False,
+                        )
+                    )
+
+                # ...but never a profile of ours over transports that are the CALLER's. All
+                # three ownership answers are already known here, and the mitigation further
+                # down that nulls the cached name runs only on a pass whose read SUCCEEDED --
+                # so without this, a name cached before the caller took the transports over
+                # would be handed back on a failing pass and _build_participant_qos would
+                # clear their descriptors to install ours. The sequence is reachable: a first
+                # participant on a tunnel-carrying host caches a profile, the application then
+                # configures its own transports through the factory, and a recovery rebuild
+                # whose interface read fails -- the very case this branch exists for -- lands
+                # here.
+                if xml_profile_in_use or transports_owned_by_caller or transports_configured_by_caller:
+                    self._last_vpn_profile_name = None
+                return self._last_vpn_profile_name
+
+            if not blocked_entries:
+                # Nothing is excluded any more, so forget what was last reported: a
+                # tunnel that comes back — even on the address it had before — is worth
+                # a line again. refresh_vpn_interface_blocklist() in
+                # src/domain_participant.cpp records the current set unconditionally for
+                # the same reason, and the two must not disagree about when they speak.
+                self._last_logged_vpn_blocklist = None
+                # And forget the profile last applied: it is what a failed read falls
+                # back to, and it would reinstate an allowlist of addresses from an older
+                # host state -- confining the participant to an address a real interface
+                # has since renewed away from. refresh_vpn_interface_blocklist() in
+                # src/domain_participant.cpp erases its own entries on every pass that
+                # reaches its descriptors, which is the same forgetting; it does keep them
+                # where the read of the remaining interfaces fails, a case this layer
+                # answers here, before that read.
+                self._last_vpn_profile_name = None
+
+            if xml_profile_in_use or transports_owned_by_caller or transports_configured_by_caller:
+                _network_recovery.report_vpn_exclusion_not_applied()
+                # The transports are the caller's from here, so a later failed read must not
+                # reinstate a profile of ours over them: the failed-read return above happens
+                # BEFORE ownership is determined, and it hands back whatever this names.
+                self._last_vpn_profile_name = None
+            else:
+                # What the transports are left with once the tunnels are excluded, read
+                # HERE rather than inside the profile builder so that a failed read can be
+                # told apart from "nothing left" before anything is written. The two are
+                # the same empty list, and going on with a non-empty blocklist and no
+                # allowlist is the one outcome this whole section may not produce: any
+                # non-empty interface list puts UDPv4 into whitelist mode, giving every
+                # remaining interface its own sender socket, and without the per-interface
+                # netmask filters the allowlist carries each of them sends its own copy of
+                # every unicast datagram -- the duplication this feature removes, moved from
+                # the tunnel onto the LAN. Leaving the transports exactly as they stand
+                # cannot be wrong: the next creation or rebuild reads the host again.
+                # Read even where nothing is blocked, and reported even then, for the reason
+                # the failed blocklist read is: a silent bail-out would forfeit its own
+                # remedy, since a tunnel coming up later would be dropped from the snapshot
+                # and nothing would ever re-read the host. Mirrors the
+                # allowed_enumeration_failed branch of refresh_vpn_interface_blocklist in
+                # src/domain_participant.cpp.
+                allowed = _network_recovery.allowed_interfaces(blocked_entries)
+                if _network_recovery.allowed_interfaces_read_failed():
+                    _network_recovery.report_vpn_exclusion_not_applied()
+                    if not self._vpn_exclusion_skip_reported:
+                        self._vpn_exclusion_skip_reported = True
+                        self._pending_vpn_blocklist_logs.append(
+                            (
+                                _network_recovery.LogLevel.WARNING,
+                                f"could not read which interfaces would be left after "
+                                f"excluding this host's VPN / tunnel interface(s) on domain "
+                                f"{self._domain_id}: this participant keeps whatever exclusion "
+                                f"it already had (none, if this is its first creation) and may "
+                                f"bind and announce a tunnel. Applying the exclusion without "
+                                f"knowing what is left would send a copy of every unicast "
+                                f"datagram out of each remaining interface, which is worse. "
+                                f"The next creation or rebuild reads the host again.",
+                                # Says the exclusion did NOT apply, so nothing invalidates it.
+                                False,
+                            )
+                        )
+                    return self._last_vpn_profile_name
+
+                # Past every branch that steps aside: from here this participant configures
+                # its own transports, so a classification that ran on names alone is acted
+                # on and _resolve_transports' guard reports it against THIS domain.
+                applying_the_exclusion[0] = True
+
+            if (
+                blocked_entries
+                and not xml_profile_in_use
+                and not transports_owned_by_caller
+                and not transports_configured_by_caller
+            ):
+                profile_name = _vpn_excluded_transports_profile(
+                    factory,
+                    # From the EFFECTIVE process-wide selection, not from this
+                    # participant's request: the warning above has just told the caller
+                    # their request is not what they get, and the profile has to match
+                    # what was actually said. Only values this library writes can be seen
+                    # here (an externally-set one means transports_owned_by_caller and no
+                    # profile route at all), so the leading token is DEFAULT or UDPv4.
+                    use_shared_memory=_shared_memory_in_transports_value(
+                        effective_transports
+                    ),
+                    sockets_size=_resolve_udp_socket_buffer_size(),
+                    blocked_addresses=blocked_entries,
+                    allowed=allowed,
+                    pending_logs=self._pending_vpn_blocklist_logs,
+                )
+                if profile_name is not None:
+                    # A name in PROVIZIO_DDS_ALLOW_VPN_INTERFACES that re-admitted nothing.
+                    # Reported on this path because the enumeration that fed it is what
+                    # classified this host's interfaces, so this is the first moment the
+                    # answer is known -- and only where it is actionable: with something
+                    # excluded (which is the only reason this route was taken), a name
+                    # that matched none of it is a typo or the wrong identity for the platform
+                    # ("tailscale" for a device called "tailscale0"), and the deployment
+                    # that needed DDS over the tunnel is not getting it. Where nothing is
+                    # excluded there is nothing the name could have re-admitted, which is
+                    # the ordinary case for one setting given fleet-wide to hosts whose
+                    # tunnels differ. The names come back once per process. Mirrors
+                    # refresh_vpn_interface_blocklist in src/domain_participant.cpp.
+                    unmatched = _network_recovery.take_unmatched_vpn_allow_override_names()
+                    if unmatched:
+                        # Each name sanitised because it is an environment value, i.e.
+                        # arbitrary text reaching a log line.
+                        listed = ", ".join(
+                            _network_recovery._sanitise_env_value_for_log(name)
+                            for name in unmatched
+                        )
+                        self._pending_vpn_blocklist_logs.append(
+                            (
+                                _network_recovery.LogLevel.WARNING,
+                                f"{_network_recovery._ALLOW_VPN_INTERFACES_ENV} names "
+                                f"{listed}, which matched no VPN / tunnel interface on this "
+                                f"host, so DDS still does not use "
+                                f"{'it' if len(unmatched) == 1 else 'them'}. Name the "
+                                f"interface exactly as this host reports it (on Windows, the "
+                                f"adapter's friendly name or its description), or set the "
+                                f"variable to 1 to carry DDS over every tunnel.",
+                                # Stays true whatever the transports turn out to be: the
+                                # name matched nothing regardless. Its source latch is
+                                # one-shot, so dropping this message loses the report for the
+                                # life of the process -- the operator would never learn the
+                                # name is a typo.
+                                False,
+                            )
+                        )
+                    # Worth reporting: a VPN address silently missing from the locator
+                    # set is otherwise indistinguishable from a peer that cannot be
+                    # reached at all, and this is the only place that decision is made.
+                    # Logged once per distinct set, not once per creation, so a process
+                    # with several participants (or one rebuilt by network recovery)
+                    # does not repeat an identical line indefinitely.
+                    entries = sorted(blocked_entries)
+                    if entries != self._last_logged_vpn_blocklist:
+                        # Stashed rather than emitted here: _build_participant_qos runs
+                        # from the reset while _registration_mutex and _lifecycle_lock are
+                        # held, and _emit_log calls the caller's log callback — one that
+                        # creates an endpoint would deadlock on the non-reentrant
+                        # _registration_mutex every endpoint constructor takes. The reset
+                        # and the constructor flush it once their locks are released.
+                        # Each entry sanitised for the same reason a rejected environment
+                        # value is: the text comes from the OS, and on Windows an adapter's
+                        # friendly name is administrator-settable and far less constrained
+                        # than a POSIX device name, which the kernel already refuses to give
+                        # whitespace or control characters. Mirrors the C++ report.
+                        listed = _sanitised_interface_list(entries)
+                        message = (
+                            f"excluding VPN / tunnel interface(s) from the DDS "
+                            f"transports on domain {self._domain_id}: {listed} "
+                            f"(set {_network_recovery._ALLOW_VPN_INTERFACES_ENV} to "
+                            f"carry DDS over them)"
+                        )
+                        # Said in the same breath as the exclusion, because it is the
+                        # exclusion that brings it: with more than one real interface left,
+                        # netmask filtering is what stops every unicast datagram going out
+                        # all of them, and it also means a peer outside every local subnet
+                        # no longer receives unicast. A peer that quietly stops being
+                        # reachable is otherwise indistinguishable from one that went
+                        # away. The same decision _vpn_excluded_transports_xml takes, from
+                        # the same reading; byte-identical to the C++ line so it stays
+                        # greppable across languages.
+                        if sum(1 for _address, is_loopback in allowed if not is_loopback) > 1:
+                            message += (
+                                ". More than one interface is left, so netmask filtering is "
+                                "on for them and DDS peers outside their subnets are no longer "
+                                "reachable by unicast; on a routed network, exclude the tunnel "
+                                "in your own transport descriptors instead"
+                            )
+                        self._pending_vpn_blocklist_logs.append(
+                            (
+                                _network_recovery.LogLevel.INFO,
+                                message,
+                                # The one claim a failed profile read-back invalidates.
+                                True,
+                            )
+                        )
+                    self._last_logged_vpn_blocklist = entries
+                    self._last_vpn_profile_name = profile_name
+                    return profile_name
+
+                # The profile could not be built (the per-process ceiling, or a document
+                # Fast-DDS refused) and this participant will bind the tunnel after all, so
+                # change detection has to keep watching every tunnel from here on.
+                _network_recovery.report_vpn_exclusion_not_applied()
+
+                # Forget what was last reported, too: the C++ side records the current set
+                # unconditionally, and without this a later participant that DOES exclude
+                # the same set would say nothing, leaving the operator with the "will bind
+                # and announce" warning and no line to supersede it.
+                self._last_logged_vpn_blocklist = None
+                # And the profile last applied, for the reason the no-tunnel branch above
+                # forgets it: this participant runs on the default transports now, so a
+                # later failed read must not reinstate an exclusion it no longer has.
+                self._last_vpn_profile_name = None
+            elif blocked_entries and not self._vpn_exclusion_skip_reported:
+                # A tunnel is up and the exclusion is NOT being applied, because the caller
+                # owns the transport configuration. Said once per participant, and only when
+                # it makes a difference: silence here is what a vehicle paying for
+                # duplicated traffic over a metered tunnel would otherwise get, with the
+                # exclusion documented as on by default and nothing anywhere saying why it
+                # did not apply. Note what counts as owning the transports: ANY
+                # DEFAULT_FASTDDS_PROFILES.xml in the working directory does, even one that
+                # configures no transports at all, which is the case an operator is least
+                # likely to guess. Mirrors refresh_vpn_interface_blocklist in
+                # src/domain_participant.cpp.
+                self._vpn_exclusion_skip_reported = True
+                self._pending_vpn_blocklist_logs.append(
+                    (
+                        _network_recovery.LogLevel.INFO,
+                        f"not excluding VPN / tunnel interface(s) on domain "
+                        f"{self._domain_id}: the transports are yours (an XML profile, or "
+                        f"FASTDDS_BUILTIN_TRANSPORTS), so this library configures none of "
+                        f"them and cannot exclude an interface from them. DDS will bind and "
+                        f"announce on the tunnel; exclude it in your own transport "
+                        f"descriptors' interface_blocklist if that is not what you want.",
+                        # Says the exclusion did NOT apply, so nothing below invalidates it.
+                        False,
+                    )
+                )
+
+            # Nothing left to decide: FASTDDS_BUILTIN_TRANSPORTS was pinned above (it is
+            # process-global, so the first participant — or an external setting — fixes it
+            # for every later one, unlike C++, which applies transports per participant via
+            # setup_transports). None means "no profile of ours", i.e. let Fast-DDS build
+            # the transports from that variable.
+            return None
+
+        def _discard_reports_of_an_exclusion_that_did_not_apply(self) -> None:
+            """Drop the queued reports that CLAIMED an exclusion this participant turns out
+            not to have, and only those.
+
+            Called where the transports end up as the defaults after all, so "these
+            interfaces were excluded" would be false. Everything else queued on the same pass
+            stays, and the unmatched-name warning is why that distinction matters: the latch
+            behind it hands the names out once per process, so discarding it here would bury
+            a misconfigured PROVIZIO_DDS_ALLOW_VPN_INTERFACES for the life of the process --
+            even once the transport-profile read-back starts succeeding again on a later
+            rebuild."""
+            self._pending_vpn_blocklist_logs = [
+                entry
+                for entry in self._pending_vpn_blocklist_logs
+                if not entry[2]  # describes_applied_exclusion
+            ]
+
+        def _flush_pending_vpn_blocklist_log(self) -> None:
+            """Emit the report :meth:`_resolve_transports` stashed, if any.
+
+            MUST be called with no participant lock held: _emit_log calls the caller's
+            log callback, which is free to re-enter provizio APIs that take
+            _registration_mutex or the lifecycle lock."""
+            messages = self._pending_vpn_blocklist_logs
+            if not messages:
+                return
+            self._pending_vpn_blocklist_logs = []
+            for level, message, _describes_applied_exclusion in messages:
+                _network_recovery._emit_log(level, message)
+
+        def _build_participant_qos(
+            self, factory: "DomainParticipantFactory", transport: "TransportMode"
+        ) -> None:
+            """Build ``self._participant_qos`` from scratch: the transports (see
+            :meth:`_resolve_transports`) plus this library's discovery timing and
+            message-size configuration, both skipped when the caller supplied an XML
+            profile of their own.
+
+            Called before every participant creation, not once in __init__, so a
+            network-recovery rebuild re-resolves the transports against the interfaces
+            that exist at that moment — a tunnel can come up, go down or change address
+            while the process runs. Mirrors the per-creation
+            ``refresh_vpn_interface_blocklist`` call in src/domain_participant.cpp."""
             self._participant_qos = DomainParticipantQos()
+            transport_profile_name = self._resolve_transports(factory, transport)
+            # The factory default is ALWAYS the base, profile or not. Anything the caller
+            # configured through DomainParticipantFactory lives there — initial peers, a
+            # discovery server, lease durations — including from a load_XML_profiles_file /
+            # load_XML_profiles_string call that no environment probe can detect. Reading
+            # the whole QoS out of our generated profile instead (as this did) would hand
+            # back set_qos_from_attributes' result, which replaces wire_protocol().builtin
+            # wholesale and silently drops every one of those settings on any host that
+            # happens to have a tunnel up. A failure here leaves the library defaults the
+            # QoS was constructed with, which is the same floor as before.
             factory.get_default_participant_qos(self._participant_qos)
+            if transport_profile_name is not None:
+                profile_qos = DomainParticipantQos()
+                # Checked, not assumed: an unreadable profile would otherwise leave the
+                # transports untouched while the report claimed the tunnel was excluded.
+                if (
+                    factory.get_participant_qos_from_profile(transport_profile_name, profile_qos)
+                    == RETCODE_OK
+                ):
+                    profile_transports = profile_qos.transport()
+                    own_transports = self._participant_qos.transport()
+                    # Transports only, and only these fields. user_transports is empty here
+                    # (a caller who configured descriptors never reaches this route — see
+                    # _caller_configured_transports), use_builtin_transports comes from the
+                    # profile as false so FASTDDS_BUILTIN_TRANSPORTS cannot append an
+                    # unfiltered stack next to ours, and the socket buffer sizes are the
+                    # same tuning the env-variable route applies. Deliberately NOT
+                    # netmask_filter: the profile leaves the participant-level field at its
+                    # default, so copying it would overwrite a caller's choice with AUTO —
+                    # the blocklisting descriptor carries its own ON.
+                    #
+                    # LIMITATION, and the reason the C++ side has a guard this one cannot
+                    # mirror: Fast-DDS refuses to register a socket transport whose
+                    # descriptor asks for netmask filtering ON while the PARTICIPANT-level
+                    # filter says OFF, which would leave the participant with no UDP at all.
+                    # refresh_vpn_interface_blocklist in src/domain_participant.cpp therefore
+                    # checks the participant-level value and steps aside when it is OFF. Here
+                    # it cannot be read: the SWIG bindings expose netmask_filter as an opaque
+                    # pointer and export no NetmaskFilterKind values to compare it against.
+                    # A caller in this position has no way to set OFF from Python either --
+                    # for the same missing binding -- so it takes an XML profile of their own
+                    # that sets participant-level OFF while configuring no transports (a
+                    # profile that configures transports takes the caller-owned route and
+                    # never reaches here). Such a profile should exclude the tunnel in its own
+                    # descriptors rather than rely on this library.
+                    own_transports.user_transports.clear()
+                    for descriptor in profile_transports.user_transports:
+                        own_transports.user_transports.append(descriptor)
+                    own_transports.use_builtin_transports = (
+                        profile_transports.use_builtin_transports
+                    )
+                    own_transports.send_socket_buffer_size = (
+                        profile_transports.send_socket_buffer_size
+                    )
+                    own_transports.listen_socket_buffer_size = (
+                        profile_transports.listen_socket_buffer_size
+                    )
+                else:
+                    # Stashed: this runs under both lifecycle locks (see the exclusion
+                    # report in _resolve_transports_body). It does not describe an applied
+                    # exclusion, so the discard below leaves it in place.
+                    self._pending_vpn_blocklist_logs.append(
+                        (
+                            _network_recovery.LogLevel.WARNING,
+                            f"could not read back the generated transport profile "
+                            f"'{transport_profile_name}'; this participant keeps the default "
+                            f"transports and will bind and announce any VPN / tunnel interface",
+                            False,
+                        )
+                    )
+                    # Both, as every sibling failure path does, and they are not
+                    # substitutes for one another. The discard drops the pending "excluding
+                    # VPN / tunnel interface(s)" line, which would otherwise announce an
+                    # exclusion this participant did not get; the report clears the latch
+                    # that change detection reads (may_drop_tunnels), which would otherwise
+                    # keep the snapshot filter dropping the very tunnel this participant is
+                    # about to bind and announce. Discarding alone left the two filters in
+                    # exactly the state the comment in _resolve_transports_body calls "the
+                    # one disagreement the two filters may never have": a re-auth of that
+                    # tunnel changes no snapshot, so nothing rebuilds, and the participant
+                    # announces a dead locator for the rest of the process' life.
+                    _network_recovery.report_vpn_exclusion_not_applied()
+                    self._discard_reports_of_an_exclusion_that_did_not_apply()
+                    # Forgotten for the same reason as on the profile-not-built path above:
+                    # this participant binds the tunnel, so a later one that excludes the
+                    # same set must be allowed to say so.
+                    self._last_logged_vpn_blocklist = None
 
             # Unless defined in the XML Profile, enable more reliable participants matching
             if (
@@ -1111,12 +2714,17 @@ def make_domain_participant(domain_id: int = 0,
                 # default 3 s is well clear of the 30 s default lease; warn only if an env override
                 # crossed it. Mirrors src/domain_participant.cpp.
                 if announcement_period.to_ns() >= discovery_config.leaseDuration.to_ns():
-                    _network_recovery._emit_log(
-                        _network_recovery.LogLevel.WARNING,
-                        f"{_ANNOUNCEMENT_PERIOD_MS_ENV} ({announcement_period.to_ns() // 1000000} ms) is >= "
-                        f"the participant lease duration "
-                        f"({discovery_config.leaseDuration.to_ns() // 1000000} ms); peers may be declared "
-                        f"lost between announcements",
+                    # Stashed, for the same reason as the read-back warning above.
+                    self._pending_vpn_blocklist_logs.append(
+                        (
+                            _network_recovery.LogLevel.WARNING,
+                            f"{_ANNOUNCEMENT_PERIOD_MS_ENV} "
+                            f"({announcement_period.to_ns() // 1000000} ms) is >= the participant "
+                            f"lease duration "
+                            f"({discovery_config.leaseDuration.to_ns() // 1000000} ms); peers "
+                            f"may be declared lost between announcements",
+                            False,
+                        )
                     )
 
                 # Send-side cap for RTPS message size (fastdds.max_message_size, OUTPUT
@@ -1128,6 +2736,66 @@ def make_domain_participant(domain_id: int = 0,
                 self._participant_qos.properties().properties().push_back(
                     Property("fastdds.max_message_size", str(_resolve_max_message_size()))
                 )
+
+        def __init__(self, domain_id, initial_discovery_callback=None,
+                     initial_discovery_kinds=None, transport=TransportMode.AUTOMATIC):
+            self._cleaned_up = False
+            self._domain_id = domain_id
+            _warn_if_domain_ports_in_dynamic_range(domain_id)
+            # Last VPN / tunnel blocklist this participant logged (see
+            # _resolve_transports), so an unchanged set is reported once rather than on
+            # every creation and every recovery rebuild.
+            self._last_logged_vpn_blocklist: "Optional[list]" = None
+            # The generated transport profile this participant last applied, reused when a
+            # later read of the host fails: an unreadable interface list must not cost a
+            # rebuild the exclusion it already had (see _resolve_transports).
+            self._last_vpn_profile_name: "Optional[str]" = None
+            # Whether the process-wide transport override has been reported by this
+            # participant: once, as the C++ constructor reports it once.
+            self._transport_override_reported = False
+            # Reports produced by _resolve_transports under this participant's locks and
+            # emitted by _flush_pending_vpn_blocklist_log once they are released. A list
+            # rather than a single message: one pass can have two independent things to
+            # say -- which interfaces it excluded, and that a name given in
+            # PROVIZIO_DDS_ALLOW_VPN_INTERFACES re-admitted none of them -- and the second
+            # is worth saying precisely on the pass that produces the first. Mirrors
+            # domain_participant::pending_vpn_blocklist_logs.
+            # Entries are (level, message, describes_applied_exclusion). The third field is
+            # what lets a failed transport-profile read-back discard exactly the claim it
+            # invalidates -- "these interfaces were excluded" -- while keeping the reports
+            # that stay true whatever the transports ended up being.
+            self._pending_vpn_blocklist_logs: "list" = []
+            # Whether this participant has already reported that it is NOT excluding VPN /
+            # tunnel interfaces -- because the caller owns the transport configuration, or
+            # because the host's interfaces could not be read at all. One latch for both
+            # lines because they say the same thing to the same reader, and once per
+            # participant rather than once per creation, so one rebuilt on every network
+            # event does not repeat it. Mirrors
+            # domain_participant::vpn_exclusion_skip_reported.
+            self._vpn_exclusion_skip_reported = False
+
+            # Shared-memory housekeeping BEFORE the participant is created: reclaim the
+            # segments of participants that died without cleaning up (Fast-DDS never
+            # does, so a service restarted in a loop fills the shared-memory filesystem
+            # and silently degrades every participant on the host to UDP), and complain
+            # if it is nearly full anyway. Keyed off the resolved transport rather than
+            # the env variable above, which an external setting may have fixed for the
+            # whole process. Mirrors src/domain_participant.cpp.
+            if not _DomainParticipant._shared_memory_ruled_out(transport):
+                _shm_cleanup.manage_shared_memory_space()
+
+            factory = DomainParticipantFactory.get_instance()
+            # It's required so consequent get_default_participant_qos() respects XML profiles
+            factory.load_profiles()
+
+            # Remembered so a network-recovery rebuild can re-resolve the transports
+            # against the interfaces that exist at that moment (see
+            # _build_participant_qos).
+            self._transport = transport
+            self._build_participant_qos(factory, transport)
+            # No lock is held in the constructor, so this is the first safe point to
+            # report what the transports excluded.
+            self._flush_pending_vpn_blocklist_log()
 
             # Type / topic registries. Initialised BEFORE create_participant
             # below: an initial_discovery_callback can fire as soon as the
@@ -1247,6 +2915,27 @@ def make_domain_participant(domain_id: int = 0,
             # C++ side resolves the env var the same way — once per
             # process, cached).
             self._recovery_enabled = _network_recovery.resolve_network_recovery_enabled(recovery_mode)
+            # ...unless the caller's XML profile confines the transports to loopback and recovery
+            # was merely defaulted on: no network change can take an address from such a
+            # participant, so a rebuild could fix nothing and would only cost its peers a
+            # rediscovery. Mirrors domain_participant::skip_network_recovery_if_confined_by_xml,
+            # which reads the effective QoS; the bindings cannot, so the profile file is read.
+            if self._recovery_enabled and not _network_recovery.network_recovery_explicitly_requested(
+                recovery_mode
+            ):
+                owning_profile = _owning_xml_profile_path("FASTDDS_DEFAULT_PROFILES_FILE")
+                if owning_profile is not None and _network_recovery.xml_profile_confines_to_loopback(
+                    owning_profile
+                ):
+                    self._recovery_enabled = False
+                    _network_recovery._emit_log(
+                        _network_recovery.LogLevel.INFO,
+                        f"network auto-recovery is not watching this participant on domain {domain_id}: "
+                        f"its XML profile confines the transports to the loopback interface, which no "
+                        f"network change can take away or re-address, so a rebuild could fix nothing and "
+                        f"would only cost its peers a rediscovery. Pass NetworkRecoveryMode.ON, or set "
+                        f"PROVIZIO_DDS_NETWORK_RECOVERY=on, to have it watched anyway.",
+                    )
 
             # Set by _reset_hook_locked when a reset left this participant unusable —
             # its Fast-DDS participant could not be recreated, or an endpoint failed to
@@ -1288,6 +2977,11 @@ def make_domain_participant(domain_id: int = 0,
                 self._cleaned_up = True
                 factory = DomainParticipantFactory.get_instance()
                 if self._participant is not None:
+                    # Before anything is deleted: delete_participant reaches Fast-DDS'
+                    # own listener detach, whose infinite default busy-loops rather
+                    # than waits on some standard libraries. See
+                    # _detach_participant_listener.
+                    _detach_participant_listener(self._participant, self._domain_id)
                     self._participant.delete_contained_entities()
                     factory.delete_participant(self._participant)
                     self._participant = None
@@ -1303,6 +2997,33 @@ def make_domain_participant(domain_id: int = 0,
                     self._generation += 1
 
         def __del__(self):
+            if _on_fastdds_callback_thread():
+                # Our last reference was dropped ON a Fast-DDS listener thread -- the discovery
+                # listener resolves a strong reference to us for every SEDP event, so an
+                # application holding nothing but the participant reaches zero here. Cleaning up
+                # inline would detach the participant listener while WE are the executing
+                # callback (the bounded wait cannot succeed, so it burns its whole timeout) and
+                # then have delete_participant join this very thread. Hand it to the reaper,
+                # exactly as Publisher/Subscriber.__del__ do.
+                #
+                # This RESURRECTS the object, deliberately. A bound method holds its receiver
+                # in __self__, so handing self._cleanup to the reaper keeps `self` alive past
+                # the end of __del__ -- there is no way to defer an instance method's work
+                # without doing so, and a plain closure over it would keep it alive just the
+                # same. Safe since PEP 442 (Python 3.4): the finalizer runs at most once, so
+                # the object is not finalized again when the reaper drops the last reference,
+                # and CPython frees it there instead -- on the reaper thread, which is the
+                # whole point of the hand-off.
+                cleanup = self._cleanup
+                try:
+                    _network_recovery.submit_off_thread(cleanup)
+                    return
+                except Exception:  # noqa: BLE001
+                    # The reaper could not take it (its thread failed to start). Falling through
+                    # to the inline path risks the self-join described above, but leaking the
+                    # participant silently is worse: it keeps its Fast-DDS entities, its sockets
+                    # and its discovery traffic for the life of the process.
+                    pass
             self._cleanup()
 
         def fastdds_participant(self):
@@ -1432,7 +3153,7 @@ def make_domain_participant(domain_id: int = 0,
                 # AttributeError on self._participant.create_topic.
                 if self._participant is None:
                     raise RuntimeError(
-                        f"domain_participant: cannot register topic '{topic_name}' — "
+                        f"domain_participant: cannot register topic '{topic_name}' -- "
                         f"the Fast-DDS participant is not available "
                         f"(most likely a network-recovery recreate failed); see logs"
                     )
@@ -1517,7 +3238,7 @@ def make_domain_participant(domain_id: int = 0,
                     # an opaque AttributeError mid-build.
                     if self._participant is None:
                         raise RuntimeError(
-                            "domain_participant: cannot register endpoint — "
+                            "domain_participant: cannot register endpoint -- "
                             "the Fast-DDS participant is not available "
                             "(most likely a network-recovery recreate failed); see logs"
                         )
@@ -1691,8 +3412,16 @@ def make_domain_participant(domain_id: int = 0,
                 each endpoint.
             """
             # Phase 0: serialise against new registrations.
-            with self._registration_mutex:
-                self._reset_hook_locked(old_snapshot, new_snapshot)
+            try:
+                with self._registration_mutex:
+                    self._reset_hook_locked(old_snapshot, new_snapshot)
+            finally:
+                # Both locks are released here, so the log callback can safely re-enter
+                # this participant — see _resolve_transports. In a finally block, and not
+                # merely after the with, for the reason the C++ side uses a scope_exit
+                # guard: the path where an operator most needs to know which interfaces the
+                # transports left out is the one where the rebuild failed.
+                self._flush_pending_vpn_blocklist_log()
 
         def _reset_hook_locked(self, old_snapshot, new_snapshot):
             # Phase 1: snapshot.
@@ -1709,7 +3438,8 @@ def make_domain_participant(domain_id: int = 0,
                 except Exception as ex:
                     _network_recovery._emit_log(
                         _network_recovery.LogLevel.ERROR,
-                        f"endpoint detach failed during reset: {ex}",
+                        f"endpoint detach failed during reset: "
+                            f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}",
                     )
 
             # Phase 3: take the lifecycle lock for the whole reset.
@@ -1724,7 +3454,8 @@ def make_domain_participant(domain_id: int = 0,
                     except Exception as ex:
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"endpoint teardown failed during reset: {ex}",
+                            f"endpoint teardown failed during reset: "
+                                f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}",
                         )
 
                 # Drop topic handles — they reference the OLD participant.
@@ -1736,9 +3467,26 @@ def make_domain_participant(domain_id: int = 0,
                 # Destroy the old participant.
                 factory = DomainParticipantFactory.get_instance()
                 if self._participant is not None:
+                    # Same reason as in _cleanup, and it matters more here: a reset runs
+                    # on a network event, which is exactly when discovery callbacks are in
+                    # flight -- the condition Fast-DDS' infinite listener detach spins on.
+                    _detach_participant_listener(self._participant, self._domain_id)
                     self._participant.delete_contained_entities()
                     factory.delete_participant(self._participant)
                     self._participant = None
+
+                    # Armed BEFORE the window between here and the recreate below, not after
+                    # it. Everything in that window -- the interface-cache refresh, the QoS
+                    # re-resolution, the create itself -- now runs with no participant, and if
+                    # any of it throws, this method unwinds with self._participant None and
+                    # nothing scheduled to try again: the safety-net tick filters on this very
+                    # flag and never checks for a missing participant, so the endpoints would
+                    # stay inert until the next confirmed address change happened to revive
+                    # them. Arming it first makes that failure self-healing, and the success
+                    # path clears it below exactly as it always did. The pre-PR window held
+                    # only the effectively throw-free interface-cache refresh, which is why
+                    # this was not needed before.
+                    self._recovery_retry_needed = True
 
                 # Drop the match-publisher discovery cache: it tracked writers seen by the
                 # now-destroyed participant. The new participant re-discovers currently-present
@@ -1755,7 +3503,14 @@ def make_domain_participant(domain_id: int = 0,
                 # domain_participant::trigger_network_recovery_reset path.
                 _network_recovery.refresh_fastdds_interface_cache()
 
-                # Recreate with the same QoS, attaching the discovery listener
+                # Re-resolve the QoS before recreating: the interface set is exactly
+                # what changed, so the transports must be rebuilt against the tunnels
+                # that exist now rather than the ones that existed at construction
+                # time. Mirrors the per-creation refresh_vpn_interface_blocklist() call
+                # in src/domain_participant.cpp.
+                self._build_participant_qos(factory, self._transport)
+
+                # Recreate with the freshly resolved QoS, attaching the discovery listener
                 # BEFORE the new participant starts discovery (see
                 # _create_participant_with_listener). This is the load-bearing part
                 # of the fix for survives_reset: the peer's writer already exists, so
@@ -1801,7 +3556,8 @@ def make_domain_participant(domain_id: int = 0,
                         any_endpoint_failed = True
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"endpoint rebuild failed during reset: {ex}; this endpoint stays "
+                            f"endpoint rebuild failed during reset: "
+                                f"{_sanitise_log_text(str(ex), _MAX_LOGGED_EXCEPTION_TEXT)}; this endpoint stays "
                             f"inactive until the network-recovery safety-net check retries the reset",
                         )
 
@@ -1975,7 +3731,8 @@ class Publisher(_TopicHandle):
                         except Exception as exception:  # noqa: BLE001
                             _network_recovery._emit_log(
                                 _network_recovery.LogLevel.ERROR,
-                                f"publisher on_has_subscriber_changed callback threw: {exception}",
+                                f"publisher on_has_subscriber_changed callback threw: "
+                                f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}",
                             )
                 finally:
                     # Drop the transient reference now — after the drain scope
@@ -2004,7 +3761,7 @@ class Publisher(_TopicHandle):
         :param pub_sub_type: The DDS PubSub Type to be published, f.e. provizio_dds.StringPubSubType
         :param on_has_subscriber_changed_function: Optional, a function to be invoked on matching first / unmatching last subscriber, takes two arguments: a Publisher and a bool: True when the first subscriber is matched, False when the last subscriber is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data writer reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
-        :param int history_depth: Controls the KEEP_LAST history depth only (no longer tied to durability): USE_DEFAULT_HISTORY_DEPTH (-1) or any non-positive value uses the default depth (the per-type QosDefaults.keep_last_history_depth if specialized for pub_sub_type, otherwise the Fast-DDS default); a positive value sets KEEP_LAST history with that depth. Configure durability separately via durability_kind.
+        :param int history_depth: Controls the KEEP_LAST history depth only (no longer tied to durability): USE_DEFAULT_HISTORY_DEPTH (-1) or any non-positive value uses the default depth (the per-type QosDefaults.datawriter_keep_last_history_depth_per_type entry if one is registered for pub_sub_type, otherwise the primary default); a positive value sets KEEP_LAST history with that depth. The writer's history is its retransmission buffer for its own samples, sized against the emitting device's memory -- a reader's is a separate, deeper knob. Configure durability separately via durability_kind.
         :param durability_kind: Optional, a DDS durability kind to be used (e.g. VOLATILE_DURABILITY_QOS or TRANSIENT_LOCAL_DURABILITY_QOS); if not specified, the Fast-DDS / XML default durability is kept. Mirrors reliability_kind — independent of history_depth.
         """
 
@@ -2055,8 +3812,31 @@ class Publisher(_TopicHandle):
         self._publisher.get_default_datawriter_qos(writer_qos)
         writer_qos.reliability().kind = self._captured_reliability_kind
         writer_qos.endpoint().history_memory_policy = self._captured_qos_defaults.memory_policy
-        if sys.platform in ("win32", "darwin"):
-            writer_qos.data_sharing().off()
+        # Data sharing -- Fast-DDS' zero-copy same-host path, where a reader maps the
+        # writer's payload pool instead of being sent an RTPS message -- is off on every
+        # platform, for readers as well as writers. Either side declining puts the pair
+        # back on the shared-memory transport, so this holds against a peer that leaves it
+        # on (a stock ROS 2 node) as much as against our own endpoints.
+        #
+        # It is off because its shared-memory objects cannot be reclaimed. A writer creates
+        # a payload pool and a reader a notification segment, each named after the
+        # endpoint's GUID -- which carries 16 random bits on top of the pid, so a
+        # restarted process practically never reuses a dead one's name. Only an orderly
+        # destructor removes them, so every SIGKILL, bare exit() and crash leaves one behind
+        # permanently, and the sweep in shm_cleanup.py cannot take them: they carry no lock file, so a dead owner cannot
+        # be told from a live one, and removing a LIVE one is by far the worse error -- a
+        # reader that cannot open a live writer's pool refuses the match outright while
+        # that writer matches the reader and publishes as normal, leaving a publisher that
+        # reports a matched subscriber, a subscriber whose callback never fires, and not
+        # one sample delivered, for as long as both live.
+        #
+        # Giving it up costs almost nothing: it only ever applied to bounded keyless types
+        # -- the small fixed-size messages (Twist, Pose, Transform, the std_msgs scalars),
+        # never a point cloud, an image, or anything holding a sequence or a string -- so
+        # no topic whose throughput matters was using it. On the traffic that was, it
+        # measured ~0.3 us of a ~5 us same-host hop, with no measurable difference in CPU
+        # or throughput. Mirrors the C++ make_publisher.
+        writer_qos.data_sharing().off()
         # History (untied from durability): an explicit positive depth wins, else fall
         # back to the per-type default (0 = leave the Fast-DDS default). KEEP_LAST only —
         # durability is configured independently below, so this is not an RxO QoS (ROS 2
@@ -2064,7 +3844,7 @@ class Publisher(_TopicHandle):
         effective_history_depth = (
             self._captured_history_depth
             if self._captured_history_depth > 0
-            else self._captured_qos_defaults.keep_last_history_depth
+            else self._captured_qos_defaults.datawriter_keep_last_history_depth
         )
         if effective_history_depth > 0:
             writer_qos.history().kind = KEEP_LAST_HISTORY_QOS
@@ -2101,6 +3881,19 @@ class Publisher(_TopicHandle):
 
         self._built_against_generation = self._participant.participant_generation()
 
+    def _zero_matched_count(self):
+        """Forget the matched-subscriber count as the endpoint is torn down.
+
+        _build_state zeroes it before creating the writer; teardown has to zero it too, or
+        the count from before the reset stands until a rebuild replaces it -- INDEFINITELY
+        if the rebuild fails, since nothing else clears it. get_num_matched_subscribers has
+        no liveness guard at all, so a service readiness check then reads a peer count for a
+        writer that no longer exists, reports the service up, and the very next publish()
+        correctly fails. Notified because a waiter blocked on the old value must re-evaluate."""
+        with self._listener._num_matched_cv:
+            self._listener._num_matched_subscribers = 0
+            self._listener._num_matched_cv.notify_all()
+
     def _teardown_state_for_reset(self):
         """Tear down Fast-DDS state without releasing user-visible
         attributes. Caller holds the lifecycle lock. Generation check
@@ -2112,11 +3905,13 @@ class Publisher(_TopicHandle):
             # Stale — the participant we built against is already gone.
             # Just clear our handles; delete_contained_entities already
             # freed the underlying Fast-DDS objects.
+            self._zero_matched_count()
             self._writer = None
             self._publisher = None
             self._topic = None
             self._built_against_generation = 0
             return
+        self._zero_matched_count()
         if self._writer is not None and self._publisher is not None:
             self._publisher.delete_datawriter(self._writer)
         self._writer = None
@@ -2360,7 +4155,8 @@ class Subscriber(_TopicHandle):
                     except Exception as exception:  # noqa: BLE001
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"subscriber on_data callback threw: {exception}",
+                            f"subscriber on_data callback threw: "
+                            f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}",
                         )
 
         def on_subscription_matched(self, _, info):
@@ -2386,7 +4182,8 @@ class Subscriber(_TopicHandle):
                     except Exception as exception:  # noqa: BLE001
                         _network_recovery._emit_log(
                             _network_recovery.LogLevel.ERROR,
-                            f"subscriber on_has_publisher_changed callback threw: {exception}",
+                            f"subscriber on_has_publisher_changed callback threw: "
+                            f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}",
                         )
 
     def __init__(
@@ -2410,7 +4207,7 @@ class Subscriber(_TopicHandle):
         :param on_data_function: A function to be invoked on receiving published data. It can take one argument (the data) or two arguments (data and a SampleInfo object). Note: called from a background Thread
         :param on_has_publisher_changed_function: Optional, a function to be invoked on matching first / unmatching last publisher, takes a single bool argument: True when the first publisher is matched, False when the last publisher is unmatched; Note: called from a background Thread
         :param reliability_kind: Optional, a DDS data reader reliability kind to be used: either BEST_EFFORT_RELIABILITY_QOS or RELIABLE_RELIABILITY_QOS; if not specified, QosDefaults for pub_sub_type will be used
-        :param int max_history_depth: Controls the KEEP_LAST history depth only (no longer tied to durability): USE_DEFAULT_HISTORY_DEPTH (-1) or any non-positive value uses the default depth (the per-type QosDefaults.keep_last_history_depth if specialized for pub_sub_type, otherwise the Fast-DDS default); a positive value sets KEEP_LAST history with that depth. Configure durability separately via durability_kind.
+        :param int max_history_depth: Controls the KEEP_LAST history depth only (no longer tied to durability): USE_DEFAULT_HISTORY_DEPTH (-1) or any non-positive value uses the default depth (the per-type QosDefaults.datareader_keep_last_history_depth_per_type entry if one is registered for pub_sub_type, otherwise the Fast-DDS default); a positive value sets KEEP_LAST history with that depth. The reader's history is a jitter buffer shared by every writer on the topic -- on a keyless fleet-shared topic the depth is divided across all of them, which is why the fleet types default deep. A latency-sensitive consumer (a live display) should pass a small explicit depth instead: a deep history makes a momentarily-behind reader work through the backlog rather than skip to the newest sample. Configure durability separately via durability_kind.
         :param durability_kind: Optional, a DDS durability kind to be used (e.g. VOLATILE_DURABILITY_QOS or TRANSIENT_LOCAL_DURABILITY_QOS); if not specified, the Fast-DDS / XML default durability is kept. Mirrors reliability_kind — independent of max_history_depth.
         """
         super().__init__(domain_participant, topic_name, pub_sub_type)
@@ -2491,8 +4288,10 @@ class Subscriber(_TopicHandle):
         self._subscriber.get_default_datareader_qos(reader_qos)
         reader_qos.reliability().kind = effective_reliability_kind
         reader_qos.endpoint().history_memory_policy = self._captured_qos_defaults.memory_policy
-        if sys.platform in ("win32", "darwin"):
-            reader_qos.data_sharing().off()
+        # Data sharing is off here as it is for writers, and for the same reasons: see
+        # Publisher._build_state, which carries the rationale in full. Mirrors the C++
+        # make_subscriber.
+        reader_qos.data_sharing().off()
         # History (untied from durability): an explicit positive depth wins, else fall
         # back to the per-type default (0 = leave the Fast-DDS default). KEEP_LAST only —
         # durability is configured independently below, so this is not an RxO QoS (ROS 2
@@ -2500,7 +4299,7 @@ class Subscriber(_TopicHandle):
         effective_max_history_depth = (
             self._captured_max_history_depth
             if self._captured_max_history_depth > 0
-            else self._captured_qos_defaults.keep_last_history_depth
+            else self._captured_qos_defaults.datareader_keep_last_history_depth
         )
         if effective_max_history_depth > 0:
             reader_qos.history().kind = KEEP_LAST_HISTORY_QOS
@@ -2561,16 +4360,28 @@ class Subscriber(_TopicHandle):
         self._build_state(fastdds_participant)
         self._participant._deregister_deferred_subscriber(self._topic_name, self)
 
+    def _zero_matched_count(self):
+        """Forget the matched-publisher count as the endpoint is torn down.
+
+        See Publisher._zero_matched_count. The reader side needs it just as much: its
+        generation guard is `self._reader is not None and ...`, and after a failed rebuild
+        _reader IS None, so the guard does not fire and the stale count is returned."""
+        with self._listener._num_matched_cv:
+            self._listener._num_matched_publishers = 0
+            self._listener._num_matched_cv.notify_all()
+
     def _teardown_state_for_reset(self):
         """Tear down Fast-DDS state. See Publisher._teardown_state_for_reset."""
         if self._built_against_generation == 0:
             return
         if self._built_against_generation != self._participant.participant_generation():
+            self._zero_matched_count()
             self._reader = None
             self._subscriber = None
             self._topic = None
             self._built_against_generation = 0
             return
+        self._zero_matched_count()
         if self._reader is not None and self._subscriber is not None:
             self._subscriber.delete_datareader(self._reader)
         self._reader = None
@@ -3224,7 +5035,10 @@ class Service:
                     self._stop = True
                     self._cv.notify()
                     join = True
-            if join:
+            # Guarded exactly as _AsyncRequestHandler.stop() is, and for the same reason:
+            # Thread.join() raises on a thread that was never started, __init__'s start() can
+            # fail under a thread-count limit, and __del__ then calls this.
+            if join and self._thread.ident is not None:
                 self._thread.join()
 
         def handle_request(self, request, identity):
@@ -3266,7 +5080,8 @@ class Service:
                     # logger and keep processing the next request.
                     _network_recovery._emit_log(
                         _network_recovery.LogLevel.ERROR,
-                        f"service request handler threw: {exception}; request dropped",
+                        f"service request handler threw: "
+                        f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}; request dropped",
                     )
 
     class _AsyncRequestHandler:
@@ -3286,11 +5101,25 @@ class Service:
             self.stop()
 
         def stop(self):
-            join = False
-            if self._loop.is_running():
+            # Scheduled unconditionally, never gated on self._loop.is_running(). __init__
+            # starts the worker and returns before it reaches run_forever(), so a stop()
+            # landing in that window -- __del__ right after construction, a Service built
+            # and dropped in a loop -- would find the loop not yet running, schedule
+            # nothing, and leave the thread running for the life of the process.
+            # call_soon_threadsafe is safe on a loop that has not started: it queues the
+            # callback, and run_forever() drains that queue on its first iteration. Only a
+            # CLOSED loop rejects it, and a closed loop cannot be running, so there is
+            # nothing left to stop in that case either.
+            try:
                 self._loop.call_soon_threadsafe(self._loop.stop)
-                join = True
-            if join:
+            except RuntimeError:
+                pass
+            # Guarded, because the join is now unconditional: Thread.join() raises
+            # RuntimeError on a thread that was never started, and __init__'s start() can
+            # fail (RuntimeError: can't start new thread, under a thread-count or memory
+            # limit). __del__ then calls stop(), and an exception from __del__ during
+            # interpreter shutdown is both unignorable noise and unactionable.
+            if self._thread.ident is not None:
                 self._thread.join()
 
         def _run_loop(self):
@@ -3321,7 +5150,8 @@ class Service:
                 # through the configurable logger.
                 _network_recovery._emit_log(
                     _network_recovery.LogLevel.ERROR,
-                    f"service request handler threw: {exception}; request dropped",
+                    f"service request handler threw: "
+                    f"{_sanitise_log_text(str(exception), _MAX_LOGGED_EXCEPTION_TEXT)}; request dropped",
                 )
 
     def __init__(
@@ -3350,10 +5180,19 @@ class Service:
         :param service_name: If provided, request topic is rq/<service_name>Request and response is rr/<service_name>Reply
         :param int max_history_depth: The maximum number of requests to queue (the request QUEUE SIZE): a positive value sets the queue size, MINIMAL_REQUEST_QUEUE (0) uses a minimal queue (1), USE_DEFAULT_HISTORY_DEPTH (-1) uses the default (10). This is distinct from endpoint_history_depth (the underlying endpoints' KEEP_LAST history depth).
         :param durability_kind: Optional, a DDS durability kind (e.g. VOLATILE_DURABILITY_QOS or TRANSIENT_LOCAL_DURABILITY_QOS) applied to the underlying request/response endpoints; None keeps the historical defaults (the request Subscriber stays on the Fast-DDS / XML default durability; the response Publisher defaults to TRANSIENT_LOCAL_DURABILITY_QOS so a just-late client's response reader still receives the response).
-        :param int endpoint_history_depth: KEEP_LAST history depth for the underlying request/response endpoints; USE_DEFAULT_HISTORY_DEPTH (-1) uses the defaults (the request Subscriber uses the Fast-DDS default; the response Publisher uses the standard default queue depth of 10, decoupled from max_history_depth so a minimal request queue can't shrink it). Distinct from max_history_depth (request queue size).
+        :param int endpoint_history_depth: KEEP_LAST history depth for the underlying request/response endpoints; USE_DEFAULT_HISTORY_DEPTH (-1) sizes both at the standard default queue depth of 10 -- matching the number of requests a ServiceClient may have in flight -- decoupled from max_history_depth so a minimal request queue can't shrink either of them. Distinct from max_history_depth (request queue size).
         """
         default_max_queue_size = 10
         minimal_max_queue_size = 1
+
+        # FIRST, before anything that can raise. __del__ calls stop(), whose very first
+        # statement is `with self._service_cv:` -- so a Service that failed the topic-name
+        # validation below raised AttributeError out of its finalizer, on top of the caller's
+        # real error. The hasattr guards further down in stop() cover the members assigned
+        # after the endpoints are built; these two are what stop() cannot run without at all,
+        # and the fix for them is to make the invariant true rather than to test for it.
+        self._stop = False
+        self._service_cv = threading.Condition()
 
         if request_topic_name is None:
             assert (
@@ -3367,10 +5206,8 @@ class Service:
             ), "Either of response_topic_name or service_name are required"
             response_topic_name = _response_prefix + service_name + _response_suffix
 
-        self._stop = False
         self._ready_responses = []
         self._matched_subscriptions = set()
-        self._service_cv = threading.Condition()
         self._request_data_type = request_data_type
 
         max_queue_size = (
@@ -3424,9 +5261,25 @@ class Service:
         )
 
         # The request Subscriber (service side) historically used VOLATILE
-        # (Fast-DDS / XML default) durability and the default history, so the
-        # endpoint params pass straight through (None / -1 reproduces that).
+        # (Fast-DDS / XML default) durability, so durability_kind passes straight
+        # through (None reproduces that).
+        #
+        # Its history is defaulted the same way the response Publisher above is, and
+        # for the mirror-image reason. Passing endpoint_history_depth straight through
+        # meant that with no explicit depth the request READER fell to the per-type
+        # QosDefaults.datareader_keep_last_history_depth -- unset for any type a service
+        # uses, i.e. Fast-DDS' own KEEP_LAST(1) -- while ServiceClient sizes its request
+        # WRITER at SERVICE_CLIENT_DEFAULT_HISTORY_DEPTH (10) and documents that as how
+        # many requests may be in flight. A burst of 10 into a history of 1 evicts unread
+        # requests, and silently: eviction happens after the reliability contract is
+        # satisfied, so there is no NACK, no log and no counter, only clients whose
+        # future response times out.
         # Mirrors the C++ make_subscriber call in the service constructor.
+        request_history_depth = (
+            default_max_queue_size
+            if endpoint_history_depth == USE_DEFAULT_HISTORY_DEPTH
+            else endpoint_history_depth
+        )
         self._subscriber = Subscriber(
             domain_participant,
             request_topic_name,
@@ -3434,7 +5287,7 @@ class Service:
             request_data_type,
             on_data_function=self._on_data,
             reliability_kind=RELIABLE_RELIABILITY_QOS,
-            max_history_depth=endpoint_history_depth,
+            max_history_depth=request_history_depth,
             durability_kind=durability_kind,
         )
 
@@ -3482,7 +5335,17 @@ class Service:
             #     point no Service-managed thread can call into them.
             if hasattr(self, '_request_handler'):
                 self._request_handler.stop()
-            self._dispatch_responses_thread.join()
+            # hasattr-guarded like the members around it: this is assigned
+            # LAST in __init__, after two constructors that raise on a
+            # documented state (a participant whose recreate failed). A
+            # half-built Service is then collected, __del__ calls stop(), and
+            # an unguarded join raised AttributeError out of a finalizer -- on
+            # top of the caller's real error, and before the cleanup below
+            # could run.
+            if hasattr(self, "_dispatch_responses_thread") and (
+                self._dispatch_responses_thread.ident is not None
+            ):
+                self._dispatch_responses_thread.join()
             # Delete in child-before-parent order; their __del__ methods
             # are guarded against participant-already-cleaned-up.
             for attr in ('_subscriber', '_publisher', '_request_handler'):

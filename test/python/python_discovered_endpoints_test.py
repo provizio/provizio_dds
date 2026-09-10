@@ -16,6 +16,7 @@
 additions to provizio_dds._DomainParticipant. Mirrors the C++
 discovered_endpoints_test suite."""
 
+import os
 import sys
 import threading
 import time
@@ -335,7 +336,7 @@ def test_survives_reset():
 
     if not _wait_for(writer_seen, DISCOVERY_TIMEOUT_SEC):
         print(
-            "no post-reset discovery event — listener was not re-installed?",
+            "no post-reset discovery event -- listener was not re-installed?",
             file=sys.stderr,
         )
         return 1
@@ -397,7 +398,7 @@ def test_unregister():
 
     if not _wait_for(c_saw_topic2, DISCOVERY_TIMEOUT_SEC):
         print(
-            "control participant never saw the post-unregister publisher — test inconclusive",
+            "control participant never saw the post-unregister publisher -- test inconclusive",
             file=sys.stderr,
         )
         return 1
@@ -418,6 +419,103 @@ def test_unregister():
     return 0
 
 
+def test_teardown_does_not_spin():
+    """Destroying a participant while one of its discovery callbacks is still running does
+    not SPIN. Whether it also WAITS is reported but not asserted -- see the note below.
+
+    Python mirror of the C++ discovered_endpoints teardown_does_not_spin case, and it guards
+    the same live bug on the half the C++ fix could not reach. Fast-DDS'
+    DomainParticipantImpl::disable() detaches the participant listener using set_listener's
+    default timeout of std::chrono::seconds::max(), which becomes a steady_clock deadline of
+    time_point::max(). libstdc++ converts a deadline on a clock other than its native one by
+    adding it to that clock's now(), which overflows that far out, so the wait returns
+    instantly, the re-check against the caller's clock says the deadline has not passed, and
+    the predicate loop goes round again at once -- a spin at 100% of a core for as long as the
+    callback runs, which also starves the callback of the mutex it needs to finish. Observed on
+    aarch64 CI runners as runs hanging for tens of seconds inside delete_participant.
+
+    The C++ side detaches the listener itself first, with a finite timeout. Python could not
+    until the bindings were given set_listener's timeout overload (see CMakeLists.txt), and
+    without it this teardown took the spinning path on every jetson-class host --
+    python_vpn_interfaces_caller_builtin_transports_matching_ours hit exactly that and died
+    on its ctest TIMEOUT with no output at all.
+
+    Like its C++ twin, the CPU assertion only FAILS on a toolchain where the spin exists
+    (libstdc++ 9, and anything else whose condition_variable is not natively steady_clock) --
+    the CI runners are what gate it. Elsewhere teardown consumes almost no CPU whether or not
+    it waited, so the case passes without proving much, which is why the C++ twin exists too.
+    """
+    scale = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
+    # Long enough that a spin is unmistakable against scheduling noise, short enough to keep
+    # the case quick. Matches the C++ twin.
+    callback_hold = 0.6 * scale
+
+    pa = provizio_dds.make_domain_participant(
+        0, provizio_dds.NetworkRecoveryMode.OFF
+    )
+    pb = provizio_dds.make_domain_participant(
+        0, provizio_dds.NetworkRecoveryMode.OFF
+    )
+
+    entered = threading.Event()
+
+    def hold_the_callback(participant, topic_name, type_name, kind, discovered,
+                          reliability, durability):
+        if not discovered:
+            return
+        entered.set()
+        # Held deliberately. Blocking in a callback is against this library's contract, and
+        # that is the point: it is the state in which the participant listener cannot be
+        # detached, which is what teardown then has to wait for.
+        time.sleep(callback_hold)
+
+    pa.on_discovered_endpoint(hold_the_callback)
+
+    pub = provizio_dds.Publisher(
+        pb, "provizio_dds_py_teardown_spin_topic", provizio_dds.StringPubSubType
+    )
+
+    if not entered.wait(30.0 * scale):
+        print("teardown_does_not_spin: FAIL (no discovery callback arrived)", file=sys.stderr)
+        return 1
+
+    # Destroy while the callback is still inside its hold.
+    cpu_before = time.process_time()
+    started = time.monotonic()
+    pa._cleanup()
+    took = time.monotonic() - started
+    cpu_used = time.process_time() - cpu_before
+
+    # The assertion, and the only one: teardown did not SPIN. A spin burns the wall time it
+    # covers, so any CPU figure near the elapsed time is the defect; a blocking wait, and an
+    # ordinary quick teardown alike, consume almost nothing.
+    passed = True
+    budget = callback_hold / 2.0
+    if cpu_used >= budget:
+        print(
+            f"participant destruction SPUN: burned {cpu_used * 1000.0:.0f} ms of CPU over "
+            f"{took * 1000.0:.0f} ms",
+            file=sys.stderr,
+        )
+        passed = False
+
+    # Whether teardown WAITED is reported but not asserted, for the same reason as in the C++
+    # twin: whether an in-flight discovery dispatch is inside the region Fast-DDS counts for
+    # set_listener varies by platform. Both outcomes are correct; only spinning is not.
+    waited = took > callback_hold / 4.0
+
+    print(
+        f"teardown_does_not_spin: {'PASS' if passed else 'FAIL'} "
+        f"(took {took * 1000.0:.0f} ms, burned {cpu_used * 1000.0:.0f} ms of CPU"
+        + ("; waited for the callback" if waited else
+           "; callback had already left the counted region, no overlap to wait for")
+        + ")"
+    )
+    del pub, pb
+    return 0 if passed else 1
+
+
+
 _TESTS = {
     "type_registry": test_type_registry,
     "discovers_writer": test_discovers_writer,
@@ -426,6 +524,7 @@ _TESTS = {
     "callback_receives_participant": test_callback_receives_participant,
     "survives_reset": test_survives_reset,
     "unregister": test_unregister,
+    "teardown_does_not_spin": test_teardown_does_not_spin,
 }
 
 

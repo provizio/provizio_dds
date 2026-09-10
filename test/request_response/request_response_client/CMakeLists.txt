@@ -19,6 +19,8 @@ target_link_libraries(request_response_client PUBLIC provizio_dds Threads::Threa
 
 add_executable(request_response_reliability_client request_response_reliability_client.cpp)
 target_link_libraries(request_response_reliability_client PUBLIC provizio_dds Threads::Threads)
+# test/ on the include path for detail/test_domain.h (the per-process DDS domain policy).
+target_include_directories(request_response_reliability_client PRIVATE "${CMAKE_SOURCE_DIR}/test")
 
 add_executable(request_response_concurrent_requests request_response_concurrent_requests.cpp)
 target_link_libraries(request_response_concurrent_requests PUBLIC provizio_dds Threads::Threads)

@@ -16,19 +16,20 @@
 
 import provizio_dds
 from math import radians, isclose, sqrt, pi, cos
-import random
 import time
 import threading
 from typing import List
 
-# All participants in this test process share this domain, chosen once at random within the DDS-safe range and away
-# from 0. These tests integrate every sample they receive on the topics they subscribe to — including the default
-# localization-extrinsics topic rt/provizio_extrinsics. Provizio's self-hosted CI includes real radar boards whose
-# resident software publishes on that standard topic on the default domain; that extrinsics shifts every accumulated
-# ego pose by a constant and corrupts the tests. Loopback confinement cannot exclude a publisher on the same board, so
-# a per-process domain is needed to give each test its own discovery space (it also isolates against any concurrent
-# run on another host).
-TEST_DOMAIN = random.randint(1, 200)  # DDS-safe range, excluding domain 0
+import provizio_test_domain
+
+# All participants in this test process share this domain, chosen once at random and away from 0. These tests
+# integrate every sample they receive on the topics they subscribe to — including the default localization-extrinsics
+# topic rt/provizio_extrinsics. Provizio's self-hosted CI includes real radar boards whose resident software publishes
+# on that standard topic on the default domain; that extrinsics shifts every accumulated ego pose by a constant and
+# corrupts the tests. Loopback confinement cannot exclude a publisher on the same board, so a per-process domain is
+# needed to give each test its own discovery space (it also isolates against any concurrent run on another host).
+# Which domains are eligible, and why not just 1..200, is in provizio_test_domain.py.
+TEST_DOMAIN = provizio_test_domain.random_test_domain()
 
 
 def test_accumulate_0_accumulated_point_clouds():
@@ -1080,9 +1081,11 @@ def _wait_until_matched(*publishers, timeout_sec=15.0):
     real match keeps these one-shot-publish tests deterministic, mirroring the C++
     tests' get_num_matched / publish_and_wait_for gating."""
     for publisher in publishers:
+        # The domain is in the message because a match that never comes has one known cause
+        # that depends on it: see provizio_test_domain.py.
         assert (
             publisher.get_num_matched_subscribers(timeout_sec, 0.0) > 0
-        ), f"accumulation_test: a subscriber failed to match within {timeout_sec}s"
+        ), f"accumulation_test: a subscriber failed to match within {timeout_sec}s on domain {TEST_DOMAIN}"
 
 
 def _wait_for_accumulated_points(accumulator, expected, timeout_sec=10.0):
@@ -2210,7 +2213,7 @@ def test_kalman_localization_predicts_at_pointcloud_receive_time():
     )
     assert kalman_x > last_fix_x + 1.0, (
         f"kalman=True: expected extrapolation > {last_fix_x + 1.0:.4f} m, got {kalman_x:.4f} "
-        f"(filter may not have extrapolated — check wiring)"
+        f"(filter may not have extrapolated -- check wiring)"
     )
 
 
@@ -2964,7 +2967,7 @@ def test_timesync_stale_cloud_uses_previous_fix():
         )
     )
     assert len(acc.get_points_local_frame_relative()) == 0, \
-        "no cloud fed yet — accumulator must be empty after Fix A and Fix B"
+        "no cloud fed yet -- accumulator must be empty after Fix A and Fix B"
 
     # Cloud arrives with header H_cloud < H_A.  When _on_point_cloud calls
     # _flush_timesync_buffer, it immediately finds:

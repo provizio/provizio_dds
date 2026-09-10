@@ -122,11 +122,16 @@ else
         local lib_basename
         local lib_realpath
 
-        # Update RUNPATH to make it look for its dependencies in the same directory or ../lib/
-        if [[ "${binary}" != *libprovizio*.so* ]]; then # Provizio libs already have correct RUNPATHS
-            # shellcheck disable=SC2016
-            patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib' "${binary}"
-        fi
+        # Update RUNPATH to make it look for its dependencies in the same directory or ../lib/.
+        # Applied to EVERY binary, provizio's own included. They used to be exempted as already
+        # having the right RUNPATH, which was untrue for years: CMake was handing them a leading
+        # empty element (the loader reads that as the current working directory) followed by the
+        # build machine's own checkout path, and being exempt here is what carried both all the
+        # way into the shipped caches. The CMakeLists no longer produces either, so this is now
+        # the belt to that braces -- and the one place a future regression would be caught
+        # whatever the generator did.
+        # shellcheck disable=SC2016
+        patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib' "${binary}"
 
         # Use ldd to find shared libraries the binary depends on
         ldd "${binary}" | awk '/=>/ { print $(NF-1) }' | while read -r lib; do

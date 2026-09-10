@@ -27,5 +27,6 @@ else()
     set_tests_properties(legacy_api_compat_cpp_test PROPERTIES TIMEOUT 10)
 endif()
 
-# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
-provizio_dds_scale_test_timeouts()
+# Scale this directory's test timeouts under a sanitizer, and let a stuck test report
+# itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
+provizio_dds_finalize_tests()

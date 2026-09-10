@@ -52,20 +52,10 @@ namespace provizio::dds
         {
         }
 
-        log_stream::~log_stream()
+        bool emit_log_line(const log_level level, const std::string &message) noexcept
         {
-            // Whole destructor body in a single try/catch: every operation
-            // below — buffer.str() (allocates), copying the std::function
-            // snapshot (allocates for non-SBO captures), and the default-emitter
-            // stream insertions — can throw bad_alloc or an I/O exception. A
-            // destructor that escapes with an exception terminates the process,
-            // so we swallow everything here. The catch is intentionally empty —
-            // there is no safe recovery path for a logger that itself failed
-            // (recursing into log_error would re-enter this very destructor).
             try
             {
-                const std::string message = buffer.str();
-
                 // Snapshot the callback under the shared lock so we don't call into
                 // user code while holding the lock (avoids unexpected deadlocks if the
                 // callback in turn logs from another thread).
@@ -78,15 +68,52 @@ namespace provizio::dds
                 if (snapshot)
                 {
                     snapshot(level, message);
-                    return;
+                    return true;
                 }
 
-                // Default emitter: info / warning → stdout, error → stderr.
+                // Default emitter: info / warning -> stdout, error -> stderr.
+                //
+                // Flushed per line, not left to the stream's own buffering. std::cout is
+                // fully buffered whenever it is not a terminal -- which is every CI run,
+                // where it is a pipe -- so a process that is killed (a test timing out) or
+                // that dies loses whatever it had buffered. The messages that matter most
+                // are exactly the ones emitted while something is going wrong, so a
+                // diagnostic that only survives a clean exit is not a diagnostic. Logging
+                // is rare and already string-formatting per call, so the flush costs
+                // nothing that matters.
                 auto &stream = (level == log_level::error) ? std::cerr : std::cout;
-                stream << "[provizio_dds] " << message << '\n';
+                stream << "[provizio_dds] " << message << '\n' << std::flush;
+                return true;
+            }
+            catch (...)  // NOLINT(bugprone-empty-catch): nowhere left to report to.
+            {
+                // The reporting channel is what just failed. Saying so is the caller's
+                // business, which is exactly why this returns a bool instead of swallowing
+                // silently the way the destructor below must.
+                return false;
+            }
+        }
+
+        log_stream::~log_stream()
+        {
+            // Whole destructor body in a single try/catch: every operation
+            // below — buffer.str() (allocates), copying the std::function
+            // snapshot (allocates for non-SBO captures), and the default-emitter
+            // stream insertions — can throw bad_alloc or an I/O exception. A
+            // destructor that escapes with an exception terminates the process,
+            // so we swallow everything here. The catch is intentionally empty —
+            // there is no safe recovery path for a logger that itself failed
+            // (recursing into log_error would re-enter this very destructor).
+            try
+            {
+                // Result deliberately discarded: a destructor has nowhere to report to, and
+                // this is the streaming form, whose callers are not suppressing anything.
+                // A caller that needs to know uses emit_log_line directly.
+                static_cast<void>(emit_log_line(level, buffer.str()));
             }
             catch (...)  // NOLINT(bugprone-empty-catch): see comment above.
             {
+                // buffer.str() allocates and can throw before emit_log_line is even entered.
             }
         }
     }  // namespace detail

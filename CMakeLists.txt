@@ -21,7 +21,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
 
 # Configuration
-set(PROVIZIO_DDS_IDLS_VERSION "2.1.0" CACHE STRING "provizio_dds_idls version")
+set(PROVIZIO_DDS_IDLS_VERSION "2.1.1" CACHE STRING "provizio_dds_idls version")
 set(FAST_DDS_VERSION "v3.6.2.0" CACHE STRING "Fast-DDS git ref (upstream tag, mirrored by the provizio fork)")
 set(FAST_DDS_NUMERIC_VERSION "3.6.2.0" CACHE STRING "Fast-DDS numeric version (used for library naming on Windows); must match the upstream CMake project() VERSION at the FAST_DDS_VERSION ref (which may have fewer components than the git tag)")
 set(FAST_CDR_VERSION "2.3" CACHE STRING "Fast-CDR major.minor version (for Windows versioned library naming). Must match the Fast-CDR bundled with FAST_DDS_VERSION")
@@ -33,6 +33,15 @@ set(PROVIZIO_CODING_STANDARDS_VERSION "1.10.5" CACHE STRING "Provizio Coding Sta
 set(DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS OFF CACHE BOOL "Disable all provizio/coding_standards checks")
 set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, without v prefix")
 set(ENABLE_TESTS OFF CACHE BOOL "Defines whether tests are built and enabled")
+# OFF by default so an ordinary `ctest` run cannot escalate. The two cases it gates
+# (network_recovery_carrier, network_recovery_cold_start_hosts) run their helpers as root
+# -- directly when already root, otherwise through `sudo -n` -- to create network
+# namespaces. Registering them unconditionally meant a plain `ctest`, or any `-R` regex
+# reaching them, did that silently on every host with passwordless sudo; a test the caller
+# selects by regex cannot be excluded by name, so the registration itself is the gate.
+# See test/network_recovery/CMakeLists.txt.
+set(ENABLE_PRIVILEGED_TESTS OFF CACHE BOOL
+    "Register the tests that need root / passwordless sudo (they create network namespaces)")
 set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be generated")
 set(PYTHON_PACKAGES_INSTALL_DIR "" CACHE STRING "Defines an install directory for Python artifacts (or use default if empty)")
 if(PYTHON_PACKAGES_INSTALL_DIR)
@@ -46,7 +55,7 @@ endif()
 set(IGNORE_BIN_CACHE OFF CACHE BOOL "Enable to force build from sources instead of using prebuilt cache")
 set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binaries, skip standard C++ libraries")
 set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
-set(DISABLE_EIGEN OFF CACHE BOOL "Force plain-CPU linear algebra in point clouds accumulation for this build even when Eigen3 is installed (consumers make their own choice at compile time — the accumulation maths path is header-only)")
+set(DISABLE_EIGEN OFF CACHE BOOL "Force plain-CPU linear algebra in point clouds accumulation for this build even when Eigen3 is installed (consumers make their own choice at compile time -- the accumulation maths path is header-only)")
 
 # Force Release CRT when building Python bindings in Debug mode on Windows.
 # Python interpreters (actions/setup-python, system installs) are Release-built
@@ -350,7 +359,7 @@ if(WIN32)
     # Fast-DDS via provizio_dds headers also get the same surface. Set
     # OUTSIDE the coding-standards if/else above so it activates on every
     # Windows build, including the StandardConfig(SAFETY_CRITICAL) branch
-    # that downstream consumers (apt_gui) take.
+    # that downstream consumers take.
     add_compile_definitions(
         NOMINMAX
         WIN32_LEAN_AND_MEAN
@@ -484,11 +493,33 @@ else(HAS_BIN_CACHE)
             set(RPATH_DIV ":")
         endif(APPLE)
 
-        set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_DIV}${RPATH_ORIGIN}${RPATH_DIV}${RPATH_ORIGIN}/../lib")
+        # The separator goes in only ahead of a value that already has something in it. An
+        # EMPTY rpath element is the CURRENT WORKING DIRECTORY to the dynamic loader (glibc's
+        # fillin_rpath substitutes "./" for it), so a leading separator here -- which is what
+        # appending to an unset CMAKE_INSTALL_RPATH used to produce -- puts every consumer's
+        # working directory on the search path of every library we ship, ahead of $ORIGIN.
+        # Anything that drops a libfastdds.so.3.6, libfastcdr.so.2 or libstdc++.so.6 into the
+        # directory a Provizio process is started from would then be loaded in preference to
+        # the real one.
+        # STREQUAL rather than if(CMAKE_INSTALL_RPATH), which is a BOOLEAN test: a caller
+        # passing -DCMAKE_INSTALL_RPATH=OFF (or 0, or NOTFOUND) meaning "no rpath please" would
+        # take the false branch and have their value concatenated straight onto the next one,
+        # yielding a first element of "OFF$ORIGIN" -- a RELATIVE path, which the loader resolves
+        # against the working directory, reinstating the very thing this guard removes. A value
+        # the caller ended with a separator of their own is trimmed for the same reason.
+        string(REGEX REPLACE "${RPATH_DIV}+$" "" CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}")
+        if(NOT CMAKE_INSTALL_RPATH STREQUAL "")
+            set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_DIV}")
+        endif()
 
-        if(CMAKE_INSTALL_PREFIX)
-            set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_DIV}${CMAKE_INSTALL_PREFIX}/lib")
-        endif(CMAKE_INSTALL_PREFIX)
+        # $ORIGIN for a library beside its dependencies, $ORIGIN/../lib for an executable in
+        # a sibling bin/. Between them they cover the installed layout wherever it is moved
+        # to, which is why CMAKE_INSTALL_PREFIX/lib is deliberately NOT added: it is the
+        # BUILD machine's absolute path, baked into a shipped binary, where it is at best
+        # redundant with the two relative entries and at worst a directory that exists only
+        # on the machine that produced the binaries (the prebuilt caches carried their CI
+        # runner's checkout path all the way to customers).
+        set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_ORIGIN}${RPATH_DIV}${RPATH_ORIGIN}/../lib")
     endif(NOT WIN32)
 
     # Help it find OpenSSL in macOS
@@ -577,7 +608,13 @@ else(HAS_BIN_CACHE)
             list(APPEND FAST_DDS_CMAKE_ARGS "--compile-no-warning-as-error")
         endif()
         if(NOT WIN32)
-            list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}${RPATH_DIV}${FAST_DDS_INSTALL_DIR}/lib")
+            # FAST_DDS_INSTALL_DIR/lib is deliberately NOT appended here: it is where these
+            # libraries are installed, so $ORIGIN already resolves to exactly that directory for
+            # every one of them, and $ORIGIN/../lib covers an executable installed beside them in
+            # bin/. Naming it absolutely as well only bakes this build tree into libraries that
+            # install(DIRECTORY) then ships verbatim -- a path that means nothing on any other
+            # machine, which is the same fault the rpath above was just cleared of.
+            list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}")
         endif()
         if(PROVIZIO_DDS_SANITIZER_FLAGS)
             list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}" "-DCMAKE_C_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}")
@@ -614,6 +651,18 @@ else(HAS_BIN_CACHE)
         ExternalProject_Add(libfast_dds
             GIT_REPOSITORY "https://github.com/${FAST_DDS_GITHUB_PROJECT}.git"
             GIT_TAG "${FAST_DDS_VERSION}"
+            # Shallow: the ref is a tag and nothing here derives anything from git history
+            # (no git describe), so a full clone of a repository this size only buys a longer
+            # transfer — the window in which a runner's network can stall it. A macOS runner
+            # lost DNS partway through this very clone and failed the job; CMake's three
+            # built-in retries have no backoff, so all three failed with it. Measured on this
+            # repository: 194 MiB of history down to 9.1 MiB, cloned in seconds.
+            #
+            # NOTE: a shallow clone truncates history to depth 1 and then checks GIT_TAG out of
+            # what was fetched, so the ref has to be a branch or tag — CMake documents a commit
+            # hash as not allowed with GIT_SHALLOW. Pinning FAST_DDS_VERSION to a raw SHA means
+            # dropping this with it.
+            GIT_SHALLOW TRUE
             UPDATE_COMMAND ""
             # Decorate eprosima::SystemInfo::update_interfaces() with
             # FASTDDS_EXPORTED_API so it is reachable in the Windows DLL
@@ -627,11 +676,65 @@ else(HAS_BIN_CACHE)
             PATCH_COMMAND ${CMAKE_COMMAND}
                 "-DSYSTEMINFO_HPP=<SOURCE_DIR>/src/cpp/utils/SystemInfo.hpp"
                 -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
+            # Give a process that creates its first participant before any interface has
+            # carrier a host id derived from the machine id, instead of the one fixed value
+            # Fast-DDS otherwise hands every such process on every host (APT-12250: two
+            # radars booted together took each other's shared-memory locators for their
+            # own and never heard each other, and a network-recovery rebuild cannot change
+            # the id). Idempotent and self-checking like the script above; see
+            # host_id_without_interfaces.cmake for the full story.
+            COMMAND ${CMAKE_COMMAND}
+                "-DHOST_HPP=<SOURCE_DIR>/src/cpp/utils/Host.hpp"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
+            # Make ResourceEvent::unregister_timer wait only for the callback of the timer being
+            # unregistered, not for the whole timer thread to go idle. As shipped, a thread that
+            # holds an endpoint mutex and destroys or recreates a TimedEvent deadlocks with any
+            # timer callback that wants that mutex -- the participant-lease reaper does -- and
+            # the test process hangs until CTest kills it (eProsima/Fast-DDS#6502, open; caught
+            # with both stacks on macos-15-intel and reproduced on Linux). WriterProxy::stop()
+            # relied on the wide wait to fence both of its timers, so it is adjusted alongside.
+            # Idempotent and self-checking like the two scripts above; see
+            # resource_event_per_timer_wait.cmake for the analysis. Drop it once upstream fixes
+            # #6502.
+            COMMAND ${CMAKE_COMMAND}
+                "-DRESOURCE_EVENT_H=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.h"
+                "-DRESOURCE_EVENT_CPP=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.cpp"
+                "-DWRITER_PROXY_CPP=<SOURCE_DIR>/src/cpp/rtps/reader/WriterProxy.cpp"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
+            # Make the per-topic payload-pool registry lock() its weak_ptr before deciding the pool
+            # is alive. As shipped it tests expired() first, and an endpoint on another thread can
+            # release the last reference in between, so create_datareader gets a null pool and
+            # dereferences it -- the SegFault CI saw in
+            # network_recovery_concurrent_make_publisher_during_reset, reproduced deterministically
+            # (see the script). Idempotent and self-checking like the three above.
+            COMMAND ${CMAKE_COMMAND}
+                "-DREGISTRY_HPP=<SOURCE_DIR>/src/cpp/rtps/history/TopicPayloadPoolRegistry_impl/TopicPayloadPoolRegistry.hpp"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
             CMAKE_ARGS ${FAST_DDS_CMAKE_ARGS}
             BUILD_BYPRODUCTS ${_FAST_DDS_BYPRODUCTS}
+        )
+
+        # Re-run the patch step when any of the scripts above changes. ExternalProject stamps a
+        # step against its COMMAND LINE, and those lines name the scripts by path -- so editing
+        # a script's contents left the stamp valid and the step skipped, and an already
+        # configured tree kept whatever the previous revision had written into it. That is how a
+        # corrected patch silently fails to reach an existing build (the scripts are idempotent,
+        # so re-running is free where nothing changed).
+        #
+        # Re-running is necessary but not sufficient, and only resource_event_per_timer_wait.cmake
+        # is structurally covered for the rest: it carries a _revision / _revision_marker pair and
+        # migrates every file it writes, so a bump reaches an existing tree. The other three
+        # detect "patched" by a bare marker, which cannot tell one revision's text from another's
+        # -- fine while their text never changes, which is why each of them says at its marker
+        # what to add before changing it.
+        ExternalProject_Add_StepDependencies(libfast_dds patch
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
         )
         link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
@@ -654,6 +757,9 @@ else(HAS_BIN_CACHE)
     FetchContent_Declare(provizio_dds_idls
         GIT_REPOSITORY "https://github.com/provizio/provizio_dds_idls"
         GIT_TAG "${PROVIZIO_DDS_IDLS_VERSION}"
+        # Tag, no git-history consumer — see the note on libfast_dds above, including why a
+        # SHA pin would have to drop this.
+        GIT_SHALLOW TRUE
     )
     FetchContent_Populate(provizio_dds_idls)
 
@@ -764,6 +870,7 @@ else(HAS_BIN_CACHE)
         src/request_response.cpp
         src/shm_cleanup.cpp
         src/topic.cpp
+        src/vpn_interfaces.cpp
     )
     # Per-platform network monitoring + address-snapshot backends. Each .cpp is
     # gated internally by the matching #ifdef so the build can also tolerate the
@@ -852,7 +959,7 @@ else(HAS_BIN_CACHE)
             if(NOT EXISTS "${_out}")
                 file(WRITE "${_out}"
                     "// Auto-generated by provizio_dds install for backwards source\n"
-                    "// compatibility — provizio_dds_idls v2.0.0 renamed generated\n"
+                    "// compatibility -- provizio_dds_idls v2.0.0 renamed generated\n"
                     "// headers from *.h to *.hpp when Fast-DDS-Gen v4 changed its\n"
                     "// default extension. Existing code that includes the old .h\n"
                     "// spelling keeps compiling via this shim.\n"
@@ -922,6 +1029,9 @@ else(HAS_BIN_CACHE)
         FetchContent_Declare(fast_dds_python
             GIT_REPOSITORY "https://github.com/provizio/Fast-DDS-python"
             GIT_TAG "${FAST_DDS_PYTHON_VERSION}"
+            # Tag, no git-history consumer — see the note on libfast_dds above, including why
+            # a SHA pin would have to drop this.
+            GIT_SHALLOW TRUE
         )
         FetchContent_Populate(fast_dds_python)
 
@@ -962,7 +1072,7 @@ else(HAS_BIN_CACHE)
         if(_stable_abi_genexpr_pos EQUAL -1)
             message(FATAL_ERROR
                 "Fast-DDS-python ${FAST_DDS_PYTHON_VERSION}: the Python3 SABIModule/Module generator-expression "
-                "patch did not produce the expected collapsed form — upstream text has likely changed. Update the "
+                "patch did not produce the expected collapsed form -- upstream text has likely changed. Update the "
                 "REGEX REPLACE in CMakeLists.txt or the CMake 3.22 / ROS 2 humble compatibility build will break.")
         endif()
         # Don't set SWIGWORDSIZE64 on macOS. Upstream defines it on every
@@ -991,7 +1101,7 @@ else(HAS_BIN_CACHE)
         if(_swigwordsize_guard_pos EQUAL -1)
             message(FATAL_ERROR
                 "Fast-DDS-python ${FAST_DDS_PYTHON_VERSION}: the SWIGWORDSIZE64 macOS-guard patch did not "
-                "produce the expected 'NOT APPLE' form — upstream text has likely changed. Update the "
+                "produce the expected 'NOT APPLE' form -- upstream text has likely changed. Update the "
                 "REGEX REPLACE in CMakeLists.txt or macOS wrapper compilation will regress.")
         endif()
         # Remove cmake config/export install rules from fastdds_python (not needed at runtime, and
@@ -1004,6 +1114,223 @@ else(HAS_BIN_CACHE)
             string(SUBSTRING "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}" 0 ${_FASTDDS_PYTHON_EXPORT_POS} FASTDDS_PYTHON_SWIG_CMAKE_CONTENT)
         endif()
         file(WRITE "${FASTDDS_PYTHON_SWIG_CMAKE_FILE}" "${FASTDDS_PYTHON_SWIG_CMAKE_CONTENT}")
+
+        # SWIG 4.5.0 stopped emitting the Python-2 compatibility aliases its generated
+        # header used to carry, and four of Fast-DDS-python's interface files still call
+        # PyInt_FromLong through one of them. Under Python 3 that name never meant anything
+        # but PyLong_FromLong -- SWIG's own alias defined it as exactly that -- so the call
+        # sites are rewritten to the name that survives, which compiles identically under
+        # every SWIG version and needs no version pin.
+        #
+        # Not hypothetical, and not a macOS quirk either: Homebrew moved swig to 4.5.0, and
+        # every macOS bindings build started failing to compile the generated wrapper with
+        # "use of undeclared identifier 'PyInt_FromLong'". Linux and Windows install a
+        # pinned 4.4.x today and so were unaffected, but they inherit the fix the moment
+        # their pin moves. A missing file here is a hard CMake error rather than a silent
+        # skip, which is what should happen if a version bump moves these interfaces.
+        foreach(_fastdds_python_py2_alias_file
+                "fastdds/rtps/common/EntityId_t.i"
+                "fastdds/rtps/common/GuidPrefix_t.i"
+                "fastdds/rtps/common/InstanceHandle.i"
+                "fastdds/rtps/common/Locator.i")
+            set(_fastdds_python_py2_alias_path
+                "${fast_dds_python_SOURCE_DIR}/fastdds_python/src/swig/${_fastdds_python_py2_alias_file}")
+            file(READ "${_fastdds_python_py2_alias_path}" _fastdds_python_py2_alias_content)
+            # Written only when there is something to change. file(WRITE) is not
+            # copy-if-different -- it moves the mtime even for identical bytes -- and these .i
+            # files are real SWIG inputs, so rewriting them unconditionally re-ran SWIG and
+            # recompiled the whole generated wrapper on EVERY configure of a PYTHON_BINDINGS
+            # tree. The set_listener patch below already guards before writing; this is the
+            # same guard.
+            string(FIND "${_fastdds_python_py2_alias_content}" "PyInt_FromLong"
+                _fastdds_python_py2_alias_pos)
+            if(NOT _fastdds_python_py2_alias_pos EQUAL -1)
+                string(REPLACE "PyInt_FromLong" "PyLong_FromLong"
+                    _fastdds_python_py2_alias_content "${_fastdds_python_py2_alias_content}")
+                file(WRITE "${_fastdds_python_py2_alias_path}" "${_fastdds_python_py2_alias_content}")
+            endif()
+        endforeach()
+
+        # Expose DomainParticipant::set_listener's timeout overload to Python.
+        #
+        # TEMPORARY. The defect is reported to eProsima, and the fix expected from them is to
+        # the ROOT CAUSE -- DomainParticipantImpl::set_listener not building an unbounded
+        # deadline in the first place. Once a FAST_DDS_VERSION carries that, none of this is
+        # needed: not this patch, not python/provizio_dds.py's _detach_participant_listener,
+        # and not domain_participant::detach_participant_listener on the C++ side either.
+        # All three exist only to keep that unbounded deadline from being reached, and they
+        # should be retired together rather than one at a time.
+        #
+        # How to tell, on a FAST_DDS_VERSION bump: read DomainParticipantImpl::set_listener in
+        # the new Fast-DDS. While it still does
+        #     auto time_out = time_point<steady_clock>::max();
+        #     if (timeout < seconds::max()) { time_out = steady_clock::now() + timeout; }
+        # and waits on that, the defect is present and all three pieces stay. A green CI run
+        # proves nothing either way: the spin exists only where libstdc++ has to convert a
+        # steady_clock deadline (GCC 9 -- the jetson jobs), so every other platform is quiet
+        # whether or not the bug is fixed.
+        #
+        # Separately, on a FAST_DDS_PYTHON_VERSION bump: if upstream ever wraps a timeout
+        # overload of its own, inserting ours too would be a redefinition and would fail the
+        # wrapper compile. The guard below prevents that by keying on std::chrono::seconds
+        # rather than on our own wording, so the patch simply stops applying -- but the
+        # duplication is worth checking by hand on any Fast-DDS-python upgrade rather than
+        # trusting the guard alone, since it is one string away from the build breaking.
+        #
+        # Fast-DDS declares four set_listener overloads, two of which take an explicit
+        # std::chrono::seconds. Fast-DDS-python %ignores the real method and re-exposes only
+        # (listener) and (listener, mask) through %extend, so from Python the ONLY reachable
+        # form is the one whose timeout defaults to std::chrono::seconds::max(). That default
+        # is not a long wait -- on some standard libraries it is a busy loop:
+        #
+        #   DomainParticipantImpl::set_listener turns seconds::max() into a deadline of
+        #   steady_clock::time_point::max() and waits on it until no listener callback is in
+        #   flight. libstdc++ only has a conversion-free wait_until for its own __clock_t,
+        #   which is steady_clock ONLY when _GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT is defined
+        #   (GCC 10+ with glibc 2.30+). Below that -- Ubuntu 20.04 / GCC 9, which is what the
+        #   jetson-20.04 devices and CI runners have -- steady_clock is a FOREIGN clock and
+        #   the deadline goes through
+        #       system_clock::now() + ceil(deadline - steady_clock::now())
+        #   which overflows for a deadline ~292 years out. The underlying wait then returns
+        #   immediately, the re-check against the caller's clock says the deadline has not
+        #   passed, and the predicate loop goes round again at once. Measured by driving that
+        #   same conversion deliberately (a clock libstdc++ must convert, so the arithmetic is
+        #   identical on any version): 93 million predicate evaluations in 5 seconds, and the
+        #   callback thread it waits for never acquired the mutex in 4.7 of them -- so it does
+        #   not merely spin, it withholds the very thing that would end the wait.
+        #
+        # provizio_dds' C++ side avoids this by passing an explicit finite timeout
+        # (domain_participant::detach_participant_listener). Python could not, because no
+        # overload taking one was wrapped. This adds the missing one, so the Python
+        # participant can detach its listener the same way before delete_participant.
+        #
+        # Added rather than changing the existing overloads' behaviour: a caller who wants
+        # Fast-DDS' documented default still gets it, and the two upstream forms are wrapped
+        # byte-for-byte as before. The director INCREF/DECREF bookkeeping is copied exactly
+        # from the (listener, mask) form -- it is what keeps the Python listener object alive
+        # for as long as C++ holds a pointer to it, and omitting it would trade a hang for a
+        # use-after-free.
+        set(_fastdds_python_participant_i
+            "${fast_dds_python_SOURCE_DIR}/fastdds_python/src/swig/fastdds/dds/domain/DomainParticipant.i")
+        file(READ "${_fastdds_python_participant_i}" _fastdds_python_participant_i_content)
+        # Anchored on the (listener, mask) signature, which occurs exactly once: the
+        # sibling overload takes no mask, and the one added below writes "mask," rather than
+        # "mask)" because a third parameter follows it. The obvious anchor -- the doc comment
+        # of the next method -- appears twice (create_publisher and its _with_profile twin),
+        # and string(REPLACE) would then insert the overload twice and fail the wrapper
+        # compile on a redefinition.
+        set(_fastdds_python_set_listener_anchor
+            [==[    ReturnCode_t set_listener(
+            DomainParticipantListener* listener,
+            const StatusMask& mask)]==])
+        set(_fastdds_python_set_listener_timeout
+            [==[    // [provizio_dds] set_listener timeout overload
+    /**
+     * Modifies the DomainParticipantListener, waiting at most @c timeout_seconds for any
+     * listener callback still executing.
+     *
+     * The overload Python needs: the wrapped forms above leave the timeout at
+     * std::chrono::seconds::max(), which busy-loops instead of waiting on standard
+     * libraries whose condition_variable has to convert a steady_clock deadline (see the
+     * note in provizio_dds' CMakeLists.txt).
+     *
+     * @param listener new value for the DomainParticipantListener
+     * @param mask StatusMask that holds statuses the listener responds to
+     * @param timeout_seconds how long to wait for in-flight callbacks, in seconds
+     * @return RETCODE_OK, or RETCODE_ERROR if the wait timed out
+     */
+    ReturnCode_t set_listener(
+            DomainParticipantListener* listener,
+            const StatusMask& mask,
+            unsigned int timeout_seconds)
+    {
+        eprosima::fastdds::dds::DomainParticipantListener* old_listener =
+            const_cast<eprosima::fastdds::dds::DomainParticipantListener*>(self->get_listener());
+
+        eprosima::fastdds::dds::ReturnCode_t ret =
+            self->set_listener(listener, mask, std::chrono::seconds(timeout_seconds));
+
+        if ( (eprosima::fastdds::dds::RETCODE_OK == ret) && (listener != old_listener) )
+        {
+
+            SWIG_PYTHON_THREAD_BEGIN_BLOCK;
+            if (nullptr != listener)
+            {
+                Swig::Director* director = SWIG_DIRECTOR_CAST(listener);
+
+                if (nullptr != director)
+                {
+                    Py_INCREF(director->swig_get_self());
+                }
+            }
+            if (nullptr != old_listener)
+            {
+                Swig::Director* director = SWIG_DIRECTOR_CAST(old_listener);
+
+                if (nullptr != director)
+                {
+                    Py_DECREF(director->swig_get_self());
+                }
+            }
+            SWIG_PYTHON_THREAD_END_BLOCK;
+
+        }
+
+        return ret;
+    }
+
+    ReturnCode_t set_listener(
+            DomainParticipantListener* listener,
+            const StatusMask& mask)]==])
+        # Two DIFFERENT questions, asked separately, because they need opposite answers.
+        #
+        # "Have WE already patched this file?" is keyed on a marker of our own, so a
+        # re-configure is a no-op. Keying that on upstream's std::chrono::seconds instead --
+        # as this did -- conflates it with the second question and fails OPEN: any future
+        # Fast-DDS-python that merely MENTIONS chrono in DomainParticipant.i, for a doc comment
+        # or an unrelated method, silently skips the patch, the build still succeeds, and the
+        # three-argument set_listener is simply absent -- which provizio_dds.py swallows in its
+        # `except TypeError` fallback, putting the livelock back on every jetson-class host with
+        # nothing at all to say it had. That is exactly what the "fail closed" comment below
+        # promises will not happen.
+        #
+        # "Has upstream grown its own timeout overload?" is asked second and is FATAL, not a
+        # skip: inserting ours beside theirs fails the wrapper compile on a redefinition, and a
+        # fixed dependency turning into a broken build must say so rather than be guessed at.
+        set(_fastdds_python_set_listener_marker "// [provizio_dds] set_listener timeout overload")
+        string(FIND "${_fastdds_python_participant_i_content}"
+            "${_fastdds_python_set_listener_marker}" _fastdds_python_set_listener_marker_pos)
+        if(NOT _fastdds_python_set_listener_marker_pos EQUAL -1)
+            message(STATUS "Fast-DDS-python: set_listener timeout overload already added -- no-op")
+        else()
+            string(FIND "${_fastdds_python_participant_i_content}" "std::chrono::seconds"
+                _fastdds_python_set_listener_timeout_pos)
+            if(NOT _fastdds_python_set_listener_timeout_pos EQUAL -1)
+                message(FATAL_ERROR
+                    "Fast-DDS-python ${FAST_DDS_PYTHON_VERSION}: DomainParticipant.i already "
+                    "mentions std::chrono::seconds, which this project's patch does not account "
+                    "for. If upstream now wraps set_listener's timeout overload itself, delete "
+                    "this patch; adding ours beside theirs fails the wrapper compile on a "
+                    "redefinition. If it is something unrelated, narrow this check.")
+            endif()
+            string(FIND "${_fastdds_python_participant_i_content}"
+                "${_fastdds_python_set_listener_anchor}" _fastdds_python_set_listener_anchor_pos)
+            # Fail closed, as the CMakeLists patches above do: a silent no-op here would put
+            # the livelock back on every jetson-class host with nothing to say it had.
+            if(_fastdds_python_set_listener_anchor_pos EQUAL -1)
+                message(FATAL_ERROR
+                    "Fast-DDS-python ${FAST_DDS_PYTHON_VERSION}: could not find where to add "
+                    "DomainParticipant::set_listener's timeout overload in DomainParticipant.i -- "
+                    "upstream text has likely changed. Without it the Python participant cannot "
+                    "bound its listener detach, and teardown busy-loops on any standard library "
+                    "whose condition_variable converts a steady_clock deadline (Ubuntu 20.04 / GCC 9).")
+            endif()
+            string(REPLACE
+                "${_fastdds_python_set_listener_anchor}"
+                "${_fastdds_python_set_listener_timeout}"
+                _fastdds_python_participant_i_content "${_fastdds_python_participant_i_content}")
+            file(WRITE "${_fastdds_python_participant_i}" "${_fastdds_python_participant_i_content}")
+        endif()
 
         set(FASTDDS_PYTHON_CMAKE_DIR "${fast_dds_python_SOURCE_DIR}/fastdds_python")
         set(FASTDDS_PYTHON_CMAKE_FILE "${FASTDDS_PYTHON_CMAKE_DIR}/CMakeLists.txt")

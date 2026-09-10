@@ -16,10 +16,16 @@
 
 import asyncio
 import random
+import os
 import sys
 import time
 
 import provizio_dds
+import provizio_test_domain
+
+# Test budgets are scaled by the factor provizio_dds_finalize_tests exports (5 under a
+# sanitizer build), exactly as the C++ mirrors scale theirs by PROVIZIO_DDS_TEST_TIMEOUT_SCALE.
+_TIMEOUT_SCALE = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
 
 _START_TIME = time.monotonic()
 
@@ -39,13 +45,11 @@ async def main() -> int:
 
     test_name_postfix = sys.argv[1]
     value = int(sys.argv[2])
-    # Remap to domain IDs 100-127 to avoid exceeding Fast-DDS max (127) and
-    # to prevent multicast discovery state accumulation across rapid
-    # participant create/destroy cycles.
-    _BASE_DOMAIN_ID = 100
-    _DOMAIN_RANGE = 28  # 100..127
+    # A per-iteration domain, derived from the iteration index, so that DDS discovery state
+    # cannot accumulate across rapid participant create/destroy cycles and no other suite
+    # shares the domain. The band, and why it stops at 100, is in provizio_test_domain.py.
     domain_id = (
-        (_BASE_DOMAIN_ID + int(sys.argv[3]) % _DOMAIN_RANGE)
+        provizio_test_domain.seed_band_domain(int(sys.argv[3]))
         if len(sys.argv) > 3
         else 14
     )
@@ -56,7 +60,7 @@ async def main() -> int:
     # operation (discovery + match settling + round-trip); the previous 8s was too tight in
     # the slow ROS2-compat Debug containers (the request typically completes in ~1-3s, but
     # worst-case discovery occasionally exceeded 8s, flaking the paired service too).
-    timeout_sec = 30.0
+    timeout_sec = 30.0 * _TIMEOUT_SCALE
 
     max_wait_both_sides_ms = 1999
     wait_in_client_under_ms = 1000  # In every iteration we either postpone the client or the server, never both

@@ -20,12 +20,19 @@
 # that the radar_range enum -> uint32 migration broke deployed-fleet
 # subscribers.
 
+import os
 import sys
 import threading
 import provizio_dds
 
-CROSS_COMPAT_DOMAIN_ID = 42
-CROSS_COMPAT_RADAR_INFO_TOPIC_NAME = "provizio_dds_cross_compat_radar_info_topic"
+# The driver (cross_version_compat_test.py) gives every run of this test its own domain and its
+# own topic / service names, because CI runs four copies of it on jetson runners that share a
+# LAN within seconds of each other, and the halves that are not confined to loopback used to
+# meet -- see the comment on _CHILD_ENV there. Falls back to the historical fixed values when
+# this script is run by hand.
+CROSS_COMPAT_DOMAIN_ID = int(os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_DOMAIN", "42"))
+CROSS_COMPAT_NAME_SUFFIX = os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_SUFFIX", "")
+CROSS_COMPAT_RADAR_INFO_TOPIC_NAME = "provizio_dds_cross_compat_radar_info_topic" + CROSS_COMPAT_NAME_SUFFIX
 
 EXPECTED_SERIAL_NUMBER = "cross_compat_radar_42"
 EXPECTED_SUPPORTED_RANGES = [0, 1, 2, 3, 4]
@@ -96,7 +103,7 @@ with cv:
         sys.exit(1)
     if not _matches_expected(received_message):
         print(
-            "cross_compat_radar_info_subscriber: field mismatch — expected "
+            "cross_compat_radar_info_subscriber: field mismatch -- expected "
             f"serial_number={EXPECTED_SERIAL_NUMBER!r}, "
             f"supported_ranges={EXPECTED_SUPPORTED_RANGES}, "
             f"current_range={EXPECTED_CURRENT_RANGE}; got {received_message}")

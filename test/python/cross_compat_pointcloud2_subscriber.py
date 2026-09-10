@@ -23,13 +23,20 @@
 # differently in 3.x vs 1.10.x will produce a mismatched byte sequence
 # even if all the structured fields look right.
 
+import os
 import struct
 import sys
 import threading
 import provizio_dds
 
-CROSS_COMPAT_DOMAIN_ID = 42
-CROSS_COMPAT_POINTCLOUD2_TOPIC_NAME = "provizio_dds_cross_compat_pointcloud2_topic"
+# The driver (cross_version_compat_test.py) gives every run of this test its own domain and its
+# own topic / service names, because CI runs four copies of it on jetson runners that share a
+# LAN within seconds of each other, and the halves that are not confined to loopback used to
+# meet -- see the comment on _CHILD_ENV there. Falls back to the historical fixed values when
+# this script is run by hand.
+CROSS_COMPAT_DOMAIN_ID = int(os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_DOMAIN", "42"))
+CROSS_COMPAT_NAME_SUFFIX = os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_SUFFIX", "")
+CROSS_COMPAT_POINTCLOUD2_TOPIC_NAME = "provizio_dds_cross_compat_pointcloud2_topic" + CROSS_COMPAT_NAME_SUFFIX
 
 EXPECTED_HEADER_SEC = 1717000000
 EXPECTED_HEADER_NANOSEC = 123456789

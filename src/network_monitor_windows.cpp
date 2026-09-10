@@ -40,8 +40,13 @@
 #pragma comment(lib, "Iphlpapi.lib")
 #pragma comment(lib, "Ws2_32.lib")
 
+#include "provizio/dds/logging.h"
+
+#include "detail/monitor_callback_guard.h"
+
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <mutex>
 #include <stdexcept>
 
@@ -52,6 +57,9 @@ namespace provizio::dds::detail
         HANDLE notification_handle{nullptr};
         HANDLE interface_notification_handle{nullptr};
         on_event_callback callback;
+        /// Streak latch for invoke_monitor_callback: one report per run of failures, not one
+        /// per event. See its documentation.
+        std::atomic<bool> callback_failure_reported{false};
 
         // Synchronisation for safely tearing down the registration. Per Microsoft:
         // "Notifications may continue to be delivered after CancelMibChangeNotify2
@@ -107,10 +115,7 @@ namespace provizio::dds::detail
                 return;
             }
 
-            if (self->callback)
-            {
-                self->callback();
-            }
+            invoke_monitor_callback(self->callback, self->callback_failure_reported);
         }
 
         static VOID NETIOAPI_API_ on_address_change(PVOID context, PMIB_UNICASTIPADDRESS_ROW row,

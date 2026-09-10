@@ -23,12 +23,19 @@
 # vice versa. This publisher exercises both directions when paired with
 # cross_compat_radar_info_subscriber.py via cross_version_compat_test.py.
 
+import os
 import sys
 import time
 import provizio_dds
 
-CROSS_COMPAT_DOMAIN_ID = 42
-CROSS_COMPAT_RADAR_INFO_TOPIC_NAME = "provizio_dds_cross_compat_radar_info_topic"
+# The driver (cross_version_compat_test.py) gives every run of this test its own domain and its
+# own topic / service names, because CI runs four copies of it on jetson runners that share a
+# LAN within seconds of each other, and the halves that are not confined to loopback used to
+# meet -- see the comment on _CHILD_ENV there. Falls back to the historical fixed values when
+# this script is run by hand.
+CROSS_COMPAT_DOMAIN_ID = int(os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_DOMAIN", "42"))
+CROSS_COMPAT_NAME_SUFFIX = os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_SUFFIX", "")
+CROSS_COMPAT_RADAR_INFO_TOPIC_NAME = "provizio_dds_cross_compat_radar_info_topic" + CROSS_COMPAT_NAME_SUFFIX
 
 SERIAL_NUMBER = "cross_compat_radar_42"
 # The full enumerator set — both versions assign identical integer values
@@ -97,5 +104,12 @@ for _ in range(PUBLISH_TIMES):
     successful_times += 1 if publisher.publish(message) else 0
     time.sleep(WAIT_TIME)
 
+if successful_times == 0:
+    print(f"cross_compat_radar_info_publisher: published NONE of the {PUBLISH_TIMES} messages")
+    sys.exit(1)
+
+# Printed on the success path only: the driver (cross_version_compat_test.py) reads a
+# "Success" line as proof this side finished the work the pair asserts, so a failure
+# must never carry the word. Its failure line is above, and says what went wrong.
 print(f"cross_compat_radar_info_publisher: Successfully published {successful_times} times")
-sys.exit(0 if successful_times > 0 else 1)
+sys.exit(0)
