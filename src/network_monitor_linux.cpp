@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <linux/rtnetlink.h>
 #include <stdexcept>
 #include <sys/eventfd.h>
@@ -33,6 +34,8 @@
 #include <vector>
 
 #include "provizio/dds/logging.h"
+
+#include "detail/monitor_callback_guard.h"
 
 namespace provizio::dds::detail
 {
@@ -54,6 +57,10 @@ namespace provizio::dds::detail
         // that window would tear down a perfectly healthy monitor. See run().
         std::atomic<bool> alive{false};
         on_event_callback callback;
+        /// Streak latch for invoke_monitor_callback: one report per run of failures, not one
+        /// per event. See its documentation. Mutable because run_loop() is const and this is
+        /// diagnostic state, not part of the monitor's observable configuration.
+        mutable std::atomic<bool> callback_failure_reported{false};
         // NOLINTEND(misc-non-private-member-variables-in-classes)
 
         bool open_channel()
@@ -240,12 +247,22 @@ namespace provizio::dds::detail
                 // Unsigned to avoid the signed/unsigned comparison inside
                 // NLMSG_OK on newer kernel headers; got > 0 was already
                 // verified above so the cast is safe.
+                //
+                // Unsigned costs NLMSG_OK its termination guard, though: NLMSG_NEXT subtracts
+                // the ALIGNED message length while NLMSG_OK only bounds the unaligned one, so a
+                // final message whose aligned length overshoots what was received would leave a
+                // wrapped-around counter that NLMSG_OK's `len >= sizeof(nlmsghdr)` clause, an
+                // unsigned compare here, no longer stops -- and the walk would read past the
+                // datagram into the uninitialised tail of the buffer. No mainline kernel emits
+                // such a message (nlmsg_end always aligns), but the second clause below is what
+                // makes the loop safe against one. Same bound as the interface-kind dump's walk
+                // in src/address_snapshot_linux.cpp.
                 auto remaining = static_cast<unsigned int>(got);
                 // Raw byte buffer -> nlmsghdr* is the canonical netlink idiom;
                 // NLMSG_OK / NLMSG_NEXT require a non-const nlmsghdr*.
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-                for (auto *nh = reinterpret_cast<nlmsghdr *>(buffer.data()); NLMSG_OK(nh, remaining);
-                     nh = NLMSG_NEXT(nh, remaining))
+                for (auto *nh = reinterpret_cast<nlmsghdr *>(buffer.data());
+                     NLMSG_OK(nh, remaining) && NLMSG_ALIGN(nh->nlmsg_len) <= remaining; nh = NLMSG_NEXT(nh, remaining))
                 {
                     if (nh->nlmsg_type == NLMSG_DONE)
                     {
@@ -263,9 +280,9 @@ namespace provizio::dds::detail
                     }
                 }
 
-                if (any_event && callback)
+                if (any_event)
                 {
-                    callback();
+                    invoke_monitor_callback(callback, callback_failure_reported);
                 }
             }
         }

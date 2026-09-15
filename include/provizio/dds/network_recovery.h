@@ -61,6 +61,12 @@ namespace provizio::dds
          *     when the variable is unset).
          *   - @c off / @c 0 / @c false / @c no — disable auto-recovery.
          * Any other value is treated as the default (enabled) with a one-time warning.
+         *
+         * With the variable unset, a participant whose caller-supplied XML profile confines
+         * every socket transport to the loopback interface is not watched: no network change
+         * can take an address away from it or re-address it, so a rebuild could fix nothing and
+         * would only cost its peers a rediscovery. Setting the variable to @c on, like passing
+         * @c on here, has it watched anyway.
          */
         env_var_controlled,
 
@@ -94,6 +100,26 @@ namespace provizio::dds
      * @return true if auto-recovery is effectively enabled for this participant.
      */
     PROVIZIO_DDS_API bool resolve_network_recovery_enabled(network_recovery_mode mode);
+
+    /**
+     * @brief Whether auto-recovery was asked for in so many words -- @c network_recovery_mode::on,
+     * or @c env_var_controlled with @c PROVIZIO_DDS_NETWORK_RECOVERY set to any value that does
+     * not switch it off -- as opposed to merely defaulted on with the variable unset. The
+     * distinction decides whether the library may leave a participant unwatched because watching
+     * it could fix nothing (see @c network_recovery_mode::env_var_controlled): an explicit
+     * request is always honoured.
+     *
+     * "Any value that does not switch it off" is wider than the recognised spellings, and
+     * deliberately so: an unrecognised value (@c "tru", @c "banana") warns and leaves recovery
+     * enabled, and having set it the caller has asked for something, so it counts as an explicit
+     * request. Only @c off / @c 0 / @c false / @c no, and an unset or empty variable, do not --
+     * the first four because they asked for the opposite, the last two because they asked for
+     * nothing. The Python mirror answers identically, which matters because one host runs both.
+     *
+     * @param mode The participant's recovery mode.
+     * @return true when the caller or the environment asked for recovery explicitly.
+     */
+    PROVIZIO_DDS_API bool network_recovery_explicitly_requested(network_recovery_mode mode);
 
     /**
      * @brief Force Fast-DDS to re-enumerate the host's network interfaces and

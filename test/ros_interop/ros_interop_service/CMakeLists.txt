@@ -13,4 +13,8 @@
 # the License.
 
 add_executable(ros_interop_service ros_interop_service.cpp)
-target_link_libraries(ros_interop_service PUBLIC provizio_dds)
+# Threads::Threads for the std::condition_variable this waits on: on a glibc older
+# than 2.34 the pthread symbols behind it live outside libc, so linking provizio_dds
+# alone fails there and succeeds on every newer host.
+find_package(Threads REQUIRED)
+target_link_libraries(ros_interop_service PUBLIC provizio_dds Threads::Threads)

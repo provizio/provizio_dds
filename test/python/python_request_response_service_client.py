@@ -18,8 +18,13 @@
 # explicit wait_for_service() readiness check. Reuses the existing x^2 request/response service.
 
 import asyncio
+import os
 import sys
 import provizio_dds
+
+# Test budgets are scaled by the factor provizio_dds_finalize_tests exports (5 under a
+# sanitizer build), exactly as the C++ mirrors scale theirs by PROVIZIO_DDS_TEST_TIMEOUT_SCALE.
+_TIMEOUT_SCALE = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
 
 log_prefix = "python_request_response_service_client: "
 
@@ -27,7 +32,7 @@ log_prefix = "python_request_response_service_client: "
 async def main():
     service_name = "provizio_dds_test_request_response"
     domain_id = 14
-    timeout = 30.0
+    timeout = 30.0 * _TIMEOUT_SCALE
 
     # x and x^2 pairs; expected value 0 means "fire the request but don't validate the response".
     expected_request_response_pairs = [

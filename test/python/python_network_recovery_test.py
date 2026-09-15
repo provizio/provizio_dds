@@ -19,6 +19,7 @@ Subcommand-driven so each ctest entry can run in its own process (the
 env-var resolution is one-shot cached per process, matching the C++ side).
 """
 
+import faulthandler
 import gc
 import os
 import sys
@@ -27,7 +28,43 @@ import time
 import traceback
 import weakref
 
+import provizio_test_deadline
 import provizio_dds
+from provizio_dds import network_recovery as _network_recovery
+
+
+# A case that stops making progress used to reach its ctest timeout and be killed with
+# no output and no stacks — an unexplained hang and nothing to diagnose it with (seen as
+# a 45 s timeout of reset_roundtrip on macOS while its neighbours took ~1 s). This dumps
+# every thread's stack, repeatedly, once a case runs longer than any of them ever should.
+# exit=False and repeat=True deliberately: the dump must not decide the case's outcome,
+# only describe where each thread is waiting, and repeating distinguishes "wedged" from
+# "slow" by showing whether the stacks move.
+# Scaled the same way CMake scales the ctest timeouts (provizio_dds_finalize_tests
+# multiplies them by PROVIZIO_DDS_TEST_TIMEOUT_SCALE for sanitizer builds), so a
+# slow-but-passing Debug/ASan case does not dump every thread's stack just for being slow.
+# The same scale on its own, for the cases whose OWN waits have to follow the
+# environment the way the ctest timeouts do.
+_TIMEOUT_SCALE = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
+_WATCHDOG_SEC = 20.0 * _TIMEOUT_SCALE
+
+
+def _arm_watchdog():
+    faulthandler.dump_traceback_later(_WATCHDOG_SEC, repeat=True, exit=False)
+
+
+def _disarm_watchdog():
+    """Replace the repeating per-case watchdog with the one-shot deadline dump, so a case
+    that finished cannot dump stacks repeatedly while the process tears its participants
+    down -- but a teardown that never finishes still says so.
+
+    Cancelling outright, which this used to do, left the whole of interpreter shutdown
+    unwatched. That is not a quiet stretch: a participant destroyed there reaches Fast-DDS'
+    listener detach, and a hang in it is invisible because CTest's SIGKILL takes the
+    buffered stdout with it. The deadline dump fires only if the process is still alive a
+    few seconds short of the ctest TIMEOUT, so a healthy teardown stays silent."""
+    faulthandler.cancel_dump_traceback_later()
+    provizio_test_deadline.arm()
 
 
 def _log(message):
@@ -156,6 +193,78 @@ def test_env_garbage():
     return 0
 
 
+def _test_env_explicit_request(expected: bool):
+    """Common body for the explicit-request subcommands.
+
+    network_recovery_explicitly_requested tells "asked for" apart from "merely defaulted
+    on", which is what decides whether a participant whose transports cannot benefit from a
+    rebuild is watched anyway. The distinction rests on the RAW env value, so the boundary
+    cases are what these pin -- and they are mirrored case for case by the C++
+    network_recovery_env_explicit_* entries, so the two languages cannot answer differently
+    for one value on one host. Own process each, for the one-shot cache.
+    """
+    from provizio_dds import network_recovery as nr
+    actual = nr.network_recovery_explicitly_requested(
+        provizio_dds.NetworkRecoveryMode.ENV_VAR_CONTROLLED
+    )
+    assert actual is expected, f"expected {expected}, got {actual}"
+    # Neither explicit mode consults the variable at all.
+    assert nr.network_recovery_explicitly_requested(
+        provizio_dds.NetworkRecoveryMode.ON
+    ) is True
+    assert nr.network_recovery_explicitly_requested(
+        provizio_dds.NetworkRecoveryMode.OFF
+    ) is False
+    _log(f"env_explicit_request {expected}: PASS")
+    return 0
+
+
+def test_env_explicit_unset():
+    """PROVIZIO_DDS_NETWORK_RECOVERY unset/empty -> defaulted on, not requested."""
+    return _test_env_explicit_request(expected=False)
+
+
+def test_env_explicit_whitespace():
+    """A value of nothing but whitespace is a value the user set: unrecognised (so the
+    default stands, with a warning) but an explicit request all the same. The C++ mirror
+    reads the raw value the same way -- it must, or the same variable would mean two things
+    to the two halves of one application."""
+    return _test_env_explicit_request(expected=True)
+
+
+def test_env_explicit_on():
+    """PROVIZIO_DDS_NETWORK_RECOVERY=on -> requested."""
+    return _test_env_explicit_request(expected=True)
+
+
+def test_env_explicit_off():
+    """PROVIZIO_DDS_NETWORK_RECOVERY=off -> not a request to watch anything."""
+    return _test_env_explicit_request(expected=False)
+
+
+def test_allowed_interfaces_are_ipv4():
+    """The mirror of the C++ `allowed_interfaces_are_ipv4` case.
+
+    Exercises the REAL host enumeration rather than a substituted list, and asserts it as a
+    property of whatever this host has: every entry goes into a UDPv4 transport descriptor's
+    allowlist, where an IPv6 address text could never own a sender socket. A property rather
+    than a comparison against the C++ enumeration deliberately -- the two read the host
+    through different mechanisms (IPFinder there, the POSIX walk here), each matching what
+    its own transport layer sees, so set equality would assert an agreement neither side
+    promises.
+    """
+    from provizio_dds import network_recovery as nr
+    allowed = nr.allowed_interfaces(frozenset())
+    if nr.allowed_interfaces_read_failed():
+        # A host whose interfaces cannot be read says nothing either way.
+        _log("allowed_interfaces_are_ipv4: PASS (interfaces unreadable on this host)")
+        return 0
+    offenders = [entry for entry in allowed if ":" in entry[0]]
+    assert not offenders, f"IPv6 address text(s) in a UDPv4 allowlist: {offenders!r}"
+    _log(f"allowed_interfaces_are_ipv4: PASS ({len(allowed)} entry/entries on this host)")
+    return 0
+
+
 def test_snapshot():
     """capture_address_snapshot returns a non-error result; loopback excluded."""
     from provizio_dds import network_recovery as nr
@@ -174,6 +283,7 @@ def test_reset_roundtrip():
     participant = provizio_dds.make_domain_participant(
         0, provizio_dds.NetworkRecoveryMode.ON
     )
+    _log("reset_roundtrip: participant created")
 
     received = []
     received_event = threading.Event()
@@ -185,6 +295,7 @@ def test_reset_roundtrip():
             received_event.set()
 
     publisher, subscriber = _make_pub_sub_pair(participant, "provizio_dds_python_recovery_topic", on_data)
+    _log("reset_roundtrip: endpoints created")
 
     # Baseline: publish-receive before reset.
     deadline = time.monotonic() + 10.0
@@ -199,6 +310,7 @@ def test_reset_roundtrip():
                     saw_before = True
                 received_event.clear()
     assert saw_before, "did not receive baseline message"
+    _log("reset_roundtrip: baseline round-trip ok")
 
     # Publisher.get_guid() returns a copy of the DataWriter's GUID rather than
     # the by-reference view Fast-DDS' DataWriter::guid() returns directly —
@@ -210,7 +322,9 @@ def test_reset_roundtrip():
     # Trigger the reset directly via the participant's recovery hook. This
     # is the same code path the polling-based monitor would drive on a
     # confirmed network change.
+    _log("reset_roundtrip: triggering reset")
     participant._reset_hook(frozenset(), frozenset([("synthetic", "1.2.3.4", 24)]))
+    _log("reset_roundtrip: reset returned")
 
     # After reset, publish-receive must resume on the freshly-rebuilt
     # DataReader / DataWriter.
@@ -227,6 +341,7 @@ def test_reset_roundtrip():
                     saw_after = True
                 received_event.clear()
     assert saw_after, "did not receive after-reset message"
+    _log("reset_roundtrip: post-reset round-trip ok")
 
     guid_after = publisher.get_guid()
     assert str(guid_before) != str(guid_after), "DataWriter GUID did not change across reset"
@@ -322,7 +437,7 @@ def test_reset_refreshes_fastdds_interface_cache():
 
     # (1) and (2): refresh helper is wired up and works.
     assert nr.refresh_fastdds_interface_cache() is True, (
-        "refresh_fastdds_interface_cache() returned False — either "
+        "refresh_fastdds_interface_cache() returned False -- either "
         "libprovizio_dds wasn't found or the underlying "
         "eprosima::SystemInfo::update_interfaces failed."
     )
@@ -366,6 +481,185 @@ def test_reset_refreshes_fastdds_interface_cache():
         "reset_refreshes_fastdds_interface_cache: PASS "
         f"(refresh called {after - before} time(s) during reset)"
     )
+    return 0
+
+
+def test_matched_counts_cleared_on_teardown():
+    """A torn-down endpoint must not keep reporting the peers it had before.
+
+    _build_state zeroes the matched count before creating the endpoint, but teardown
+    used not to, so the count from before a reset stood until a rebuild replaced it --
+    INDEFINITELY if the rebuild failed, since nothing else clears it. Neither
+    get_num_matched_subscribers nor get_num_matched_publishers has a liveness guard, so
+    a service readiness check would read a peer count for an endpoint that no longer
+    exists, report the service up, and the very next publish() correctly fail. Mirrors
+    publisher_handle / subscriber_handle::zero_matched_count in C++.
+
+    Driven through the stale-generation branch, which needs no live peer: it is also the
+    branch a FAILED rebuild leaves an endpoint in, which is the case that never recovers."""
+
+    participant = provizio_dds.make_domain_participant(
+        0, provizio_dds.NetworkRecoveryMode.OFF
+    )
+    publisher = provizio_dds.Publisher(
+        participant,
+        "provizio_dds_python_matched_clear_topic",
+        provizio_dds.StringPubSubType,
+    )
+    subscriber = provizio_dds.Subscriber(
+        participant,
+        "provizio_dds_python_matched_clear_topic",
+        provizio_dds.StringPubSubType,
+        provizio_dds.String,
+        lambda _msg: None,
+        reliability_kind=provizio_dds.RELIABLE_RELIABILITY_QOS,
+    )
+
+    # Stand in for peers discovered before the reset. Set directly rather than by
+    # matching a real endpoint: what is under test is that teardown CLEARS the count,
+    # not how it came to be non-zero.
+    with publisher._listener._num_matched_cv:
+        publisher._listener._num_matched_subscribers = 3
+    with subscriber._listener._num_matched_cv:
+        subscriber._listener._num_matched_publishers = 2
+    assert publisher.get_num_matched_subscribers(0.0, 0.0) == 3
+    assert subscriber.get_num_matched_publishers(0.0, 0.0) == 2
+
+    # Take the stale-generation branch: the participant we built against is gone, so
+    # the endpoint only clears its handles -- and must clear the count with them.
+    publisher._built_against_generation += 1000
+    subscriber._built_against_generation += 1000
+    publisher._teardown_state_for_reset()
+    subscriber._teardown_state_for_reset()
+
+    assert publisher.get_num_matched_subscribers(0.0, 0.0) == 0, (
+        "the DataWriter is gone but its matched-subscriber count still stands; a "
+        "readiness check would report the service up"
+    )
+    assert subscriber.get_num_matched_publishers(0.0, 0.0) == 0, (
+        "the DataReader is gone but its matched-publisher count still stands"
+    )
+
+    # A waiter blocked on the old value must be woken, not left until its timeout.
+    with publisher._listener._num_matched_cv:
+        publisher._listener._num_matched_subscribers = 5
+    woke = threading.Event()
+
+    def _waiter():
+        # Waits for a CHANGE from 5, which only the notify inside the teardown delivers.
+        with publisher._listener._num_matched_cv:
+            if publisher._listener._num_matched_cv.wait_for(
+                lambda: publisher._listener._num_matched_subscribers != 5, timeout=10.0
+            ):
+                woke.set()
+
+    waiter = threading.Thread(target=_waiter, daemon=True)
+    waiter.start()
+    time.sleep(0.2)
+    # The LIVE-participant branch this time, not the stale one above: a participant that has
+    # never been reset is at generation 1, so this matches and teardown takes its other exit.
+    # Both exits are then covered, which is the point -- the count has to be cleared whichever
+    # one runs, and only one of them was ever reached by the assertions above.
+    publisher._built_against_generation = publisher._participant.participant_generation()
+    publisher._teardown_state_for_reset()
+    waiter.join(timeout=10.0)
+    assert woke.is_set(), "zeroing the matched count did not notify a blocked waiter"
+
+    del publisher
+    del subscriber
+    _log("matched_counts_cleared_on_teardown: writer and reader counts cleared + notified OK")
+    return 0
+
+
+def test_discovery_event_owner_release_is_scoped():
+    """The participant reference _DiscoveryListener._invoke resolves for every SEDP
+    event must be released INSIDE the callback scope.
+
+    The listener is installed eagerly, so _invoke dereferences its weakref to the
+    _DomainParticipant on every discovery event. An application whose only remaining
+    handle is the participant drops it while an event is in flight, and that transient
+    reference is then the last one -- the participant is destroyed on the Fast-DDS
+    reception thread. _DomainParticipant.__del__ has to see it is on a callback thread
+    and hand the cleanup to the reaper; cleaning up inline detaches the participant
+    listener while we ARE the executing callback (the bounded wait burns its whole
+    timeout) and then has delete_participant join this very thread.
+
+    Discriminating, and deliberately so: a plain `owner = owner_ref()` function local
+    ALREADY sits lexically inside the `with`, and still fails this test. CPython runs
+    the with-statement's __exit__ before tearing down the frame, so the refcount
+    reaches zero after the depth is back to 0 and __del__ takes the inline branch. That
+    exact shape shipped in this file's history and looked correct on inspection; only
+    the explicit release the `finally` performs makes the assertion below hold.
+
+    Both paths out of the scope are covered -- the early return taken when no user
+    callback is registered, and the fall-through when one is."""
+
+    class _FakeText:
+        def __init__(self, text, on_read=None):
+            self._text = text
+            self._on_read = on_read
+
+        def to_string(self):
+            if self._on_read is not None:
+                self._on_read()
+            return self._text
+
+    class _FakeKind:
+        kind = 0
+
+    class _FakeInfo:
+        def __init__(self, on_topic_name_read):
+            self.topic_name = _FakeText("rt/discovery_scope_probe", on_topic_name_read)
+            self.type_name = _FakeText("std_msgs::msg::dds_::String_")
+            self.reliability = _FakeKind()
+            self.durability = _FakeKind()
+
+    observed = {}
+
+    class _FakeOwner:
+        """Stands in for _DomainParticipant: only __del__ and the two internal
+        entry points _invoke reaches before the user callback."""
+
+        def _resolve_deferred_for_writer(self, _topic_name, _reliability):
+            pass
+
+        def _on_writer_removed(self, _topic_name, _reliability):
+            pass
+
+        def __del__(self):
+            observed["on_callback_thread"] = provizio_dds._on_fastdds_callback_thread()
+
+    for case, user_callback in (("early return", None), ("fall through", lambda *_a: None)):
+        observed.clear()
+        listener = provizio_dds._DiscoveryListener()
+        owner = _FakeOwner()
+        listener.set_owner(owner)
+        listener.set_callback(user_callback, provizio_dds.EndpointKind.DATA_WRITER)
+
+        # The application's last handle, dropped mid-event. topic_name.to_string() is
+        # read inside the scope after the weakref is dereferenced, which is where a
+        # real application's concurrent drop lands.
+        holder = [owner]
+        del owner
+
+        info = _FakeInfo(holder.clear)
+        # NOT wrapped in a _fastdds_callback_scope() of our own -- that is what SWIG's
+        # director does not do either, and an outer scope would hold the depth at 1 for
+        # the whole call and make the assertion below unfailable. The scope _invoke opens
+        # internally must be the only one.
+        assert not provizio_dds._on_fastdds_callback_thread()
+        listener._invoke(info, provizio_dds.EndpointKind.DATA_WRITER, True)
+        gc.collect()
+        assert "on_callback_thread" in observed, (
+            f"{case}: the participant outlived _invoke -- something else still holds a "
+            f"reference, so this test would pass vacuously"
+        )
+        assert observed["on_callback_thread"] is True, (
+            f"{case}: the participant was destroyed with the callback depth already back to "
+            f"0, so _DomainParticipant.__del__ would clean up inline on the Fast-DDS thread"
+        )
+
+    _log("discovery_event_owner_release_is_scoped: released inside the scope on both paths OK")
     return 0
 
 
@@ -479,6 +773,216 @@ def test_coalescer_resets_on_transient_flap():
     return 0
 
 
+def test_no_rebuild_on_address_loss():
+    """An address going away is not worth a rebuild: nothing can be bound to what is gone,
+    and tearing down endpoints that still work over the remaining interfaces costs every
+    in-flight sample for no gain. The rebuild belongs to the moment the address comes BACK,
+    which is when it can achieve something — so this drives the pair and asserts exactly
+    one rebuild across both halves.
+
+    Mirrors the C++ network_recovery_no_rebuild_on_address_loss."""
+    from provizio_dds import network_recovery as nr
+
+    participant = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert participant is not None
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+
+    lost = ("provizio_test_lost_if", "203.0.113.9", 24)
+    with_address = frozenset(nr._capture_address_snapshot()) | {lost}
+    without_address = with_address - {lost}
+
+    # Half one: the address goes away and stays away.
+    reset_before = coordinator.reset_count
+    skipped_before = coordinator.skipped_reset_count
+    coordinator.inject_change_for_test(with_address, without_address)
+    assert coordinator.reset_count == reset_before, (coordinator.reset_count, reset_before)
+    assert coordinator.skipped_reset_count == skipped_before + 1, (
+        coordinator.skipped_reset_count,
+        skipped_before,
+    )
+
+    # Half two: the same address returns, which is what a rebuild can act on.
+    coordinator.inject_change_for_test(without_address, with_address)
+    assert coordinator.reset_count == reset_before + 1, (coordinator.reset_count, reset_before)
+
+    _log(f"no_rebuild_on_address_loss: PASS (reset_count {reset_before} -> {coordinator.reset_count})")
+    return 0
+
+
+def test_rebuild_on_address_change():
+    """The "rebuild only for what was gained" rule is about snapshot ENTRIES, not interfaces,
+    and an entry is (interface name, address, prefix length). So re-addressing an interface that
+    never went away is a gain — the old entry leaves and a new one arrives — and so is
+    re-subnetting one without changing its address at all, which changes which peers
+    Fast-DDS considers on-link. Both must rebuild; only a purely subtractive change must
+    not.
+
+    Mirrors the C++ network_recovery_rebuild_on_address_change."""
+    from provizio_dds import network_recovery as nr
+
+    participant = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert participant is not None
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+
+    before = frozenset({("provizio_test_dhcp_if", "203.0.113.20", 24)})
+    readdressed = frozenset({("provizio_test_dhcp_if", "203.0.113.21", 24)})
+    resubnetted = frozenset({("provizio_test_dhcp_if", "203.0.113.21", 16)})
+
+    # A new address on an interface that never left.
+    reset_before = coordinator.reset_count
+    coordinator.inject_change_for_test(before, readdressed)
+    assert coordinator.reset_count == reset_before + 1, (coordinator.reset_count, reset_before)
+
+    # Same address, different prefix.
+    reset_before_resubnet = coordinator.reset_count
+    coordinator.inject_change_for_test(readdressed, resubnetted)
+    assert coordinator.reset_count == reset_before_resubnet + 1, (
+        coordinator.reset_count,
+        reset_before_resubnet,
+    )
+
+    _log(f"rebuild_on_address_change: PASS (reset_count {reset_before} -> {coordinator.reset_count})")
+    return 0
+
+
+def test_no_baseline_rebuilds_for_first_readable_list():
+    """The interface read at construction can fail just as any later one can, and the monitor's
+    baseline is seeded from it. A failure there is not "no addresses" and not "the addresses we
+    have" -- it is not knowing, and specifically not knowing what the participants bound to.
+
+    So the first readable list REBUILDS rather than being quietly adopted: an interface can come
+    up while the list is unreadable, and adopting it would lose that rebuild permanently, since
+    an adopted address is no longer a gain against any later snapshot. An extra rebuild costs one
+    reconnect; a missed one costs the interface until the process restarts.
+
+    What this pins, for both backends: a failed seed leaves no baseline, the first readable list
+    is reported as all-new exactly once, an empty one is reported as nothing (there is nothing to
+    bind), and a real change measured from the baseline is still reported after that.
+
+    Mirrors the C++ network_recovery_no_baseline_rebuilds_for_first_readable_list and
+    network_recovery_no_baseline_empty_list_is_not_a_rebuild."""
+    from provizio_dds import network_recovery as nr
+
+    snapshot_a = frozenset({("provizio_test_seeded_if", "203.0.113.30", 24)})
+    snapshot_b = snapshot_a | {("provizio_test_seeded_if2", "203.0.113.31", 24)}
+
+    def failing():
+        raise OSError(12, "getifaddrs failed: Cannot allocate memory")
+
+    def check(make_monitor, label, first_readable):
+        events = []
+        real_capture = nr._capture_address_snapshot
+        nr._capture_address_snapshot = failing
+        nr._enumeration_failure_reported = False
+        monitor = None
+        try:
+            # Constructed while the interface list is unreadable: no baseline, NOT an empty one.
+            monitor = make_monitor(lambda *args: events.append(args))
+            assert monitor.initial_snapshot() is None, (label, monitor.initial_snapshot())
+
+            # Reads start succeeding. With no baseline every visible address counts as new, so a
+            # non-empty list is reported once (old is empty, which is what makes the coordinator
+            # rebuild) while an empty one has nothing to bind and is reported not at all.
+            nr._capture_address_snapshot = lambda: first_readable
+            monitor.run_safety_net_tick_for_test()
+            expected = 1 if first_readable else 0
+            assert len(events) == expected, (label, events)
+            if expected:
+                old, new, _burst_start = events[0]
+                assert old == frozenset(), (label, old)
+                assert new == first_readable, (label, new)
+
+            # Seeing the same list again is not a change, which proves the baseline was stored.
+            monitor.run_safety_net_tick_for_test()
+            assert len(events) == expected, (label, events)
+
+            # A genuine change measured from that baseline is still reported.
+            nr._capture_address_snapshot = lambda: snapshot_b
+            monitor.run_safety_net_tick_for_test()
+            assert len(events) == expected + 1, (label, events)
+            old, new, _burst_start = events[-1]
+            assert old == first_readable, (label, old)
+            assert new == snapshot_b, (label, new)
+        finally:
+            nr._capture_address_snapshot = real_capture
+            nr._enumeration_failure_reported = False
+            if monitor is not None:
+                monitor.stop()
+
+    # A long interval keeps each monitor's own thread from ticking underneath the test; every
+    # tick here is driven explicitly. Each backend is run twice: once where the first readable
+    # list has addresses to bind, once where it is empty.
+    backends = [(lambda on_event: nr._PollingNetworkMonitor(on_event, 3600.0), "polling")]
+    if sys.platform.startswith("linux"):
+        backends.append(
+            (lambda on_event: nr._NetlinkNetworkMonitor(on_event, 3600.0, None, 0.0), "netlink")
+        )
+    for make_monitor, label in backends:
+        check(make_monitor, f"{label}/non-empty", snapshot_a)
+        check(make_monitor, f"{label}/empty", frozenset())
+
+    _log(f"no_baseline_rebuilds_for_first_readable_list: PASS ({len(backends)} backend(s))")
+    return 0
+
+
+def test_unreadable_interfaces_are_not_a_change():
+    """Asking the OS for its interfaces can fail — on macOS getifaddrs is a
+    sysctl(NET_RT_IFLIST) pair that can lose a race with a routing-table change. Reporting
+    that as an empty snapshot is indistinguishable from a host that genuinely has no usable
+    address (a container whose only device is a filtered-out veth reads exactly that), so a
+    failed read used to present itself as every address disappearing: every participant
+    rebuilt for nothing, then rebuilt again when the next read succeeded, with any in-flight
+    request/response lost to it.
+
+    Mirrors the C++ network_recovery_unreadable_interfaces_are_not_a_change."""
+    from provizio_dds import network_recovery as nr
+
+    def raising_capture():
+        raise OSError(12, "getifaddrs failed: Cannot allocate memory")
+
+    captured = []
+    previous = provizio_dds.set_log_callback(
+        lambda level, message: captured.append((level, message))
+    )
+    real_capture = nr._capture_address_snapshot
+    nr._capture_address_snapshot = raising_capture
+    nr._enumeration_failure_reported = False
+    try:
+        first = nr._try_capture_address_snapshot()
+        second = nr._try_capture_address_snapshot()
+        warnings_while_failing = [
+            message for level, message in captured if level == provizio_dds.LogLevel.WARNING
+        ]
+
+        # A successful read ends the streak, so a later failure is reported again rather
+        # than being silenced for the life of the process.
+        nr._capture_address_snapshot = real_capture
+        recovered = nr._try_capture_address_snapshot()
+        nr._capture_address_snapshot = raising_capture
+        nr._try_capture_address_snapshot()
+        warnings_after_recovery = [
+            message for level, message in captured if level == provizio_dds.LogLevel.WARNING
+        ]
+    finally:
+        nr._capture_address_snapshot = real_capture
+        nr._enumeration_failure_reported = False
+        provizio_dds.set_log_callback(previous)
+
+    # A failed read is not a snapshot, so no decision can be made from it.
+    assert first is None, first
+    assert second is None, second
+    # Warned once per run of failures, not once per attempt: a poller asks every few seconds.
+    assert len(warnings_while_failing) == 1, warnings_while_failing
+    assert recovered is not None, "a readable interface list must produce a snapshot"
+    assert len(warnings_after_recovery) == 2, warnings_after_recovery
+
+    _log(
+        f"unreadable_interfaces_are_not_a_change: PASS "
+        f"({len(warnings_after_recovery)} warning(s) across two failure streaks)"
+    )
+    return 0
+
+
 def test_snapshot_prefix_length():
     """The prefix length is part of the snapshot identity, so re-subnetting an
     interface without changing its address counts as a network change (Fast-DDS
@@ -578,6 +1082,49 @@ def test_netmask_read_is_bounded():
     return 0
 
 
+def test_linked_list_walk_advances() -> int:
+    """Regression: the interface walks step through linked lists the OS owns, and a
+    ``continue`` that skipped the step stranded the cursor on one node forever — on
+    Windows the unicast walk hung the process outright on any adapter carrying a
+    tentative, deprecated or duplicate address, which is a state an adapter passes
+    through on every DHCP lease. The step therefore belongs to the iterator rather
+    than to each branch of the body, so no branch can omit it.
+
+    Runs on every platform: the list is synthetic, so Linux CI covers the structure of
+    the Windows walk, which cannot otherwise be exercised here."""
+    import ctypes
+
+    from provizio_dds import network_recovery as nr
+
+    class Node(ctypes.Structure):
+        pass
+
+    # Self-referential, so the field list is declared after the class exists.
+    Node._fields_ = [("next", ctypes.POINTER(Node)), ("value", ctypes.c_int)]
+
+    # The nodes stay owned by this list; the fields hold borrowed pointers into it.
+    nodes = [Node() for _ in range(4)]
+    for index, node in enumerate(nodes[:-1]):
+        node.next = ctypes.pointer(nodes[index + 1])
+    for index, node in enumerate(nodes):
+        node.value = index
+
+    seen = []
+    # Bounded: a walk that fails to advance must fail the case, not hang it.
+    for step, node in enumerate(nr._iter_linked_nodes(ctypes.pointer(nodes[0]), "next")):
+        assert step < 2 * len(nodes), f"the walk did not advance past {seen}"
+        if node.value % 2 == 1:
+            continue  # the branch that used to strand the cursor
+        seen.append(node.value)
+    assert seen == [0, 2], seen
+
+    empty = list(nr._iter_linked_nodes(ctypes.POINTER(Node)(), "next"))
+    assert not empty, f"a null head must yield nothing, yielded {len(empty)}"
+
+    _log(f"linked_list_walk_advances: PASS (visited {seen} of {len(nodes)})")
+    return 0
+
+
 def test_extra_interfaces_env():
     """PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES parsing: whitespace trimmed,
     empty entries dropped. Runs in its own process — the value is parsed once."""
@@ -626,6 +1173,234 @@ def test_netlink_binds_before_snapshot():
         monitor.stop()
 
     _log(f"netlink_binds_before_snapshot: PASS (order={order[:2]})")
+    return 0
+
+
+def test_netlink_stop_keeps_descriptors_under_a_live_worker():
+    """Regression: stop() must not close the netlink socket or the self-pipe while its worker
+    is still running.
+
+    The join is bounded, and it legitimately times out -- the worker returns to its select()
+    after a reset hook, and rebuilding participants takes seconds. A closed fd number is
+    immediately reusable, so closing here lets the next socket() or open() anywhere in the
+    process be handed one of these numbers, at which point the still-running worker watches,
+    and reads from, a descriptor belonging to somebody else. Leaking three descriptors is much
+    the cheaper failure. The C++ monitor joins unconditionally and never had the hazard."""
+    from provizio_dds import network_recovery as nr
+
+    if not sys.platform.startswith("linux"):
+        _log("netlink_stop_keeps_descriptors_under_a_live_worker: SKIP (netlink is Linux-only)")
+        return 0
+
+    monitor = nr._NetlinkNetworkMonitor(lambda *_: None, 3600.0, None, 0.0)
+    stop_r, stop_w = monitor._stop_r, monitor._stop_w
+
+    # A stand-in for a worker still inside a reset hook. Substituted rather than wedging the
+    # real one, so the case stays deterministic and the real worker is still stopped cleanly
+    # below -- what stop() reads is is_alive(), and this is alive until we let it go.
+    release = threading.Event()
+    blocked = threading.Thread(target=release.wait, daemon=True)
+    blocked.start()
+    real_worker, monitor._thread = monitor._thread, blocked
+    try:
+        monitor.stop()  # Bounded join times out against `blocked`, so nothing may be closed.
+        assert monitor._sock is not None, "the netlink socket was closed under a live worker"
+        # Still valid: fstat rather than write, so a check cannot itself disturb whatever a
+        # closed-and-reused number would now refer to.
+        os.fstat(stop_r)
+        os.fstat(stop_w)
+    finally:
+        release.set()
+        blocked.join(timeout=5.0)
+        monitor._thread = real_worker
+
+    # The real worker was woken by the stop() above; with it gone, stop() closes everything.
+    monitor.stop()
+    assert not real_worker.is_alive(), "the real worker outlived stop()"
+    assert monitor._sock is None, "the netlink socket was left open after a clean stop"
+    for name, descriptor in (("stop_r", stop_r), ("stop_w", stop_w)):
+        try:
+            os.fstat(descriptor)
+        except OSError:
+            continue
+        raise AssertionError(f"{name} was left open after a clean stop")
+
+    _log("netlink_stop_keeps_descriptors_under_a_live_worker: PASS")
+    return 0
+
+
+def test_listener_drain_reports_a_stall_until_it_ends():
+    """A callback that does not return says so for as long as it does not, and the log
+    gets an end as well as a beginning.
+
+    One line cannot say whether a stall is over: the wait is unbounded and the caller
+    holds the registration lock throughout, so an operator seeing a single warning could
+    not tell a stall that cleared from one still going hours later. Mirrors the C++
+    listener_drain cases in test/listener_drain.
+
+    Hermetic: threads, a condition variable and the log callback, with no DDS entity and
+    no traffic. The drain's reporting period is an argument for exactly this reason."""
+    from provizio_dds import network_recovery as nr
+
+    # Short enough to keep the case under a second, long enough that a loaded runner
+    # cannot mistake one slice for two.
+    slice_sec = 0.05 * _TIMEOUT_SCALE
+    wedged_sec = slice_sec * 8
+
+    captured = []
+    captured_lock = threading.Lock()
+
+    def _count(needle):
+        with captured_lock:
+            return sum(1 for message in captured if needle in message)
+
+    stall_needle = "listener drain has been waiting"
+    completion_needle = "listener drain completed after"
+
+    previous = provizio_dds.set_log_callback(
+        lambda level, message: captured.append(message)
+    )
+    try:
+        # The ordinary drain -- a callback that has already returned -- says nothing at
+        # all. Unconditional, the completion line would put a warning into the log of
+        # every reset on a healthy system.
+        quiet = nr.ListenerDrain(stall_warning_period=slice_sec)
+        with quiet.scope():
+            pass
+        quiet.detach_and_drain()
+        if _count(stall_needle) or _count(completion_needle):
+            _log("listener_drain_reports_a_stall_until_it_ends: FAIL (a quiet drain logged)")
+            return 1
+
+        drain = nr.ListenerDrain(stall_warning_period=slice_sec)
+        entered = threading.Event()
+        returned = []
+
+        def _wedged_callback():
+            with drain.scope():
+                entered.set()
+                time.sleep(wedged_sec)
+                returned.append(True)
+
+        callback = threading.Thread(target=_wedged_callback)
+        callback.start()
+        # The drain has nothing to wait for until the callback is in flight, so starting
+        # before that would test nothing at all.
+        entered.wait(timeout=30 * _TIMEOUT_SCALE)
+
+        drain.detach_and_drain()
+        # Read after the drain returned: the callback appends before leaving its scope,
+        # and the drain may not return until that scope has been left. A drain that
+        # returned early would be a teardown under a running callback in production.
+        drained_after_callback = bool(returned)
+        callback.join()
+    finally:
+        provizio_dds.set_log_callback(previous)
+
+    passed = True
+    if not drained_after_callback:
+        passed = False
+        _log("  detach_and_drain returned while a callback was still in flight")
+    # At least two, not exactly N: the count is what the scheduler grants in the time the
+    # callback is held, and pinning it would make this a timing assertion. Two is what
+    # distinguishes a heartbeat from a one-shot report.
+    stalls = _count(stall_needle)
+    if stalls < 2:
+        passed = False
+        _log(f"  expected the stall warning to repeat, saw it {stalls} time(s)")
+    # Exactly one, and only because a stall was reported: it supersedes the warnings.
+    completions = _count(completion_needle)
+    if completions != 1:
+        passed = False
+        _log(f"  expected exactly one completion line, saw {completions}")
+
+    _log(
+        f"listener_drain_reports_a_stall_until_it_ends: {'PASS' if passed else 'FAIL'} "
+        f"({stalls} stall report(s))"
+    )
+    return 0 if passed else 1
+
+
+def test_netlink_kinds_match_the_kernel():
+    """The RTM_GETLINK dump actually delivers, checked against what the kernel says
+    elsewhere.
+
+    Everything downstream of it degrades silently: a dump whose replies were all discarded
+    (the sequence and port-id checks failing, say, on a kernel or netns that does not echo
+    the port id the way this assumes) yields an empty kind map, and VPN classification then
+    falls back to name prefixes alone with nothing logged -- losing the signal that catches
+    a renamed WireGuard device. Nothing pinned that end of it before: the sibling case
+    asserts only that the socket is bound before the snapshot runs.
+
+    /sys/class/net/<dev>/uevent carries a DEVTYPE, which OVERLAPS IFLA_INFO_KIND without
+    matching it: a physical Wi-Fi NIC reports DEVTYPE=wlan and no netlink kind at all,
+    because it is not a virtual link. So only the virtual types both sides name are
+    compared, and the same set is what proves the dump delivered -- one of them present in
+    sysfs but missing from the map means every reply was discarded. Where the host has no
+    such device -- a bare-metal runner whose only NIC is physical -- there is nothing to
+    compare and the case says so rather than passing vacuously."""
+    import glob
+
+    from provizio_dds import network_recovery as nr
+
+    if sys.platform != "linux":
+        _log("netlink_kinds_match_the_kernel: SKIP (netlink is Linux-only)")
+        return 0
+
+    # The device types rtnetlink names with an IFLA_INFO_KIND, spelled the same way in
+    # both places. Anything outside this set (wlan, and the physical devices that report
+    # no DEVTYPE at all) tells us nothing about whether the dump worked.
+    virtual_devtypes = {
+        "bond",
+        "bridge",
+        "geneve",
+        "macvlan",
+        "tun",
+        "veth",
+        "vlan",
+        "vxlan",
+        "wireguard",
+    }
+
+    from_sysfs = {}
+    for uevent in glob.glob("/sys/class/net/*/uevent"):
+        device = uevent.split("/")[-2]
+        try:
+            with open(uevent, "r", encoding="ascii", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("DEVTYPE="):
+                        devtype = line.strip().split("=", 1)[1]
+                        if devtype in virtual_devtypes:
+                            from_sysfs[device] = devtype
+        except OSError:
+            continue
+
+    kinds = nr._fetch_link_kinds_linux()
+    if not from_sysfs:
+        _log(
+            "netlink_kinds_match_the_kernel: SKIP (no virtual device on this host, so "
+            f"nothing proves the dump either way; netlink returned {len(kinds)} kind(s))"
+        )
+        return 0
+
+    # The map is by interface index, so resolve each name the way the walk does.
+    import socket as socket_module
+
+    mismatched = []
+    for device, devtype in sorted(from_sysfs.items()):
+        try:
+            index = socket_module.if_nametoindex(device)
+        except OSError:
+            continue
+        reported = kinds.get(index)
+        if reported != devtype:
+            mismatched.append(f"{device}: netlink={reported!r} sysfs={devtype!r}")
+
+    assert not mismatched, "; ".join(mismatched)
+    _log(
+        f"netlink_kinds_match_the_kernel: PASS ({len(from_sysfs)} virtual device(s) "
+        f"cross-checked, {len(kinds)} kind(s) from netlink)"
+    )
     return 0
 
 
@@ -713,6 +1488,75 @@ def test_safety_net_retries_failed_rebuild():
     return 0
 
 
+def test_safety_net_retries_while_interfaces_are_unreadable():
+    """An unreadable interface list must not cancel the retry pass.
+
+    The retry re-attempts a rebuild that already failed; it needs to know nothing about
+    what changed, and the C++ counterpart runs apply_reset(retry_only) before it reads a
+    snapshot at all -- handing participants none, since trigger_network_recovery_reset
+    takes none. Gating it on a read, as this side did, meant a failing enumeration
+    silently removed the retry: the counter never moved, so the bound was never reached,
+    so the exhaustion warning never fired, and a participant left torn down by a failed
+    rebuild could stay dead for as long as the reads kept failing with nothing logged.
+    macOS' getifaddrs is a sysctl(NET_RT_IFLIST) size-then-fetch pair that fails exactly
+    that way.
+
+    Driven through stub participants rather than real ones: what is under test is the
+    coordinator's ordering, and a stub makes both the retry and the give-up path
+    deterministic without a live monitor or DDS traffic."""
+    from provizio_dds import network_recovery as nr
+
+    class _StubParticipant:
+        def __init__(self, recovers: bool):
+            self._recovery_retry_needed = True
+            self._recovers = recovers
+            self.resets = 0
+
+        def _reset_hook(self, old_snapshot, new_snapshot):
+            self.resets += 1
+            # A participant that recovers clears the flag; one that never does keeps it
+            # set, which is what drives the pass towards its bound.
+            self._recovery_retry_needed = not self._recovers
+
+    coordinator = nr._NetworkRecoveryCoordinator.instance()
+    messages = []
+    original_capture = nr._try_capture_address_snapshot
+    original_emit = nr._emit_log
+    nr._emit_log = lambda level, message: messages.append((level, message))
+    # Every read fails, for the whole case.
+    nr._try_capture_address_snapshot = lambda: None
+    try:
+        recovering = _StubParticipant(recovers=True)
+        coordinator.register_participant(recovering, recovering._reset_hook)
+        coordinator._on_safety_net_tick()
+        assert recovering.resets == 1, recovering.resets
+        assert not recovering._recovery_retry_needed
+
+        # A participant that never comes back still reaches the bound and reports once --
+        # the counter moving at all is the part the old ordering skipped entirely. Cleared
+        # first because the pass above consumed one, which is the bookkeeping the real code
+        # does for itself only once nothing needs retrying at all.
+        coordinator._consecutive_retry_passes = 0
+        stuck = _StubParticipant(recovers=False)
+        coordinator.register_participant(stuck, stuck._reset_hook)
+        for _ in range(nr._NetworkRecoveryCoordinator._MAX_CONSECUTIVE_RETRY_PASSES + 2):
+            coordinator._on_safety_net_tick()
+        assert stuck.resets == nr._NetworkRecoveryCoordinator._MAX_CONSECUTIVE_RETRY_PASSES, stuck.resets
+        gave_up = [m for _level, m in messages if "Retrying further" in m]
+        assert len(gave_up) == 1, [m for _l, m in messages][-3:]
+    finally:
+        nr._try_capture_address_snapshot = original_capture
+        nr._emit_log = original_emit
+        coordinator._consecutive_retry_passes = 0
+        coordinator._retry_exhaustion_reported = False
+
+    _log(
+        f"safety_net_retries_while_interfaces_are_unreadable: PASS "
+        f"({recovering.resets} retry, {stuck.resets} before giving up, every read failing)"
+    )
+    return 0
+
+
 def test_safety_net_retry_gives_up_after_bound():
     """A participant whose rebuild NEVER succeeds must stop being retried after
     _MAX_CONSECUTIVE_RETRY_PASSES consecutive passes — one error log, then
@@ -780,7 +1624,7 @@ def test_safety_net_env():
         ("-5", default),  # negative
         ("abc", default),  # non-numeric
         ("99999999999999999999", default),  # > int64: rejected, like C++ stoll's out_of_range
-        (" 30", default),  # non-ASCII whitespace: rejected, like C++ byte-wise isspace
+        ("\u00a030", default),  # NBSP: non-ASCII whitespace is rejected, like C++ byte-wise isspace
         ("1" * 5000, default),  # beyond int()'s conversion-length limit (Python 3.11+)
         ("999999999", 86400.0),  # clamped to a day
     )
@@ -795,8 +1639,661 @@ def test_safety_net_env():
     return 0
 
 
+def _tunnel_identity():
+    """A synthetic tunnel interface for whatever platform the test runs on: (name, kind)
+    on POSIX, (name, friendly, description, if_type) on Windows.
+
+    Synthetic because the host is not a controllable input -- no runner has a tunnel up,
+    so every assertion about how one is treated would otherwise be vacuous. The C++ suite
+    uses the same identities for the same reason (see vpn_interfaces_test.cpp)."""
+    if sys.platform == "win32":
+        return ("{00000000-0000-0000-0000-provizio-test}", "Tailscale", "Tailscale Tunnel", 131)
+    if sys.platform == "darwin":
+        # Every macOS VPN lands on a utunN device -- the prefix that is ALSO in the
+        # snapshot's own name-exclusion list, which is what made the override unable to
+        # re-admit it.
+        return ("utun9", "")
+    return ("tailscale0", "wireguard")
+
+
+def _ordinary_identity():
+    if sys.platform == "win32":
+        return ("{11111111-1111-1111-1111-provizio-test}", "Ethernet 2",
+                "Intel(R) Ethernet Connection I219-LM", 6)
+    if sys.platform == "darwin":
+        return ("en0", "")
+    return ("eth0", "")
+
+
+def _virtual_identity():
+    """Excluded by a heuristic that has nothing to do with VPNs -- container plumbing or a
+    hypervisor adapter. The override must not re-admit these with the tunnels."""
+    if sys.platform == "win32":
+        return ("{22222222-2222-2222-2222-provizio-test}", "vEthernet (WSL)",
+                "Hyper-V Virtual Ethernet Adapter", 6)
+    if sys.platform == "darwin":
+        return ("bridge0", "")
+    return ("docker0", "bridge")
+
+
+def _snapshot_policy_excludes(nr, identity):
+    if sys.platform == "win32":
+        return nr._snapshot_policy_excludes_windows(*identity)
+    return nr._snapshot_policy_excludes_posix(*identity)
+
+
+def test_snapshot_policy_excludes_tunnel():
+    """With no override, an interface the transports refuse to bind is kept out of the
+    change-detection snapshot too; an ordinary NIC is not."""
+    from provizio_dds import network_recovery as nr
+
+    assert _snapshot_policy_excludes(nr, _tunnel_identity())
+    assert not _snapshot_policy_excludes(nr, _ordinary_identity())
+    assert _snapshot_policy_excludes(nr, _virtual_identity())
+    _log("snapshot_policy_excludes_tunnel: PASS")
+    return 0
+
+
+def test_snapshot_policy_follows_transports():
+    """A tunnel stays in the snapshot once a participant reports that the exclusion never
+    reached its transports.
+
+    The mirror of the C++ snapshot_policy_follows_transports case, and it exists for the
+    same failure: where the caller owns the transport configuration -- their own XML,
+    FASTDDS_BUILTIN_TRANSPORTS, descriptors they configured -- DDS binds and announces the
+    tunnel after all. Dropping it from change detection then would leave a re-auth or a
+    reconnect with a dead locator that no rebuild replaces, which is the one outcome the
+    two filters may never produce between them.
+
+    Runs last-ish in its own process: the latch is one-way by design, so everything
+    asserted after it must be asserted with it set."""
+    from provizio_dds import network_recovery as nr
+
+    # Before: the exclusion is believed to apply, so the tunnel is dropped.
+    assert _snapshot_policy_excludes(nr, _tunnel_identity())
+
+    nr.report_vpn_exclusion_not_applied()
+
+    # After: the tunnel is watched like any other interface...
+    assert not _snapshot_policy_excludes(nr, _tunnel_identity())
+    # ...and nothing else moves with it. Container plumbing has nothing to do with who
+    # owns the transports and must still be dropped, or every veth churn on a Docker host
+    # would rebuild every participant.
+    assert _snapshot_policy_excludes(nr, _virtual_identity())
+    assert not _snapshot_policy_excludes(nr, _ordinary_identity())
+    _log("snapshot_policy_follows_transports: PASS")
+    return 0
+
+
+def test_netlink_end_read_failure_keeps_the_flap():
+    """A failed end-of-burst read must not throw away the evidence of a transient flap.
+
+    The burst-start snapshot is the only record that an interface went away mid-burst. If
+    the end read fails and the burst is simply dropped, and the addresses came back before
+    that read, then nothing else can ever notice: the safety-net tick compares the live
+    snapshot against a baseline the flap RETURNED to, finds them equal, and reports nothing
+    -- leaving participants on sockets bound to an address that was torn down and re-added.
+    So a failed end read re-arms the burst, keeping burst_start, bounded and on a short
+    backoff of its own. Mirrors the C++ coalescer's run_reset.
+
+    Drives the real _run() loop with a select() that honours its timeout (a mock returning
+    instantly would never let the short retry deadline arrive) and a scripted sequence of
+    interface reads: interface down at burst start, the end read failing, then the original
+    addresses back."""
+    from unittest.mock import Mock, patch
+
+    from provizio_dds import network_recovery as nr
+
+    baseline = frozenset({("eth0", "192.0.2.1", 24)})
+    monitor = nr._NetlinkNetworkMonitor.__new__(nr._NetlinkNetworkMonitor)
+    monitor._sock = Mock()
+    monitor._stop_r = 12345
+    monitor._quiet = 0.0
+    monitor._safety_net = 0.0
+    monitor._last_known = baseline
+    monitor._on_event = Mock()
+    monitor._on_safety_net_tick = None
+
+    wakeups = [
+        ([monitor._sock], [], []),  # a kernel event opens the burst
+        ([], [], []),  # quiet: the end read is attempted, and fails
+        ([], [], []),  # the re-armed read, which succeeds
+        ([monitor._stop_r], [], []),  # shut the loop down
+    ]
+    calls = {"n": 0}
+
+    def _select(_readers, _writers, _errors, timeout=None):
+        # A real select() does not return before its timeout has elapsed, and the retry
+        # deadline depends on that. Waited out against the clock rather than with a single
+        # sleep(): sleep() may return marginally early where the platform timer is coarse
+        # (Windows), and the loop under test would then find its deadline not yet reached and
+        # never re-attempt the read -- a failure of the mock, not of the code.
+        if timeout:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                time.sleep(0.005)
+        index = calls["n"]
+        calls["n"] += 1
+        return wakeups[index] if index < len(wakeups) else ([monitor._stop_r], [], [])
+
+    with patch.object(nr.select, "select", side_effect=_select):
+        with patch.object(
+            nr,
+            "_try_capture_address_snapshot",
+            side_effect=[frozenset(), None, baseline],
+        ) as snapshots:
+            monitor._run()
+
+    assert snapshots.call_count == 3, (
+        f"the end read must be re-attempted after failing; reads: {snapshots.call_count}"
+    )
+    assert monitor._on_event.call_count == 1, (
+        f"the flap must be reported; events: {monitor._on_event.call_count}"
+    )
+    _, end_snapshot, burst_start = monitor._on_event.call_args[0]
+    assert burst_start == frozenset(), f"burst-start evidence must survive the retry: {burst_start}"
+    assert end_snapshot == baseline, f"the end snapshot must be the one that finally read: {end_snapshot}"
+
+
+def test_netlink_start_read_failure_is_retried_in_the_burst():
+    """A failed burst-START read must be re-attempted on the next event of the SAME burst.
+
+    The start snapshot is the only record that an address went away mid-burst. Attempting it
+    exactly once meant one transient enumeration failure on the very first kernel event of a
+    burst left that burst with no start evidence for its whole life -- and for the flap this
+    machinery exists to catch the end state EQUALS the baseline, so every other route
+    concludes nothing happened and the flap is lost. The C++ coalescer retries the read on
+    every later event of the burst; this is the Python mirror of that (on_kernel_event in
+    src/network_recovery_coordinator.cpp).
+
+    Drives the real _run() loop: the first event's read fails, the second event's read finds
+    the interface gone, and the end read finds it back. Without the retry the reported
+    burst_start would be the pre-burst baseline and the flap would read as "nothing
+    changed"."""
+    from unittest.mock import Mock, patch
+
+    from provizio_dds import network_recovery as nr
+
+    baseline = frozenset({("eth0", "192.0.2.1", 24)})
+    monitor = nr._NetlinkNetworkMonitor.__new__(nr._NetlinkNetworkMonitor)
+    monitor._sock = Mock()
+    monitor._stop_r = 12345
+    monitor._quiet = 0.0
+    monitor._safety_net = 0.0
+    monitor._last_known = baseline
+    monitor._on_event = Mock()
+    monitor._on_safety_net_tick = None
+
+    wakeups = [
+        ([monitor._sock], [], []),  # first event: the start read fails
+        ([monitor._sock], [], []),  # second event of the same burst: the retry succeeds
+        ([], [], []),  # quiet: the end read
+        ([monitor._stop_r], [], []),  # shut the loop down
+    ]
+    calls = {"n": 0}
+
+    def _select(_readers, _writers, _errors, timeout=None):
+        index = calls["n"]
+        calls["n"] += 1
+        return wakeups[index] if index < len(wakeups) else ([monitor._stop_r], [], [])
+
+    with patch.object(nr.select, "select", side_effect=_select):
+        with patch.object(
+            nr,
+            # Read 1: fails. Read 2 (the retry): the address is gone. Read 3: it is back.
+            "_try_capture_address_snapshot",
+            side_effect=[None, frozenset(), baseline],
+        ) as snapshots:
+            monitor._run()
+
+    assert snapshots.call_count == 3, (
+        f"the start read must be re-attempted after failing; reads: {snapshots.call_count}"
+    )
+    assert monitor._on_event.call_count == 1, (
+        f"the burst must be reported; events: {monitor._on_event.call_count}"
+    )
+    _, end_snapshot, burst_start = monitor._on_event.call_args[0]
+    assert burst_start == frozenset(), (
+        f"the retried read must become the burst start, not the pre-burst baseline: {burst_start}"
+    )
+    assert end_snapshot == baseline, f"the end snapshot must be the read that succeeded: {end_snapshot}"
+
+
+def test_env_explicit_request_survives_mutation():
+    """The "was it explicitly requested" answer and the verdict must come from ONE reading.
+
+    Both are cached once per process, but the explicit-request question used to re-read
+    os.environ live and AND that with the cached verdict, so the two could describe different
+    environments. That decides whether a loopback-confined participant is watched, and it got
+    it wrong in both directions -- see the two cases below. Mirrors read_env_var_once() in
+    src/network_recovery.cpp, which had the same split.
+
+    Runs in its own process, like every other env-var case here, because the reading is cached
+    for the life of the process by design."""
+    from provizio_dds import network_recovery as nr
+
+    mode = nr.NetworkRecoveryMode.ENV_VAR_CONTROLLED
+
+    # Prime the reading with the variable UNSET: the verdict caches default-on, and nothing
+    # was explicitly requested.
+    os.environ.pop(nr._ENV_VAR_NAME, None)
+    assert not nr.network_recovery_explicitly_requested(mode), (
+        "an unset variable must not read as an explicit request"
+    )
+    assert nr.resolve_network_recovery_enabled(mode), (
+        "an unset variable must still default the recovery on"
+    )
+
+    # Now set it to "off" mid-process. The old code saw a non-empty value AND the cached
+    # default-on verdict, and reported "off" as an explicit request for ON -- so a
+    # loopback-confined participant was watched against the caller's word.
+    os.environ[nr._ENV_VAR_NAME] = "off"
+    assert not nr.network_recovery_explicitly_requested(mode), (
+        "'off' set after the reading must not read as an explicit request for ON"
+    )
+    assert nr.resolve_network_recovery_enabled(mode), (
+        "the cached verdict must not change either; the reading is once per process"
+    )
+
+    _log("env_explicit_request_survives_mutation: PASS")
+    return 0
+
+
+def test_env_explicit_request_survives_removal():
+    """The reverse of :func:`test_env_explicit_request_survives_mutation`: an explicit request
+    made at launch must not be forgotten when the variable is deleted mid-process.
+
+    The old code re-read os.environ for the "was it set" half, so deleting the variable made a
+    launch-time explicit "on" read as no request at all -- and the loopback-confinement skip
+    then applied to a participant whose owner had asked for it to be watched."""
+    from provizio_dds import network_recovery as nr
+
+    mode = nr.NetworkRecoveryMode.ENV_VAR_CONTROLLED
+
+    os.environ[nr._ENV_VAR_NAME] = "on"
+    assert nr.network_recovery_explicitly_requested(mode), (
+        "'on' at the first reading must be an explicit request"
+    )
+
+    del os.environ[nr._ENV_VAR_NAME]
+    assert nr.network_recovery_explicitly_requested(mode), (
+        "deleting the variable must not retract an explicit request already read"
+    )
+
+    _log("env_explicit_request_survives_removal: PASS")
+    return 0
+
+
+def test_netlink_safety_net_survives_sustained_churn():
+    """Regression: bursts arriving faster than the safety-net period must not starve the tick.
+
+    Everything that runs only from ticks depends on this -- the failed-rebuild retry (whose
+    counter never reaches its bound if the tick never runs, so not even the give-up error
+    fires), the revival of a dropped netlink socket, and the re-verify that catches an event
+    the kernel never delivered. The deadline has to be ABSOLUTE, as the C++ coalescer_loop's
+    next_tick is: recomputing a whole fresh period after every burst pushes the tick out
+    indefinitely on a host with container/veth churn, and one burst is enough on its own since
+    _MAX_DEBOUNCE_SEC exceeds the default period.
+
+    Drives the real _run() loop with a scripted event stream: a burst completes, then another
+    arrives, repeatedly, each well inside the safety-net period."""
+    from unittest.mock import Mock, patch
+
+    from provizio_dds import network_recovery as nr
+
+    baseline = frozenset({("eth0", "192.0.2.1", 24)})
+    monitor = nr._NetlinkNetworkMonitor.__new__(nr._NetlinkNetworkMonitor)
+    monitor._sock = Mock()
+    monitor._stop_r = 12345
+    monitor._quiet = 0.0
+    monitor._safety_net = 30.0  # Far longer than this test's simulated elapsed time.
+    monitor._last_known = baseline
+    monitor._on_event = Mock()
+    monitor._on_safety_net_tick = None
+
+    ticks = {"n": 0}
+    real_check = nr._NetlinkNetworkMonitor._safety_net_check
+
+    def counting_check(self):
+        ticks["n"] += 1
+        return real_check(self)
+
+    # A clock we control, so "the period elapsed" is a fact of the test rather than a wait.
+    # It advances 1 s per select() call: five bursts of two events cost far less than the 30 s
+    # period, so a correctly ARMED absolute deadline still would not fire -- what the test
+    # pins is that the deadline is not RESET by each burst, which it proves by advancing past
+    # it once the bursts stop.
+    clock = {"t": 1000.0}
+
+    bursts = 5
+    wakeups = []
+    for _ in range(bursts):
+        wakeups.append(([monitor._sock], [], []))  # an event opens a burst
+        wakeups.append(([], [], []))  # quiet: the burst completes
+    wakeups.append(([], [], []))  # nothing pending: the tick deadline is consulted
+    wakeups.append(([monitor._stop_r], [], []))
+
+    calls = {"n": 0}
+    # With _quiet at 0 a burst-pending iteration asks for a timeout of 0, so every POSITIVE
+    # one is the loop consulting its tick deadline. Those are what this test reads.
+    tick_waits = []
+
+    def _select(_readers, _writers, _errors, timeout=None):
+        if timeout:
+            tick_waits.append(timeout)
+        # Advance by 1 s per call rather than by the whole requested wait, so the bursts stay
+        # well inside the 30 s period: letting the period elapse honestly would make the test
+        # pass with or without the fix.
+        clock["t"] += 1.0
+        index = calls["n"]
+        calls["n"] += 1
+        return wakeups[index] if index < len(wakeups) else ([monitor._stop_r], [], [])
+
+    with patch.object(nr.time, "monotonic", lambda: clock["t"]):
+        with patch.object(nr.select, "select", side_effect=_select):
+            with patch.object(nr._NetlinkNetworkMonitor, "_safety_net_check", counting_check):
+                with patch.object(nr, "_try_capture_address_snapshot", return_value=baseline):
+                    monitor._run()
+
+    assert monitor._on_event.call_count == bursts, (
+        f"the scripted bursts must all be processed; events: {monitor._on_event.call_count}"
+    )
+
+    # The discriminator. An ABSOLUTE deadline shrinks as the bursts go by, because time has
+    # passed and the deadline has not moved. A relative one is the whole period every time --
+    # which is the starvation: the tick is pushed a full period into the future by each burst
+    # and, on a host where bursts arrive faster than that, never comes due at all.
+    assert len(tick_waits) >= 2, f"the loop must consult its tick deadline more than once: {tick_waits}"
+    # min(), not the last value: once a tick DOES run it legitimately re-arms the deadline to a
+    # whole period again, so the last wait is 30 s in either world. What separates them is
+    # whether the waits ever shrank while the bursts were arriving.
+    assert min(tick_waits) < monitor._safety_net, (
+        f"the tick deadline must be absolute, so the wait shrinks as bursts go by; got "
+        f"{tick_waits} -- a constant {monitor._safety_net}s means each burst reset it, which "
+        f"on a host where bursts arrive faster than the period means the tick never comes due"
+    )
+
+    _log(
+        f"netlink_safety_net_survives_sustained_churn: PASS "
+        f"({bursts} burst(s), tick waits shrank to {min(tick_waits):.0f}s of "
+        f"{monitor._safety_net:.0f}s, {ticks['n']} tick(s))"
+    )
+    return 0
+
+
+def test_netlink_start_read_retry_is_bounded():
+    """The burst-start retry rides on the kernel event stream, so it must be bounded.
+
+    A host whose interface list is durably unreadable while its links churn raises a burst
+    event per change; retrying without a bound would spend one full enumeration on every one
+    of them, multiplying syscall load exactly while the resource that enumeration needs is
+    what is short. After _MAX_BURST_START_READ_ATTEMPTS the burst runs without a start
+    snapshot, which is what it did before the retry existed."""
+    from unittest.mock import Mock, patch
+
+    from provizio_dds import network_recovery as nr
+
+    baseline = frozenset({("eth0", "192.0.2.1", 24)})
+    monitor = nr._NetlinkNetworkMonitor.__new__(nr._NetlinkNetworkMonitor)
+    monitor._sock = Mock()
+    monitor._stop_r = 12345
+    monitor._quiet = 0.0
+    monitor._safety_net = 0.0
+    monitor._last_known = baseline
+    monitor._on_event = Mock()
+    monitor._on_safety_net_tick = None
+
+    # Twice as many events as the bound allows attempts, so the cap is what stops the reads
+    # rather than the event stream running out.
+    events = 2 * nr._MAX_BURST_START_READ_ATTEMPTS
+    wakeups = [([monitor._sock], [], []) for _ in range(events)]
+    wakeups.append(([monitor._stop_r], [], []))
+    calls = {"n": 0}
+
+    def _select(_readers, _writers, _errors, timeout=None):
+        index = calls["n"]
+        calls["n"] += 1
+        return wakeups[index] if index < len(wakeups) else ([monitor._stop_r], [], [])
+
+    with patch.object(nr.select, "select", side_effect=_select):
+        with patch.object(nr, "_try_capture_address_snapshot", return_value=None) as snapshots:
+            monitor._run()
+
+    assert snapshots.call_count == nr._MAX_BURST_START_READ_ATTEMPTS, (
+        f"the start read must stop after {nr._MAX_BURST_START_READ_ATTEMPTS} attempts, "
+        f"not once per event; reads: {snapshots.call_count} over {events} event(s)"
+    )
+
+
+def test_snapshot_policy_honours_override():
+    """PROVIZIO_DDS_ALLOW_VPN_INTERFACES puts tunnels back into change detection, and
+    nothing else with them.
+
+    The variable is set by the ctest registration, not here: it is parsed once per
+    process on first use, which is inside the very call being asserted on. Mirror of the
+    C++ snapshot_policy_honours_override case, and the regression test for a divergence
+    that shipped on macOS and Windows -- the override bypassed the VPN filter and the
+    interface was then dropped anyway by the utun name prefix / the adapter-type gate,
+    leaving the transports binding an interface change detection ignored."""
+    from provizio_dds import network_recovery as nr
+
+    assert not _snapshot_policy_excludes(nr, _tunnel_identity())
+    assert not _snapshot_policy_excludes(nr, _ordinary_identity())
+    # Still excluded: the override is about tunnels, not about the heuristics.
+    assert _snapshot_policy_excludes(nr, _virtual_identity())
+    _log("snapshot_policy_honours_override: PASS")
+    return 0
+
+
+def _test_xml_loopback_profile(default_mode_watched):
+    """FASTDDS_DEFAULT_PROFILES_FILE names test/fast_dds_localhost_profile.xml here (the ctest
+    registration sets it): builtin transports off, one UDPv4 transport whitelisted to 127.0.0.1.
+    Such a participant has nothing a network change could take from it, so in the default mode
+    with PROVIZIO_DDS_NETWORK_RECOVERY unset it is not watched, while NetworkRecoveryMode.ON --
+    or the variable set to on -- has it watched like any other. Mirrors the C++
+    network_recovery xml_loopback_profile case."""
+    by_default = provizio_dds.make_domain_participant(0)
+    assert by_default._recovery_enabled is default_mode_watched, (
+        f"default mode watched: {by_default._recovery_enabled}, expected {default_mode_watched}"
+    )
+    explicit_on = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.ON)
+    assert explicit_on._recovery_enabled is True, "NetworkRecoveryMode.ON must always be watched"
+    explicit_off = provizio_dds.make_domain_participant(0, provizio_dds.NetworkRecoveryMode.OFF)
+    assert explicit_off._recovery_enabled is False, "NetworkRecoveryMode.OFF must never be watched"
+    _log(f"xml_loopback_profile: PASS (default mode watched: {by_default._recovery_enabled})")
+    return 0
+
+
+def test_xml_loopback_profile_skipped():
+    """PROVIZIO_DDS_NETWORK_RECOVERY unset + loopback-confining profile: the default mode is
+    not watched."""
+    return _test_xml_loopback_profile(default_mode_watched=False)
+
+
+def test_xml_loopback_profile_env_on_participates():
+    """PROVIZIO_DDS_NETWORK_RECOVERY=on + loopback-confining profile: an explicit request wins."""
+    return _test_xml_loopback_profile(default_mode_watched=True)
+
+
+def test_xml_profile_flags_are_optional():
+    """xml_profile_confines_to_loopback must work on a platform that lacks the Unix-only
+    open flags it prefers.
+
+    O_NONBLOCK and O_NOFOLLOW do not exist on Windows. Naming either directly raises
+    AttributeError, which the parser's own except swallows -- so it does not fail loudly, it
+    quietly answers "not confined" for EVERY profile, and a participant an XML profile
+    confines to loopback is then watched by auto-recovery when it should not be. That shipped
+    (O_NONBLOCK was unguarded while O_NOFOLLOW was) and cost two Windows CI jobs; nothing on
+    Linux could see it, because Linux has both flags.
+
+    Simulated by hiding the attributes rather than by skipping on Windows, so the guard is
+    exercised on every platform the suite runs on -- including the ones that would otherwise
+    never take that branch."""
+    import tempfile
+
+    confining = (
+        '<?xml version="1.0" encoding="UTF-8" ?>\n'
+        '<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">\n'
+        '  <profiles>\n'
+        '    <transport_descriptors>\n'
+        '      <transport_descriptor>\n'
+        '        <transport_id>loopback_udp</transport_id>\n'
+        '        <type>UDPv4</type>\n'
+        '        <interfaceWhiteList><address>127.0.0.1</address></interfaceWhiteList>\n'
+        '      </transport_descriptor>\n'
+        '    </transport_descriptors>\n'
+        '    <participant profile_name="p" is_default_profile="true">\n'
+        '      <rtps>\n'
+        '        <userTransports><transport_id>loopback_udp</transport_id></userTransports>\n'
+        '        <useBuiltinTransports>false</useBuiltinTransports>\n'
+        '      </rtps>\n'
+        '    </participant>\n'
+        '  </profiles>\n'
+        '</dds>\n'
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as handle:
+        handle.write(confining)
+        path = handle.name
+
+    passed = True
+    try:
+        # Baseline: this platform, with whatever flags it really has.
+        if not _network_recovery.xml_profile_confines_to_loopback(path):
+            passed = False
+            _log("  baseline (real flags): FAIL -- the fixture is not recognised as confining")
+
+        # Now every combination of the optional flags being absent, which is what a
+        # non-POSIX platform looks like from inside the parser.
+        for hidden in (("O_NONBLOCK",), ("O_NOFOLLOW",), ("O_NONBLOCK", "O_NOFOLLOW"), ("O_BINARY",)):
+            saved = {}
+            for name in hidden:
+                if hasattr(os, name):
+                    saved[name] = getattr(os, name)
+                    delattr(os, name)
+            try:
+                actual = _network_recovery.xml_profile_confines_to_loopback(path)
+            finally:
+                for name, value in saved.items():
+                    setattr(os, name, value)
+            if actual is not True:
+                passed = False
+            _log(f"  without {'+'.join(hidden)}: {'ok' if actual else 'FAIL (got False, expected True)'}")
+    finally:
+        os.unlink(path)
+
+    _log(f"xml_profile_flags_are_optional: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
+def test_xml_loopback_confinement_parser():
+    """xml_profile_confines_to_loopback over the shapes that matter: the repository's own
+    loopback profile (both spellings of the interface list), the same with builtin transports
+    left on, a whitelist that reaches the LAN, a profile with no default participant, shared
+    memory alongside (needs no interface), and a file that is not XML at all."""
+    import tempfile
+
+    confines = _network_recovery.xml_profile_confines_to_loopback
+    checks = []
+
+    def case(name, xml_text, expected):
+        with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as handle:
+            handle.write(xml_text)
+            path = handle.name
+        try:
+            actual = confines(path)
+        finally:
+            os.unlink(path)
+        checks.append(actual is expected)
+        _log(f"  {name}: {'ok' if actual is expected else 'FAIL'} (got {actual}, expected {expected})")
+
+    def profile(transports_xml, participant_rtps_xml):
+        return (
+            '<?xml version="1.0" encoding="UTF-8" ?><dds xmlns="http://www.eprosima.com"><profiles>'
+            f"<transport_descriptors>{transports_xml}</transport_descriptors>"
+            f'<participant profile_name="p" is_default_profile="true"><rtps>{participant_rtps_xml}</rtps></participant>'
+            "</profiles></dds>"
+        )
+
+    udp_loopback_old = (
+        "<transport_descriptor><transport_id>lo</transport_id><type>UDPv4</type>"
+        "<interfaceWhiteList><address>127.0.0.1</address></interfaceWhiteList></transport_descriptor>"
+    )
+    udp_loopback_new = (
+        "<transport_descriptor><transport_id>lo</transport_id><type>UDPv4</type>"
+        '<interfaces><allowlist><interface name="127.0.0.1"/></allowlist></interfaces>'
+        "</transport_descriptor>"
+    )
+    udp_loopback_device = (
+        "<transport_descriptor><transport_id>lo</transport_id><type>UDPv4</type>"
+        "<interfaceWhiteList><interface>lo0</interface></interfaceWhiteList></transport_descriptor>"
+    )
+    udp_lan = (
+        "<transport_descriptor><transport_id>lan</transport_id><type>UDPv4</type>"
+        "<interfaceWhiteList><address>127.0.0.1</address><address>192.168.1.5</address></interfaceWhiteList>"
+        "</transport_descriptor>"
+    )
+    udp_open = "<transport_descriptor><transport_id>open</transport_id><type>UDPv4</type></transport_descriptor>"
+    shm = "<transport_descriptor><transport_id>shm</transport_id><type>SHM</type></transport_descriptor>"
+    uses = "<userTransports><transport_id>{}</transport_id></userTransports><useBuiltinTransports>false</useBuiltinTransports>"
+
+    case("loopback, deprecated spelling", profile(udp_loopback_old, uses.format("lo")), True)
+    case("loopback, current spelling", profile(udp_loopback_new, uses.format("lo")), True)
+    case("loopback device name, <interface> entry", profile(udp_loopback_device, uses.format("lo")), True)
+    case("loopback + shared memory", profile(udp_loopback_old + shm, uses.format("lo") + "<userTransports><transport_id>shm</transport_id></userTransports>"), True)
+    case("loopback but builtin transports left on", profile(udp_loopback_old, "<userTransports><transport_id>lo</transport_id></userTransports>"), False)
+    case("whitelist that reaches the LAN", profile(udp_lan, uses.format("lan")), False)
+    case("no interface list at all", profile(udp_open, uses.format("open")), False)
+    case("no default participant profile", profile(udp_loopback_old, uses.format("lo")).replace(' is_default_profile="true"', ""), False)
+    case("not XML", "this is not a profile", False)
+
+    # This file is found by RELATIVE name in the process' working directory, so its contents
+    # are chosen by anyone who can write there. A DOCTYPE must be refused rather than expanded:
+    # ElementTree grows nested entity declarations exponentially, so a few hundred bytes reach
+    # gigabytes. Refused at the parser, so the file's ENCODING cannot carry one past the check
+    # -- the UTF-16 case below is the one a byte-level search for "<!DOCTYPE" would miss.
+    entity_bomb = (
+        '<?xml version="1.0"?>\n'
+        "<!DOCTYPE profiles [\n"
+        '<!ENTITY a "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">\n'
+        '<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">\n'
+        '<!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">\n'
+        '<!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;">\n'
+        "]>\n"
+        '<profiles><participant profile_name="p" is_default_profile="true">'
+        "<rtps><name>&d;</name></rtps></participant></profiles>"
+    )
+    case("entity-expansion bomb", entity_bomb, False)
+    case(
+        "a DOCTYPE beside an otherwise confining profile",
+        profile(udp_loopback_old, uses.format("lo")).replace(
+            '<?xml version="1.0" encoding="UTF-8" ?>',
+            '<?xml version="1.0" encoding="UTF-8" ?><!DOCTYPE dds [<!ENTITY x "y">]>',
+        ),
+        False,
+    )
+    # Bigger than the read ceiling, so it is refused without being taken into memory whole.
+    case(
+        "larger than the profile size ceiling",
+        "<profiles>" + "<!-- pad -->" * 400000 + "</profiles>",
+        False,
+    )
+    # The file the suite itself runs under, exactly as CI sets it.
+    repo_profile = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fast_dds_localhost_profile.xml")
+    if os.path.isfile(repo_profile):
+        actual = confines(repo_profile)
+        checks.append(actual is True)
+        _log(f"  test/fast_dds_localhost_profile.xml: {'ok' if actual else 'FAIL'}")
+    passed = all(checks)
+    _log(f"xml_loopback_confinement_parser: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
 _TESTS = {
     "logging": test_logging,
+    "xml_loopback_profile_skipped": test_xml_loopback_profile_skipped,
+    "xml_loopback_profile_env_on_participates": test_xml_loopback_profile_env_on_participates,
+    "xml_loopback_confinement_parser": test_xml_loopback_confinement_parser,
+    "xml_profile_flags_are_optional": test_xml_profile_flags_are_optional,
     "env_recovery": test_env_recovery,
     "env_default": test_env_default,
     "env_on": test_env_on,
@@ -809,16 +2306,47 @@ _TESTS = {
     "reset_disabled": test_reset_disabled,
     "reset_refreshes_fastdds_interface_cache": test_reset_refreshes_fastdds_interface_cache,
     "teardown_deferred": test_teardown_deferred,
+    "discovery_event_owner_release_is_scoped": test_discovery_event_owner_release_is_scoped,
+    "matched_counts_cleared_on_teardown": test_matched_counts_cleared_on_teardown,
     "coalescer_resets_on_transient_flap": test_coalescer_resets_on_transient_flap,
+    "no_rebuild_on_address_loss": test_no_rebuild_on_address_loss,
+    "unreadable_interfaces_are_not_a_change": test_unreadable_interfaces_are_not_a_change,
+    "no_baseline_rebuilds_for_first_readable_list": test_no_baseline_rebuilds_for_first_readable_list,
+    "rebuild_on_address_change": test_rebuild_on_address_change,
     "snapshot_prefix_length": test_snapshot_prefix_length,
     "netmask_read_is_bounded": test_netmask_read_is_bounded,
+    "linked_list_walk_advances": test_linked_list_walk_advances,
+    "env_explicit_unset": test_env_explicit_unset,
+    "env_explicit_whitespace": test_env_explicit_whitespace,
+    "env_explicit_on": test_env_explicit_on,
+    "env_explicit_off": test_env_explicit_off,
+    "allowed_interfaces_are_ipv4": test_allowed_interfaces_are_ipv4,
     "extra_interfaces_env": test_extra_interfaces_env,
     "netlink_binds_before_snapshot": test_netlink_binds_before_snapshot,
+    "netlink_stop_keeps_descriptors_under_a_live_worker": (
+        test_netlink_stop_keeps_descriptors_under_a_live_worker
+    ),
     "safety_net_detects_missed_change": test_safety_net_detects_missed_change,
     "safety_net_reopens_dead_monitor": test_safety_net_reopens_dead_monitor,
     "safety_net_retries_failed_rebuild": test_safety_net_retries_failed_rebuild,
     "safety_net_retry_gives_up_after_bound": test_safety_net_retry_gives_up_after_bound,
     "safety_net_env": test_safety_net_env,
+    "snapshot_policy_excludes_tunnel": test_snapshot_policy_excludes_tunnel,
+    "snapshot_policy_follows_transports": test_snapshot_policy_follows_transports,
+    "safety_net_retries_while_interfaces_are_unreadable": test_safety_net_retries_while_interfaces_are_unreadable,
+    "netlink_kinds_match_the_kernel": test_netlink_kinds_match_the_kernel,
+    "listener_drain_reports_a_stall_until_it_ends": test_listener_drain_reports_a_stall_until_it_ends,
+    "snapshot_policy_honours_override": test_snapshot_policy_honours_override,
+    "netlink_end_read_failure_keeps_the_flap": test_netlink_end_read_failure_keeps_the_flap,
+    "netlink_start_read_failure_is_retried_in_the_burst": (
+        test_netlink_start_read_failure_is_retried_in_the_burst
+    ),
+    "netlink_start_read_retry_is_bounded": test_netlink_start_read_retry_is_bounded,
+    "netlink_safety_net_survives_sustained_churn": (
+        test_netlink_safety_net_survives_sustained_churn
+    ),
+    "env_explicit_request_survives_mutation": test_env_explicit_request_survives_mutation,
+    "env_explicit_request_survives_removal": test_env_explicit_request_survives_removal,
 }
 
 
@@ -839,11 +2367,14 @@ def main():
     if name not in _TESTS:
         print(f"Unknown subcommand: {name}", file=sys.stderr)
         return 1
+    _arm_watchdog()
     try:
         return _TESTS[name]()
     except Exception:
         traceback.print_exc()
         return 1
+    finally:
+        _disarm_watchdog()
 
 
 if __name__ == "__main__":

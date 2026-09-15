@@ -15,11 +15,17 @@
 # limitations under the License.
 
 import random
+import os
 import sys
 import threading
 import time
 
 import provizio_dds
+import provizio_test_domain
+
+# Test budgets are scaled by the factor provizio_dds_finalize_tests exports (5 under a
+# sanitizer build), exactly as the C++ mirrors scale theirs by PROVIZIO_DDS_TEST_TIMEOUT_SCALE.
+_TIMEOUT_SCALE = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
 
 _START_TIME = time.monotonic()
 
@@ -40,13 +46,11 @@ def main() -> int:
     test_name_postfix = sys.argv[1]
     expected_value = int(sys.argv[2])
     num_iterations = int(sys.argv[3])
-    # Remap to domain IDs 100-127 to avoid exceeding Fast-DDS max (127) and
-    # to prevent multicast discovery state accumulation across rapid
-    # participant create/destroy cycles.
-    _BASE_DOMAIN_ID = 100
-    _DOMAIN_RANGE = 28  # 100..127
+    # A per-iteration domain, derived from the iteration index, so that DDS discovery state
+    # cannot accumulate across rapid participant create/destroy cycles and no other suite
+    # shares the domain. The band, and why it stops at 100, is in provizio_test_domain.py.
     domain_id = (
-        (_BASE_DOMAIN_ID + int(sys.argv[4]) % _DOMAIN_RANGE)
+        provizio_test_domain.seed_band_domain(int(sys.argv[4]))
         if len(sys.argv) > 4
         else 14
     )
@@ -60,7 +64,7 @@ def main() -> int:
     # is about. Waiting instead for the gap BETWEEN requests keeps the regression signal (a client
     # that dies or hangs is still caught, within a bounded time) while being indifferent to how
     # slow the host is. The ctest TIMEOUT bounds the whole run regardless.
-    idle_timeout = 60.0
+    idle_timeout = 60.0 * _TIMEOUT_SCALE
 
     log_prefix = f"python_request_response_reliability_service{test_name_postfix}: "
     service_name = f"provizio_dds_test_request_response_reliability{test_name_postfix}"

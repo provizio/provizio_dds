@@ -16,7 +16,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -118,16 +117,10 @@ namespace provizio::dds::detail
                 return true;
             }
 
-            std::string value{env};
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char chr) { return static_cast<char>(std::tolower(chr)); });
-            if (value == "off" || value == "0" || value == "false" || value == "no")
+            bool enabled = true;
+            if (try_parse_bool(env, enabled))
             {
-                return false;
-            }
-            if (value == "on" || value == "1" || value == "true" || value == "yes")
-            {
-                return true;
+                return enabled;
             }
 
             log_warning() << cleanup_enabled_env << "='" << sanitise_env_value_for_log(env)

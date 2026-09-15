@@ -249,11 +249,36 @@ jobs:
       PROVIZIO_DDS_CTEST_EXCLUDE: ${{ matrix.build_type == 'Debug' && 'reliability' || '' }}
     steps:
       - uses: actions/checkout@v4
-      # Remove any stale venv left by build-cache-python-arm on shared self-hosted runners
-      # (jetson-18.04 and jetson-20.04 share /tmp on the same physical machine).
       - run: rm -rf /tmp/provizio_dds.venv
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${{matrix.with_python}}" "${STATIC_ANALYSIS}" ${ENABLE_ROS_TESTS}
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
+      # ENABLE_PRIVILEGED_TESTS: this matrix is where network_recovery_carrier and
+      # network_recovery_cold_start_hosts run. They are off by default (see the option in the
+      # top-level CMakeLists.txt) because they create network namespaces as root, which no
+      # plain `ctest` should do behind the operator's back -- but they are the ONLY end-to-end
+      # regressions for the IFF_RUNNING/link-event carrier fix and for the cold-start host-id
+      # Fast-DDS patch, so CI has to ask for them explicitly. Asking here, in the workflow, is
+      # the point: it is visible and reviewed, where a developer's plain `ctest` is neither.
+      # This restores what ran before the option existed; it grants nothing new.
+      #
+      # Note what it applies to: `jetson-20.04` in this matrix is SELF-HOSTED and is NOT
+      # disposable, so root-level namespace work there persists in a way it does not on the
+      # GitHub-hosted runners. Two things make that acceptable rather than merely tolerated.
+      # The per-peer /etc/machine-id bind mount and /dev/shm tmpfs are made inside
+      # `unshare -m --propagation private`, so they cannot reach the host mount namespace and
+      # die with the last process in theirs even under SIGKILL. And what CAN survive a
+      # SIGKILL -- a named namespace, or a veth still in the host namespace -- is reclaimed by
+      # the pid-aware reaper each script runs at startup (test/network_recovery/
+      # netns_reaper.sh), since the trap-based cleanup cannot run on that path and CTest kills
+      # a timed-out test with SIGKILL. The cold-start script's `mktemp -d` tree also outlives
+      # such a kill and is NOT reaped -- its name carries no pid, so nothing distinguishes a
+      # dead run's from a live one's. It is mode 0700 (mktemp -d) and holds the two constant
+      # machine-id strings, a work/ subdirectory, and the four peer capture logs -- which a
+      # mid-phase SIGKILL means are NOT empty. Kilobytes of DDS host-ids and test chatter, no
+      # secrets, and the system's own tmp cleanup reclaims them.
+      #
+      # The runners provide passwordless sudo; where they do not, each case reports ctest
+      # SKIP. Ignored on macOS, where the two are not registered at all.
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_PRIVILEGED_TESTS=ON -DENABLE_ROS_TESTS=${ENABLE_ROS_TESTS}
       - run: .github/workflows/test.sh
 
   # ThreadSanitizer. ASan/UBSan/LSan come for free on the Debug matrix above (coding_standards enables
@@ -654,6 +679,9 @@ jobs:
     needs: commit-cache
     runs-on: ubuntu-latest
     strategy:
+      # As every other test matrix here: one profile failing must not cancel the
+      # others, whose results are exactly what says whether the failure is specific to it.
+      fail-fast: false
       matrix:
         packets_loss: [25%, 50%]
         network_delay: [250ms, 500ms]
@@ -672,6 +700,9 @@ jobs:
     needs: commit-cache
     runs-on: ubuntu-latest
     strategy:
+      # As every other test matrix here: one profile failing must not cancel the
+      # others, whose results are exactly what says whether the failure is specific to it.
+      fail-fast: false
       matrix:
         packets_loss: [50%, 75%]
         network_delay: [250ms, 500ms]

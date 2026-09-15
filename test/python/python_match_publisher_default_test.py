@@ -146,11 +146,11 @@ def test_deferral():
     # It blocked for ~the timeout. Lower bound comfortably under the full window
     # (wide margin for a fast scheduler) proves it did NOT short-circuit at t=0.
     if elapsed < DEFERRED_OBSERVE_WINDOW_SEC - 1.0:
-        print(f"get_num_matched_publishers returned after only {elapsed:.3f}s — it short-circuited instead of honouring the timeout", file=sys.stderr)
+        print(f"get_num_matched_publishers returned after only {elapsed:.3f}s -- it short-circuited instead of honouring the timeout", file=sys.stderr)
         return 1
     # The reader was never built, so there is no DataReader GUID to report.
     if subscriber.get_guid() != provizio_dds.GUID_t.unknown():
-        print("deferred subscriber reports a concrete GUID — DataReader was created despite no publisher", file=sys.stderr)
+        print("deferred subscriber reports a concrete GUID -- DataReader was created despite no publisher", file=sys.stderr)
         return 1
 
     # A writer that appears mid-wait is observed within the timeout. Create the
@@ -277,7 +277,7 @@ def _run_explicit(reliability, topic_name, label):
     # publisher in sight. (The match-mode default would report the unknown GUID
     # until a writer is discovered — see test_deferral.)
     if subscriber.get_guid() == provizio_dds.GUID_t.unknown():
-        print(f"{label}: explicit-reliability subscriber reports the unknown GUID — reader was deferred, not built eagerly", file=sys.stderr)
+        print(f"{label}: explicit-reliability subscriber reports the unknown GUID -- reader was deferred, not built eagerly", file=sys.stderr)
         return 1
 
     # Now bring up a matching publisher and confirm reception is unchanged.

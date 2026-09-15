@@ -79,5 +79,16 @@ foreach(_case reclaims_dead_participant spares_the_living)
                          RESOURCE_LOCK provizio_dds_shm_cleanup)
 endforeach()
 
-# Scale every test TIMEOUT in this directory when a sanitizer is active (no-op otherwise).
-provizio_dds_scale_test_timeouts()
+# Drives a real participant in the real /dev/shm, so it joins the cases above under the same
+# lock. It sweeps nothing and asserts only about objects that are never created, but the
+# participant it creates is enough on its own to fail reclaims_dead_participant -- which
+# snapshots every unlocked Fast-DDS object on the host and requires all of them to be reclaimed.
+add_test(NAME shm_cleanup_no_datasharing_segments
+         COMMAND "$<TARGET_FILE:shm_cleanup_test>" no_datasharing_segments
+         WORKING_DIRECTORY "$<TARGET_FILE_DIR:shm_cleanup_test>")
+set_tests_properties(shm_cleanup_no_datasharing_segments PROPERTIES TIMEOUT ${_SC_PARTICIPANT_TIMEOUT}
+                     RESOURCE_LOCK provizio_dds_shm_cleanup)
+
+# Scale this directory's test timeouts under a sanitizer, and let a stuck test report
+# itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
+provizio_dds_finalize_tests()

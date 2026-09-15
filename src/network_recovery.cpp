@@ -14,11 +14,10 @@
 
 #include "provizio/dds/network_recovery.h"
 
-#include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <string>
 
+#include "detail/env_utils.h"
 #include "provizio/dds/logging.h"
 
 namespace provizio::dds
@@ -27,36 +26,73 @@ namespace provizio::dds
     {
         constexpr const char *env_var_name = "PROVIZIO_DDS_NETWORK_RECOVERY";
 
-        // Parses the env var once, caches the result. Re-parsing on every participant
-        // creation would cost a getenv() call per participant; the value is fixed for
-        // the lifetime of the process by definition (env updates from inside the process
-        // are deliberately not honoured here, to keep the semantics simple).
-        bool resolve_env_var_once()
+        /// Everything this process ever concludes about PROVIZIO_DDS_NETWORK_RECOVERY.
+        struct env_var_reading final
         {
-            const auto *raw = std::getenv(env_var_name);  // NOLINT(concurrency-mt-unsafe): startup-only probe
-            if (raw == nullptr || *raw == '\0')
-            {
-                return true;  // Default: enabled.
-            }
+            /// Whether the variable was set to something non-empty.
+            bool explicitly_set{false};
+            /// The verdict: what the value says, or the default where it says nothing usable.
+            bool enabled{true};
+        };
 
-            std::string value{raw};
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char chr) { return static_cast<char>(std::tolower(chr)); });
+        /// The env var, read and parsed exactly ONCE per process.
+        ///
+        /// One initialiser holding both answers, not two magic statics holding one each. Two
+        /// were primed at different moments -- the verdict from every participant's
+        /// constructor, "was it set" only from the loopback-confinement path -- so a
+        /// setenv() between them left the pair describing two different environments, and
+        /// "off" was reported as an explicit request for ON. No concurrency was needed to
+        /// reach it: two sequential participant constructions with a setenv in between were
+        /// enough. Reading them together is what makes the NOLINT below honest, too.
+        const env_var_reading &read_env_var_once()
+        {
+            static const env_var_reading reading = [] {
+                env_var_reading result;
+                const auto *raw = std::getenv(env_var_name);  // NOLINT(concurrency-mt-unsafe): startup-only probe
+                result.explicitly_set = raw != nullptr && *raw != '\0';
+                if (!result.explicitly_set)
+                {
+                    return result;  // Default: enabled.
+                }
 
-            if (value == "off" || value == "0" || value == "false" || value == "no")
-            {
-                return false;
-            }
-            if (value == "on" || value == "1" || value == "true" || value == "yes")
-            {
-                return true;
-            }
+                bool enabled = true;
+                if (detail::try_parse_bool(raw, enabled))
+                {
+                    result.enabled = enabled;
+                    return result;
+                }
 
-            // Unknown value: log once, treat as default-on.
-            log_warning() << env_var_name << "=" << raw << " is not recognised (use on/off); auto-recovery enabled";
-            return true;
+                // Unknown value: log once, treat as default-on.
+                // Sanitised before quoting, as everywhere else a rejected PROVIZIO_DDS_* value
+                // is echoed: an arbitrarily long or control-character-carrying value must not be
+                // able to flood the log or forge lines in whatever ingests it.
+                log_warning() << env_var_name << "='" << detail::sanitise_env_value_for_log(raw)
+                              << "' is not recognised (use on/off); auto-recovery enabled";
+                return result;
+            }();
+            return reading;
         }
     }  // namespace
+
+    bool network_recovery_explicitly_requested(const network_recovery_mode mode)
+    {
+        if (mode == network_recovery_mode::on)
+        {
+            return true;
+        }
+        if (mode != network_recovery_mode::env_var_controlled)
+        {
+            return false;
+        }
+        // Both halves out of ONE reading, never a fresh getenv AND a cached verdict: asking
+        // whether the variable is set right now and AND-ing that with an answer cached earlier
+        // let the two describe different environments, and "off" was then reported as an
+        // explicit request for ON -- watching a loopback-confined participant against the
+        // caller's word. Mid-process mutation is not hypothetical here; a Python participant
+        // in a mixed application does exactly that through os.environ.setdefault.
+        const auto &reading = read_env_var_once();
+        return reading.explicitly_set && reading.enabled;
+    }
 
     bool resolve_network_recovery_enabled(const network_recovery_mode mode)
     {
@@ -66,10 +102,8 @@ namespace provizio::dds
             return true;
         case network_recovery_mode::off:
             return false;
-        case network_recovery_mode::env_var_controlled: {
-            static const bool cached = resolve_env_var_once();
-            return cached;
-        }
+        case network_recovery_mode::env_var_controlled:
+            return read_env_var_once().enabled;
         }
         return true;
     }

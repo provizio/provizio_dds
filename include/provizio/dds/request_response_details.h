@@ -39,6 +39,8 @@
 #include <fastdds/rtps/common/SampleIdentity.hpp>
 
 #include "provizio/dds/common.h"
+#include "provizio/dds/detail/bounded_wait.h"
+#include "provizio/dds/detail/log_nothrow.h"
 #include "provizio/dds/function_traits.h"
 #include "provizio/dds/ignore_request.h"
 #include "provizio/dds/logging.h"
@@ -550,13 +552,7 @@ namespace provizio::dds::detail
         // deadlock / unbounded blocking on a hot publish path.
         if (queue_full)
         {
-            try
-            {
-                log_error() << requests_queue_full_error_message;
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+            detail::emit_log_nothrow([&] { log_error() << requests_queue_full_error_message; });
         }
         cv.notify_all();
     }
@@ -591,23 +587,17 @@ namespace provizio::dds::detail
                     // user log callback may safely re-enter provizio_dds) and keep the thread
                     // alive for the next request. The logging itself can allocate/throw, so
                     // guard it too — nothing may escape this handler thread.
-                    try
-                    {
-                        log_error() << "service request handler threw: " << exception.what() << "; request dropped";
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow([&] {
+                        log_error() << "service request handler threw: "
+                                    << detail::sanitise_text_for_log(exception.what(),
+                                                                     detail::max_logged_exception_text)
+                                    << "; request dropped";
+                    });
                 }
                 catch (...)
                 {
-                    try
-                    {
-                        log_error() << "service request handler threw a non-std::exception; request dropped";
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow(
+                        [&] { log_error() << "service request handler threw a non-std::exception; request dropped"; });
                 }
                 lock.lock();
             }
@@ -678,7 +668,9 @@ namespace provizio::dds::detail
                     try
                     {
                         handler_error =
-                            std::string{"service request handler threw: "} + exception.what() + "; request dropped";
+                            std::string{"service request handler threw: "} +
+                            detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text) +
+                            "; request dropped";
                     }
                     catch (...)  // NOLINT(bugprone-empty-catch): a formatting failure must not escape
                     {
@@ -709,23 +701,11 @@ namespace provizio::dds::detail
         // std::bad_alloc from the streaming logger must not escape into Fast-DDS.
         if (!handler_error.empty())
         {
-            try
-            {
-                log_error() << handler_error;
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+            detail::emit_log_nothrow([&] { log_error() << handler_error; });
         }
         if (queue_full)
         {
-            try
-            {
-                log_error() << requests_queue_full_error_message;
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+            detail::emit_log_nothrow([&] { log_error() << requests_queue_full_error_message; });
         }
     }
 
@@ -765,8 +745,10 @@ namespace provizio::dds::detail
                         // let an allocation failure escape.
                         try
                         {
-                            handler_errors.emplace_back(std::string{"service request handler threw: "} +
-                                                        exception.what() + "; request dropped");
+                            handler_errors.emplace_back(
+                                std::string{"service request handler threw: "} +
+                                detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text) +
+                                "; request dropped");
                         }
                         catch (...)  // NOLINT(bugprone-empty-catch): a formatting failure must not escape
                         {
@@ -795,13 +777,7 @@ namespace provizio::dds::detail
                 {
                     // Best-effort: a std::bad_alloc from the streaming logger must not
                     // escape this handler thread.
-                    try
-                    {
-                        log_error() << message;
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow([&] { log_error() << message; });
                 }
                 lock.lock();
             }
@@ -1008,10 +984,29 @@ namespace provizio::dds::detail
         // timeout (finite timeout), client stop, or a concurrently-set error (e.g. the background readiness
         // task's own finite timeout firing mid-wait); does not mutate error/matched.
         constexpr int settle_cap_multiplier = 4;
-        const auto settle = stable_matches_period;
-        const auto settle_cap = settle * settle_cap_multiplier;
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        // Clamped to non-negative FIRST, then saturated on the way up. stable_matches_period is
+        // unvalidated public API in BOTH directions, and the multiply below overflows at either
+        // end -- milliseconds::min() * 4 just as much as milliseconds::max() * 4 -- which is
+        // undefined behaviour a Debug build's UBSan aborts on, and whose wrapped result would
+        // compare as a cap already in the past, ending the settle at once for a caller who asked
+        // for the opposite. A non-positive settle already means "do not settle" to the loop
+        // below, so zero is the answer it reaches anyway; the Python mirror clamps identically
+        // before its own multiply.
+        const auto settle = stable_matches_period > std::chrono::milliseconds::zero()
+                                ? stable_matches_period
+                                : std::chrono::milliseconds::zero();
+        const auto settle_cap = settle.count() > std::chrono::milliseconds::max().count() / settle_cap_multiplier
+                                    ? std::chrono::milliseconds::max()
+                                    : settle * settle_cap_multiplier;
+        // A timeout of zero means "no timeout" HERE (unlike elsewhere in this file), so the
+        // deadline is only ever consulted under has_timeout -- but it is still computed
+        // saturating rather than as now() + timeout, which overflows for a near-max value and
+        // lands in the past. That is the same inversion detail/bounded_wait.h exists to prevent:
+        // the loop below would report "service unavailable" immediately to a caller who asked to
+        // wait essentially forever.
         const bool has_timeout = timeout.count() != 0;
+        const auto deadline = has_timeout ? detail::saturating_deadline<std::chrono::steady_clock>(timeout)
+                                          : std::chrono::steady_clock::now();
 
         int prev_subscribers = -1;
         int prev_publishers = -1;
@@ -1053,7 +1048,12 @@ namespace provizio::dds::detail
                     have_first_match = true;
                     first_match = now;
                 }
-                if (settle.count() <= 0 || (now - last_change) >= settle || (now - first_match) >= settle_cap)
+                // Elapsed times are cast DOWN to milliseconds rather than the bounds being
+                // promoted up to the clock's nanoseconds: promoting milliseconds::max() overflows,
+                // while an elapsed time this loop has actually measured cannot.
+                const auto since_change = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_change);
+                const auto since_first_match = std::chrono::duration_cast<std::chrono::milliseconds>(now - first_match);
+                if (settle.count() <= 0 || since_change >= settle || since_first_match >= settle_cap)
                 {
                     return true;
                 }

@@ -37,4 +37,7 @@ ENV PACKETS_LOSS=$PACKETS_LOSS
 ENV NETWORK_RATE=$NETWORK_RATE
 ENV XML_PROFILE=$XML_PROFILE
 
-CMD ["/bin/bash", "-c", "if [ -f ${XML_PROFILE} ]; then export FASTDDS_DEFAULT_PROFILES_FILE=${XML_PROFILE}; fi; tc qdisc add dev eth0 root netem delay ${NETWORK_DELAY} loss ${PACKETS_LOSS} rate ${NETWORK_RATE} && python3 /opt/provizio_dds/test/congested_network_test/congested_network_${SERVICE}.py"]
+# The container start-up -- traffic shaping, the counter reporter, then the test itself --
+# lives in a script rather than here, because what it does and why needs explaining at
+# more length than a CMD line can carry.
+CMD ["/opt/provizio_dds/test/congested_network_test/congested_network_entrypoint.sh"]

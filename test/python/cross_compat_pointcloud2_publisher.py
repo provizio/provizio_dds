@@ -22,12 +22,19 @@
 # the metadata fields, the field descriptors, and the raw `data` byte
 # blob arrive byte-identical on the other side of the version boundary.
 
+import os
 import sys
 import time
 import provizio_dds
 
-CROSS_COMPAT_DOMAIN_ID = 42
-CROSS_COMPAT_POINTCLOUD2_TOPIC_NAME = "provizio_dds_cross_compat_pointcloud2_topic"
+# The driver (cross_version_compat_test.py) gives every run of this test its own domain and its
+# own topic / service names, because CI runs four copies of it on jetson runners that share a
+# LAN within seconds of each other, and the halves that are not confined to loopback used to
+# meet -- see the comment on _CHILD_ENV there. Falls back to the historical fixed values when
+# this script is run by hand.
+CROSS_COMPAT_DOMAIN_ID = int(os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_DOMAIN", "42"))
+CROSS_COMPAT_NAME_SUFFIX = os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_SUFFIX", "")
+CROSS_COMPAT_POINTCLOUD2_TOPIC_NAME = "provizio_dds_cross_compat_pointcloud2_topic" + CROSS_COMPAT_NAME_SUFFIX
 
 # Frame metadata locked in so the subscriber can match exactly. The
 # (sec, nanosec) pair is chosen as plain integers (no near-overflow
@@ -67,5 +74,12 @@ for _ in range(PUBLISH_TIMES):
     successful_times += 1 if publisher.publish(cloud) else 0
     time.sleep(WAIT_TIME)
 
+if successful_times == 0:
+    print(f"cross_compat_pointcloud2_publisher: published NONE of the {PUBLISH_TIMES} messages")
+    sys.exit(1)
+
+# Printed on the success path only: the driver (cross_version_compat_test.py) reads a
+# "Success" line as proof this side finished the work the pair asserts, so a failure
+# must never carry the word. Its failure line is above, and says what went wrong.
 print(f"cross_compat_pointcloud2_publisher: Successfully published {successful_times} times")
-sys.exit(0 if successful_times > 0 else 1)
+sys.exit(0)

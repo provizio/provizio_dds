@@ -17,12 +17,19 @@
 # but on a dedicated DDS domain + topic so the test can safely run in
 # parallel with the same-version test suite.
 
+import os
 import sys
 import provizio_dds
 import threading
 
-CROSS_COMPAT_DOMAIN_ID = 42
-CROSS_COMPAT_TOPIC_NAME = "provizio_dds_cross_compat_pubsub_topic"
+# The driver (cross_version_compat_test.py) gives every run of this test its own domain and its
+# own topic / service names, because CI runs four copies of it on jetson runners that share a
+# LAN within seconds of each other, and the halves that are not confined to loopback used to
+# meet -- see the comment on _CHILD_ENV there. Falls back to the historical fixed values when
+# this script is run by hand.
+CROSS_COMPAT_DOMAIN_ID = int(os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_DOMAIN", "42"))
+CROSS_COMPAT_NAME_SUFFIX = os.environ.get("PROVIZIO_DDS_CROSS_COMPAT_SUFFIX", "")
+CROSS_COMPAT_TOPIC_NAME = "provizio_dds_cross_compat_pubsub_topic" + CROSS_COMPAT_NAME_SUFFIX
 TEST_VALUE = "provizio_dds_cross_compat"
 WAIT_TIME = 10
 

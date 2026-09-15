@@ -33,7 +33,9 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include "provizio/dds/common.h"
+#include "provizio/dds/detail/bounded_wait.h"
 #include "provizio/dds/detail/listener_drain.h"
+#include "provizio/dds/detail/log_nothrow.h"
 #include "provizio/dds/detail/resettable_endpoint.h"
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/function_traits.h"
@@ -168,8 +170,11 @@ namespace provizio::dds
          * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS
          * DataReader; reliable subscribers are slower but lossless on matched publishers
          * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
-         * qos_defaults depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive
-         * value, including 0, uses the default). Durability is configured separately via durability_kind.
+         * qos_defaults<data_pub_sub_type>::datareader_keep_last_history_depth (else Fast-DDS's default); a positive
+         * value sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is
+         * configured separately via durability_kind. A latency-sensitive consumer (a live display) should pass a
+         * small explicit depth: a deep history makes a momentarily-behind reader work through the backlog instead
+         * of skipping to the newest sample.
          * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
          * support); std::nullopt keeps the Fast-DDS/XML default.
          * @note A BEST_EFFORT_RELIABILITY_QOS subscriber will not match reliable publishers.
@@ -210,6 +215,13 @@ namespace provizio::dds
 
         void build_state(eprosima::fastdds::dds::DomainParticipant &on_participant);
         void teardown_state(eprosima::fastdds::dds::DomainParticipant &on_participant) noexcept;
+
+        /// @brief Forget the matched-publisher count as the endpoint is torn down.
+        ///
+        /// See publisher_handle::zero_matched_count. The reader side needs it just as much:
+        /// its liveness is `data_reader != nullptr`, and after a failed rebuild data_reader IS
+        /// null while the count from before the reset still stands.
+        void zero_matched_count() noexcept;
 
         std::shared_ptr<domain_participant> participant;
         dds::TypeSupport type_support;
@@ -277,9 +289,12 @@ namespace provizio::dds
      * @param on_data_function Function / function object invoked for each received sample.
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataReader;
      * reliable subscribers are slower but lossless on matched publishers
-     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
-     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+     * qos_defaults<data_pub_sub_type>::datareader_keep_last_history_depth (else Fast-DDS's default); a positive value
+     * sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is configured
+     * separately via durability_kind. A latency-sensitive consumer (a live display) should pass a small explicit
+     * depth: a deep history makes a momentarily-behind reader work through the backlog instead of skipping to the
+     * newest sample.
      * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
      * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<subscriber_handle<data_pub_sub_type>>
@@ -314,9 +329,12 @@ namespace provizio::dds
      * @param on_has_publisher_changed_function Function / function object invoked on first match / last unmatch.
      * @param reliability_kind Defines whether RELIABLE_RELIABILITY_QOS should be enabled for the DDS DataReader;
      * reliable subscribers are slower but lossless on matched publishers
-     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type qos_defaults
-     * depth (else Fast-DDS's default); a positive value sets KEEP_LAST of that depth (any non-positive value, including
-     * 0, uses the default). Durability is configured separately via durability_kind.
+     * @param max_history_depth KEEP_LAST history depth. use_default_history_depth (-1) uses the per-type
+     * qos_defaults<data_pub_sub_type>::datareader_keep_last_history_depth (else Fast-DDS's default); a positive value
+     * sets KEEP_LAST of that depth (any non-positive value, including 0, uses the default). Durability is configured
+     * separately via durability_kind. A latency-sensitive consumer (a live display) should pass a small explicit
+     * depth: a deep history makes a momentarily-behind reader work through the backlog instead of skipping to the
+     * newest sample.
      * @param durability_kind Optional DDS durability kind (e.g. TRANSIENT_LOCAL_DURABILITY_QOS for late-joiner
      * support); std::nullopt keeps the Fast-DDS/XML default.
      * @return std::shared_ptr<subscriber_handle<data_pub_sub_type>>
@@ -398,11 +416,15 @@ namespace provizio::dds
         subscriber->get_default_datareader_qos(datareader_qos);
         datareader_qos.reliability().kind = effective_reliability_kind;
         datareader_qos.endpoint().history_memory_policy = qos_defaults<data_pub_sub_type>::memory_policy;
-        // History (untied from durability): an explicit positive depth wins, else fall back to
-        // the per-type default (0 = leave the Fast-DDS default). KEEP_LAST only — durability is
-        // configured independently below, so this is not an RxO QoS (ROS2 interop unaffected).
+        // History (untied from durability): an explicit positive depth wins, else fall back to the
+        // per-type READER default (0 = leave the Fast-DDS default). The reader's own default is
+        // deliberately separate from the writer's: this history is a jitter buffer shared by every
+        // writer on the topic — on a keyless fleet-shared topic the depth is divided across all of
+        // them — while a writer's is a retransmission buffer for its own samples only. KEEP_LAST
+        // only — durability is configured independently below, so this is not an RxO QoS (ROS2
+        // interop unaffected).
         const std::int32_t effective_history_depth =
-            (max_history_depth > 0) ? max_history_depth : qos_defaults<data_pub_sub_type>::keep_last_history_depth;
+            detail::datareader_history_depth<data_pub_sub_type>(max_history_depth);
         if (effective_history_depth > 0)
         {
             datareader_qos.history().kind = HistoryQosPolicyKind::KEEP_LAST_HISTORY_QOS;
@@ -415,12 +437,9 @@ namespace provizio::dds
             datareader_qos.durability().kind = *durability_kind;
         }
 
-#if defined(_MSC_VER) || defined(__APPLE__)
-        // Disable data sharing on Windows and macOS: it uses shared memory segments
-        // that may be unavailable or leak resources. On Windows the interprocess
-        // directory may not exist; on macOS the system-wide SHM limits are low.
+        // Data sharing is off here as it is for writers, and for the same reasons: see
+        // publisher_handle::build_state, which carries the rationale in full.
         datareader_qos.data_sharing().off();
-#endif
 
         // Prime the listener BEFORE create_datareader attaches it to the new
         // DataReader: Fast-DDS can fire on_subscription_matched on an internal
@@ -431,11 +450,7 @@ namespace provizio::dds
         // because the underlying matched state never changed again — leaving
         // get_num_matched_publishers stuck at 0 forever and request/response
         // clients timing out waiting for the service.
-        {
-            const std::lock_guard<std::mutex> lock{data_listener->num_matched_publishers_mutex};
-            data_listener->num_matched_publishers = 0;
-        }
-        data_listener->num_matched_publishers_cv.notify_all();
+        zero_matched_count();
         data_listener->drain.reattach();
 
         data_reader = subscriber->create_datareader(the_topic->get(), datareader_qos, data_listener.get());
@@ -449,6 +464,19 @@ namespace provizio::dds
         }
 
         built_against_generation = participant->participant_generation();
+    }
+
+    template <typename data_pub_sub_type> void subscriber_handle<data_pub_sub_type>::zero_matched_count() noexcept
+    {
+        if (data_listener == nullptr)
+        {
+            return;
+        }
+        {
+            const std::lock_guard<std::mutex> lock{data_listener->num_matched_publishers_mutex};
+            data_listener->num_matched_publishers = 0;
+        }
+        data_listener->num_matched_publishers_cv.notify_all();
     }
 
     template <typename data_pub_sub_type>
@@ -465,6 +493,7 @@ namespace provizio::dds
             // See publisher_handle::teardown_state for the rationale: our state
             // points into a participant that's already been freed by a reset we
             // missed. Just clear the local pointers.
+            zero_matched_count();
             data_reader = nullptr;
             subscriber = nullptr;
             the_topic.reset();
@@ -472,6 +501,7 @@ namespace provizio::dds
             return;
         }
 
+        zero_matched_count();
         if (data_reader != nullptr && subscriber != nullptr)
         {
             subscriber->delete_datareader(data_reader);
@@ -603,26 +633,19 @@ namespace provizio::dds
             // The streaming logger can itself throw (allocation/stream growth); guard it with an inner
             // try/catch(...) so nothing escapes onto the Fast-DDS discovery thread. Mirrors the
             // request_handler logging guards elsewhere in this codebase.
-            try
-            {
+            detail::emit_log_nothrow([&] {
                 log_error() << "start_deferred_build: failed to launch deferred reader build for topic "
-                            << captured_topic_name << ": " << exception.what();
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+                            << captured_topic_name << ": "
+                            << detail::sanitise_text_for_log(exception.what(), detail::max_logged_exception_text);
+            });
         }
         catch (...)
         {
             // A non-std::exception must not escape this Fast-DDS-thread entry point either.
-            try
-            {
+            detail::emit_log_nothrow([&] {
                 log_error() << "start_deferred_build: failed to launch deferred reader build for topic "
                             << captured_topic_name << " (non-std::exception)";
-            }
-            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-            {
-            }
+            });
         }
     }
 
@@ -696,11 +719,25 @@ namespace provizio::dds
         }
 
         std::unique_lock<std::mutex> lock{data_listener->num_matched_publishers_mutex};
-        const auto timeout_point = std::chrono::steady_clock::now() + timeout;
+        // Saturating: a near-max timeout would overflow this into the past, and the
+        // settle loop below would then conclude at once that the count never settled
+        // (see detail/bounded_wait.h).
+        const auto timeout_point = detail::saturating_deadline<std::chrono::steady_clock>(timeout);
         const std::chrono::milliseconds min_attempt_time{50};
-        if (!data_listener->num_matched_publishers_cv.wait_for(
-                lock, std::max(timeout - settle_time, min_attempt_time),
-                [this] { return data_listener->num_matched_publishers > 0; }))
+        // A DEADLINE, not a duration: wait_for computes now() + duration internally, which a
+        // near-max timeout overflows -- measured, it then returns at once and this reports
+        // "no matches" for a caller who asked to wait as long as it takes. The deadline is
+        // saturated and the wait sliced (see detail/bounded_wait.h). Never less than
+        // min_attempt_time, as before.
+        //
+        // Reserving the settle time through the helper rather than subtracting it here:
+        // `timeout_point - settle_time` converts the settle time into the clock's own ticks
+        // first, so a near-max one overflows and lands in the past -- undoing the saturation
+        // above on the very next line.
+        const auto match_deadline = detail::deadline_reserving<std::chrono::steady_clock>(
+            timeout_point, settle_time, std::chrono::steady_clock::now() + min_attempt_time);
+        if (!detail::wait_until_bounded(data_listener->num_matched_publishers_cv, lock, match_deadline,
+                                        [this] { return data_listener->num_matched_publishers > 0; }))
         {
             // No matches
             return 0;
@@ -710,8 +747,10 @@ namespace provizio::dds
         {
             do
             {
-                if (!data_listener->num_matched_publishers_cv.wait_for(
-                        lock, settle_time, [this, num_matched_publishers_was = data_listener->num_matched_publishers] {
+                if (!detail::wait_until_bounded(
+                        data_listener->num_matched_publishers_cv, lock,
+                        detail::saturating_deadline<std::chrono::steady_clock>(settle_time),
+                        [this, num_matched_publishers_was = data_listener->num_matched_publishers] {
                             return num_matched_publishers_was != data_listener->num_matched_publishers;
                         }))
                 {
@@ -774,23 +813,16 @@ namespace provizio::dds
                             // The logging path itself can allocate and throw (std::bad_alloc on
                             // ostringstream growth); guard it so nothing escapes into the Fast-DDS
                             // reception thread. Mirrors the discovery dispatch path.
-                            try
-                            {
-                                log_error() << "subscriber on_data callback threw: " << exception.what();
-                            }
-                            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                            {
-                            }
+                            detail::emit_log_nothrow([&] {
+                                log_error() << "subscriber on_data callback threw: "
+                                            << detail::sanitise_text_for_log(exception.what(),
+                                                                             detail::max_logged_exception_text);
+                            });
                         }
                         catch (...)
                         {
-                            try
-                            {
-                                log_error() << "subscriber on_data callback threw a non-std::exception";
-                            }
-                            catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                            {
-                            }
+                            detail::emit_log_nothrow(
+                                [&] { log_error() << "subscriber on_data callback threw a non-std::exception"; });
                         }
                     }
                 }
@@ -870,23 +902,17 @@ namespace provizio::dds
                 {
                     // Guard the logging too — it can throw std::bad_alloc on stream growth,
                     // which must not escape into the Fast-DDS listener thread.
-                    try
-                    {
-                        log_error() << "subscriber on_has_publisher_changed callback threw: " << exception.what();
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    detail::emit_log_nothrow([&] {
+                        log_error() << "subscriber on_has_publisher_changed callback threw: "
+                                    << detail::sanitise_text_for_log(exception.what(),
+                                                                     detail::max_logged_exception_text);
+                    });
                 }
                 catch (...)
                 {
-                    try
-                    {
+                    detail::emit_log_nothrow([&] {
                         log_error() << "subscriber on_has_publisher_changed callback threw a non-std::exception";
-                    }
-                    catch (...)  // NOLINT(bugprone-empty-catch): a logging failure must not escape either
-                    {
-                    }
+                    });
                 }
             }
 

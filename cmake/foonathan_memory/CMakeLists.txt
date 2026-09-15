@@ -21,6 +21,11 @@ if(NOT foonathan_memory_FOUND)
     ExternalProject_Add(libfoonathan_memory
         GIT_REPOSITORY "https://github.com/${FOONATHAN_MEMORY_GITHUB_PROJECT}.git"
         GIT_TAG "${FOONATHAN_MEMORY_VENDOR_VERSION}"
+        # Both refs this can resolve to (v1.4.1, and v1.3.1 for the legacy path above) are
+        # tags, and nothing here derives anything from git history — see the note on
+        # libfast_dds in the top-level CMakeLists.txt, including why a SHA pin would have to
+        # drop this.
+        GIT_SHALLOW TRUE
         UPDATE_COMMAND ""
         PREFIX "${FOONATHAN_MEMORY_PREFIX}"
         SOURCE_DIR "${FOONATHAN_MEMORY_SOURCE_DIR}"

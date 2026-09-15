@@ -15,8 +15,13 @@
 # limitations under the License.
 
 import asyncio
+import os
 import sys
 import provizio_dds
+
+# Test budgets are scaled by the factor provizio_dds_finalize_tests exports (5 under a
+# sanitizer build), exactly as the C++ mirrors scale theirs by PROVIZIO_DDS_TEST_TIMEOUT_SCALE.
+_TIMEOUT_SCALE = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
 
 log_prefix = "python_request_response_client: "
 
@@ -28,7 +33,9 @@ class Timeout:
 async def main():
     service_name = "provizio_dds_test_request_response"
     domain_id = 14
-    timeout = 15
+    # Bounded by the service's own 20 s wait (python_request_response_service.py), so the
+    # C++ mirror's 30 s would never be reached; scaled like every C++ budget is.
+    timeout = 15 * _TIMEOUT_SCALE
 
     expected_request_response_pairs = [
         (50, 0),

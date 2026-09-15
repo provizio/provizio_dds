@@ -29,7 +29,6 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -44,6 +43,8 @@
 
 #include "provizio/dds/domain_participant.h"
 #include "provizio/dds/publisher.h"
+
+#include "detail/test_domain.h"
 
 #include <geometry_msgs/msg/TransformStampedPubSubTypes.hpp>
 #include <nav_msgs/msg/OdometryPubSubTypes.hpp>
@@ -62,18 +63,15 @@ namespace
     // ranges of <= 300 m stay sub-millimetre) while not flaking on float32 rounding.
     constexpr double default_precision = 0.001;
 
-    // All participants in one test process share this domain, chosen once at random within the DDS-safe range and
-    // away from 0. These tests integrate every sample they receive on the topics they subscribe to — including the
-    // default localization-extrinsics topic rt/provizio_extrinsics. Provizio's self-hosted CI includes real radar
-    // boards whose resident software publishes on that standard topic on the default domain; that extrinsics shifts
-    // every accumulated ego pose by a constant and corrupts the tests. Loopback confinement cannot exclude a
-    // publisher on the same board, so a per-process domain is needed to give each test its own discovery space
-    // (it also isolates against any concurrent run on another host).
-    const auto test_domain = [] {
-        std::random_device random_device;
-        std::uniform_int_distribution<int> distribution(1, 200);  // DDS-safe range, excluding domain 0
-        return distribution(random_device);
-    }();
+    // All participants in one test process share this domain, chosen once at random and away from 0. These tests
+    // integrate every sample they receive on the topics they subscribe to — including the default
+    // localization-extrinsics topic rt/provizio_extrinsics. Provizio's self-hosted CI includes real radar boards
+    // whose resident software publishes on that standard topic on the default domain; that extrinsics shifts every
+    // accumulated ego pose by a constant and corrupts the tests. Loopback confinement cannot exclude a publisher on
+    // the same board, so a per-process domain is needed to give each test its own discovery space (it also isolates
+    // against any concurrent run on another host). Which domains are eligible, and why not just 1..200, is in
+    // detail/test_domain.h.
+    const auto test_domain = provizio::dds::test::random_test_domain();
 
     double radians(const double degrees)
     {
@@ -840,7 +838,13 @@ namespace
 
     // Discovery/matching is asynchronous; generous ceiling for cross-participant matches on busy runners —
     // mirrors the Python tests' _wait_until_matched(timeout_sec=15)
-    constexpr auto match_timeout = std::chrono::milliseconds{15000};
+    // Scaled by the environment, as the ctest TIMEOUT wrapped around this case already is. An
+    // unscaled deadline inside a test is the defect this branch has now fixed three times
+    // elsewhere: under a sanitizer everything it waits for takes several times longer while
+    // this budget stays put, so the case reports a discovery failure that is really a slow
+    // machine. Discovery here is genuinely quick -- the sibling cases match in well under a
+    // second -- so the bound is never what ends the wait on a healthy runner.
+    constexpr auto match_timeout = std::chrono::milliseconds{15000 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
 
     /// Block until each publisher has at least one matched subscriber. With the match-publisher reader default the
     /// accumulator's subscribers are DEFERRED (the DataReader is created only once a writer is discovered), so a
@@ -849,8 +853,10 @@ namespace
     template <typename... publisher_handle_types> void wait_until_matched(const publisher_handle_types &...publishers)
     {
         const auto wait_one = [](const auto &publisher) {
+            // The domain is in the message because a match that never comes has one known cause
+            // that depends on it: see detail/test_domain.h.
             check(publisher->get_num_matched_subscribers(match_timeout, std::chrono::milliseconds{0}) > 0,
-                  "accumulation_test: a subscriber failed to match in time");
+                  "accumulation_test: a subscriber failed to match in time on domain " + std::to_string(test_domain));
         };
         (wait_one(publishers), ...);
     }
@@ -1721,7 +1727,7 @@ namespace
         // The cloud point is at the origin of the radar frame; with ego == radar, position == ego pose.
         // predict(T_pc) with the covering fix at T_pc and ego x = 20 → position[0] ≈ 20.
         check_near(local[0].position[0], 20.0, 1e-2,
-                   "dds_timesync_buffered: point placed at the exact covering localization, x ≈ 20");
+                   "dds_timesync_buffered: point placed at the exact covering localization, x ~= 20");
 
         // on_point_cloud must have fired exactly once (at buffer release, not at buffer insertion).
         check(callback_count.load() == 1, "dds_timesync_buffered: on_point_cloud fired exactly once at release");
@@ -1829,7 +1835,7 @@ namespace
 
         // Interpolated x = 19.5; old snap-to-covering would give 20.0; stale-last-fix would give 19.0.
         check_near(local[0].position[0], 19.5, 1e-2,
-                   "dds_timesync_interp: point placed at interpolated pose, x ≈ 19.5");
+                   "dds_timesync_interp: point placed at interpolated pose, x ~= 19.5");
 
         check(callback_count.load() == 1, "dds_timesync_interp: on_point_cloud fired exactly once at release");
     }
@@ -1928,9 +1934,9 @@ namespace
                   << ", " << local[0].position[2] << "), expected (" << expected << ", " << expected << ", 0)"
                   << std::endl;
         check_near(local[0].position[0], expected, 1e-2,
-                   "dds_timesync_orient: interpolated yaw 45° places x ≈ 0.7071 (short-way slerp)");
+                   "dds_timesync_orient: interpolated yaw 45 deg places x ~= 0.7071 (short-way slerp)");
         check_near(local[0].position[1], expected, 1e-2,
-                   "dds_timesync_orient: interpolated yaw 45° places y ≈ 0.7071 (short-way slerp)");
+                   "dds_timesync_orient: interpolated yaw 45 deg places y ~= 0.7071 (short-way slerp)");
 
         check(callback_count.load() == 1, "dds_timesync_orient: on_point_cloud fired exactly once at release");
     }
@@ -2177,7 +2183,7 @@ namespace
         // If the stale fix had corrupted previous_fix the bracket would be wrong and interpolation would
         // not yield 19.5. The correct result proves the stale fix was fully ignored.
         check_near(local[0].position[0], 19.5, 1e-2,
-                   "dds_timesync_drop_oor: point placed at interpolated pose x ≈ 19.5 (stale fix ignored)");
+                   "dds_timesync_drop_oor: point placed at interpolated pose x ~= 19.5 (stale fix ignored)");
 
         check(callback_count.load() == 1, "dds_timesync_drop_oor: on_point_cloud fired exactly once at release");
     }
@@ -2271,7 +2277,7 @@ namespace
         // previous_fix.pose has x=19; latest_fix.pose has x=20; true-time pose would have x=15.
         // The correct result is x ≈ 19 (closest retained fix, not the covering fix).
         check_near(local[0].position[0], 19.0, 1e-2,
-                   "dds_timesync_stale_cloud: stale cloud placed at previous_fix pose, x ≈ 19");
+                   "dds_timesync_stale_cloud: stale cloud placed at previous_fix pose, x ~= 19");
 
         check(callback_count.load() == 1, "dds_timesync_stale_cloud: on_point_cloud fired exactly once");
     }

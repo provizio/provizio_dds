@@ -13,19 +13,20 @@
 // limitations under the License.
 
 #include "provizio/dds/detail/address_snapshot.h"
+#include "provizio/dds/detail/vpn_interfaces.h"
 
 #if defined(__APPLE__)
 
-#include "detail/netmask_prefix.h"
-
-#include <arpa/inet.h>
-#include <ifaddrs.h>
-#include <net/if.h>
-#include <sys/socket.h>
+#include "detail/env_utils.h"
+#include "detail/posix_interface_walk.h"
+#include "detail/snapshot_policy.h"
 
 #include <array>
 #include <string>
 #include <string_view>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace provizio::dds::detail
 {
@@ -54,11 +55,6 @@ namespace provizio::dds::detail
             "anpi",    // Apple Wireless internal
         };
 
-        bool starts_with(const std::string &name, std::string_view prefix)
-        {
-            return name.size() >= prefix.size() && std::string_view{name.data(), prefix.size()} == prefix;
-        }
-
         bool name_excluded(const std::string &name)
         {
             for (const auto &prefix : excluded_name_prefixes)
@@ -81,78 +77,76 @@ namespace provizio::dds::detail
             }
             return false;
         }
+
+        // The walk itself lives in detail/posix_interface_walk.h, shared with the Linux
+        // backend: same getifaddrs call, same operational filters. macOS has no
+        // rtnetlink-style interface "kind", so posix_interface_address IS the whole entry
+        // here — the name is the entire identity — and no per-platform wrapper is needed.
+        std::vector<posix_interface_address> enumerate_interface_addresses(bool *const enumeration_failed = nullptr)
+        {
+            std::vector<posix_interface_address> entries;
+
+            const bool readable = walk_posix_interface_addresses(
+                [&entries](posix_interface_address address) { entries.push_back(std::move(address)); });
+
+            // Assigned on every call, failure or not: the contract on
+            // capture_address_snapshot promises that, and a caller reading a stale true
+            // would treat a perfectly readable host as unreadable and stop deciding
+            // altogether. An unreadable list is reported rather than returned as an empty
+            // one — see walk_posix_interface_addresses for what an empty reading legitimately
+            // means.
+            if (enumeration_failed != nullptr)
+            {
+                *enumeration_failed = !readable;
+            }
+
+            return entries;
+        }
     }  // namespace
 
-    address_snapshot capture_address_snapshot()
+    bool snapshot_policy_excludes_interface(const interface_identity &identity)
+    {
+        // The order these four questions are asked in, and why, is stated once in
+        // detail/snapshot_policy.h. macOS reports no interface "kind" at all, so the device
+        // name carries the whole signal and there is no platform flag to pass -- which also
+        // makes step 2 load-bearing here in a way it is not elsewhere: "utun" is one of the
+        // prefixes name_excluded rejects, so an allowed utunN that reached it would be
+        // dropped from the snapshot while the transports went on binding it -- and no runner
+        // without a live tunnel would notice.
+        return snapshot_policy_excludes(
+            /*excluded_as_vpn=*/
+            [&] { return excluded_as_vpn_interface(identity.name, /*platform_says_vpn=*/false); },
+            /*is_vpn=*/[&] { return is_vpn_interface_name(identity.name); },
+            /*force_included=*/[&] { return force_included_interfaces().count(identity.name) != 0; },
+            /*platform_excludes=*/[&] { return name_excluded(identity.name); });
+    }
+
+    address_snapshot capture_address_snapshot(bool *const enumeration_failed)
     {
         address_snapshot snapshot;
 
-        // Hoisted: one lookup of the (immutable) force-include set for the whole walk.
-        const auto &force_included = force_included_interfaces();
-
-        ifaddrs *ifa_head = nullptr;
-        if (::getifaddrs(&ifa_head) != 0)
+        for (const auto &entry : enumerate_interface_addresses(enumeration_failed))
         {
-            return snapshot;
+            interface_identity identity;
+            identity.name = entry.name;
+            if (snapshot_policy_excludes_interface(identity))
+            {
+                continue;
+            }
+
+            snapshot.insert({entry.name, entry.address_text, entry.prefix_length});
         }
 
-        for (const ifaddrs *ifa = ifa_head; ifa != nullptr; ifa = ifa->ifa_next)
-        {
-            if (ifa->ifa_addr == nullptr || ifa->ifa_name == nullptr)
-            {
-                continue;
-            }
-            // IFF_RUNNING (operationally up: administratively up AND carrier present),
-            // NOT the weaker IFF_UP — see the rationale on capture_address_snapshot in
-            // detail/address_snapshot.h: Fast-DDS' IPFinder::getIPs keys on IFF_RUNNING,
-            // so a snapshot that keys on IFF_UP would treat a carrier outage as "nothing
-            // changed" and never rebuild the participant.
-            if ((ifa->ifa_flags & IFF_LOOPBACK) != 0 || (ifa->ifa_flags & IFF_RUNNING) == 0)
-            {
-                continue;
-            }
-
-            const int family = ifa->ifa_addr->sa_family;
-            if (family != AF_INET && family != AF_INET6)
-            {
-                continue;
-            }
-
-            const std::string name{ifa->ifa_name};
-            // A force-included interface skips the name heuristics (see
-            // force_included_interfaces) but not the loopback / carrier / link-local checks.
-            if (force_included.find(name) == force_included.end() && name_excluded(name))
-            {
-                continue;
-            }
-
-            std::array<char, INET6_ADDRSTRLEN> addr_text{};
-            if (family == AF_INET)
-            {
-                const auto *sin = reinterpret_cast<const sockaddr_in *>(ifa->ifa_addr);
-                if (::inet_ntop(AF_INET, &sin->sin_addr, addr_text.data(), addr_text.size()) == nullptr)
-                {
-                    continue;
-                }
-            }
-            else
-            {
-                const auto *sin6 = reinterpret_cast<const sockaddr_in6 *>(ifa->ifa_addr);
-                if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr))
-                {
-                    continue;
-                }
-                if (::inet_ntop(AF_INET6, &sin6->sin6_addr, addr_text.data(), addr_text.size()) == nullptr)
-                {
-                    continue;
-                }
-            }
-
-            snapshot.insert({name, std::string{addr_text.data()}, prefix_length_from_netmask(ifa->ifa_netmask)});
-        }
-
-        ::freeifaddrs(ifa_head);
         return snapshot;
+    }
+
+    std::unordered_set<std::string> enumerate_vpn_interface_blocklist_entries(bool *const enumeration_failed)
+    {
+        // Shared with the Linux backend, which passes a kind where macOS has none: the
+        // name is the whole of the signal here.
+        return vpn_blocklist_entries_from(
+            enumerate_interface_addresses(enumeration_failed),
+            [](const posix_interface_address &entry) { return excluded_as_vpn_interface(entry.name, false); });
     }
 }  // namespace provizio::dds::detail
 

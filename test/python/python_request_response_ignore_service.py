@@ -16,17 +16,25 @@
 
 import time
 import threading
+import os
 import sys
 import provizio_dds
 
 log_prefix = "python_request_response_ignore_service: "
+
+# Test budgets are scaled by the factor provizio_dds_finalize_tests exports (5 under a
+# sanitizer build), exactly as the C++ mirrors scale theirs by PROVIZIO_DDS_TEST_TIMEOUT_SCALE.
+_TIMEOUT_SCALE = float(os.environ.get("PROVIZIO_DDS_TEST_TIMEOUT_SCALE", "1") or "1")
 
 
 def main():
     service_name = "provizio_dds_test_request_response_ignore"
     domain_id = 14
     requests_expected = 5
-    total_timeout = 25
+    # 30 s like the C++ mirror (request_response_ignore_service[_async].cpp), scaled like it:
+    # this bounds how long the service waits for the client to get through its five requests,
+    # so it must not expire while the client is still legitimately working through them.
+    total_timeout = 30 * _TIMEOUT_SCALE
     end_sleep = 4
 
     domain_participant = provizio_dds.make_domain_participant(domain_id)
