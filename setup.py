@@ -199,31 +199,54 @@ else:
     if platform == "linux" and cmake_arguments == "":
         # On Linux, 3.8-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
         python_abi_tag = "3_14" if sys.version_info >= (3, 14) else "3"
-        python_cache_config_name = subprocess.check_output(
-            [source_dir + "/bin_cache_config_name.sh", "", "", python_abi_tag],
-            text=True
-        ).strip()
-        python_cache_zip = source_dir + "/cache/" + python_cache_config_name + ".zip"
-        if os.path.isfile(python_cache_zip):
-            if subprocess.call(["unzip", "-q", python_cache_zip, "-d", build_dir]) != 0:
-                raise Exception("Failed to extract Python bin cache!")
+        try:
+            python_cache_config_name = subprocess.check_output(
+                [source_dir + "/bin_cache_config_name.sh", "", "", python_abi_tag],
+                text=True
+            ).strip()
+        except (subprocess.CalledProcessError, OSError) as e:
+            # Not being able to name the cache costs a Fast-DDS compile; letting it out of here
+            # costs the whole install. The key script asks GitHub for the IDLs revision, so it
+            # exits non-zero on any machine without egress, and it refuses outright on a host it
+            # does not support - neither of which is a reason to abandon an install that can
+            # still build from source.
+            print(f"Warning: failed to resolve the bin cache name: {e}", flush=True)
+            python_cache_config_name = ""
 
-            incompatibility = bin_cache_incompatibility(f"{build_dir}/{python_cache_config_name}")
+        # The key is interpolated into paths that are extracted into and later removed, so check
+        # its shape here rather than inheriting the guarantee from how the script builds it. Its
+        # parts are an architecture, two hashes and a build type; nothing else belongs in it.
+        if python_cache_config_name and not re.fullmatch(r"[A-Za-z0-9._]+", python_cache_config_name):
+            print(f"Warning: refusing an implausible bin cache name: {python_cache_config_name!r}", flush=True)
+            python_cache_config_name = ""
 
-            if incompatibility is None:
-                extracted_python = os.path.join(build_dir, python_cache_config_name, "python")
-                if os.path.isdir(target_dir):
-                    shutil.rmtree(target_dir)
-                shutil.move(extracted_python, target_dir)
-                version_txt = os.path.join(target_dir, "version.txt")
-                if os.path.isfile(version_txt):
-                    shutil.copy2(version_txt, build_dir)
-                print(f"Bin cache located and will be used: {python_cache_config_name}")
-                needs_building = False
+        if python_cache_config_name:
+            python_cache_zip = source_dir + "/cache/" + python_cache_config_name + ".zip"
+            if os.path.isfile(python_cache_zip):
+                if subprocess.call(["unzip", "-q", python_cache_zip, "-d", build_dir]) != 0:
+                    raise Exception("Failed to extract Python bin cache!")
+
+                incompatibility = bin_cache_incompatibility(f"{build_dir}/{python_cache_config_name}")
+
+                if incompatibility is None:
+                    extracted_python = os.path.join(build_dir, python_cache_config_name, "python")
+                    if os.path.isdir(target_dir):
+                        shutil.rmtree(target_dir)
+                    shutil.move(extracted_python, target_dir)
+                    version_txt = os.path.join(target_dir, "version.txt")
+                    if os.path.isfile(version_txt):
+                        shutil.copy2(version_txt, build_dir)
+                    print(f"Bin cache located and will be used: {python_cache_config_name}")
+                    needs_building = False
+                else:
+                    print(f"Bin cache located, but won't be used as {incompatibility}")
+                    shutil.rmtree(f"{build_dir}/{python_cache_config_name}")
+                    needs_building = True
             else:
-                print(f"Bin cache located, but won't be used as {incompatibility}")
-                shutil.rmtree(f"{build_dir}/{python_cache_config_name}")
-                needs_building = True
+                # Name the key that was looked for. A key naming no archive is otherwise
+                # indistinguishable from a configuration for which no cache was ever
+                # published, which is what let an architecture silently stop matching any.
+                print(f"No bin cache for {python_cache_config_name}: building from source")
 
     elif platform == "win32" and cmake_arguments == "":
         # On Windows, .pyd files link against specific pythonXY.dll, so each version needs its own cache
@@ -235,8 +258,13 @@ else:
                  "-PythonVersionTag", python_ver_tag],
                 text=True, cwd=source_dir
             ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        except (subprocess.CalledProcessError, OSError) as e:
             print(f"Warning: failed to resolve Windows cache name: {e}", flush=True)
+            python_cache_config_name = ""
+
+        # See the Linux branch above for why the shape is checked here.
+        if python_cache_config_name and not re.fullmatch(r"[A-Za-z0-9._]+", python_cache_config_name):
+            print(f"Warning: refusing an implausible bin cache name: {python_cache_config_name!r}", flush=True)
             python_cache_config_name = ""
 
         if python_cache_config_name:
@@ -259,7 +287,15 @@ else:
                     print(f"Bin cache located and will be used: {python_cache_config_name}")
                     needs_building = False
                 else:
+                    # The archive was published malformed or truncated: it extracted, but carries
+                    # no python/ directory. Removing it without a word would make a packaging bug
+                    # on the publishing side look exactly like no cache having been published.
+                    print(f"Bin cache {python_cache_config_name} carries no python directory: "
+                          "building from source", flush=True)
                     shutil.rmtree(os.path.join(build_dir, python_cache_config_name), ignore_errors=True)
+            else:
+                # See the Linux branch above for why a miss must name its key
+                print(f"No bin cache for {python_cache_config_name}: building from source")
 
     if needs_building:
         print("Building C++ libraries from source...", flush=True)

@@ -127,6 +127,14 @@ endif()
 set(HAS_BIN_CACHE FALSE)
 
 if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BIN_CACHE}" STREQUAL "FALSE"))
+    # These builds drop the cache further down whatever they find (see the three checks below the
+    # platform branches), so a missing archive is not why they compile from source and reporting
+    # one would only send a reader looking for a cache that would not have been used anyway.
+    set(BIN_CACHE_WOULD_BE_DISCARDED FALSE)
+    if(ENABLE_TESTS OR STATIC_ANALYSIS OR(PYTHON_BINDINGS AND NOT PYTHON_PACKAGES_INSTALL_DIR))
+        set(BIN_CACHE_WOULD_BE_DISCARDED TRUE)
+    endif(ENABLE_TESTS OR STATIC_ANALYSIS OR(PYTHON_BINDINGS AND NOT PYTHON_PACKAGES_INSTALL_DIR))
+
     if(UNIX AND NOT APPLE) # Linux
         # On Linux, 3.8-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
         if(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
@@ -137,7 +145,8 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
             endif(Python3_FOUND)
         endif(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
 
-        execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/bin_cache_config_name.sh" "${CMAKE_BUILD_TYPE}" "${PROVIZIO_DDS_IDLS_VERSION}" OUTPUT_VARIABLE BIN_CACHE_CONFIG_NAME)
+        execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/bin_cache_config_name.sh" "${CMAKE_BUILD_TYPE}" "${PROVIZIO_DDS_IDLS_VERSION}"
+            OUTPUT_VARIABLE BIN_CACHE_CONFIG_NAME RESULT_VARIABLE BIN_CACHE_CONFIG_RESULT)
         string(STRIP "${BIN_CACHE_CONFIG_NAME}" BIN_CACHE_CONFIG_NAME)
         set(BIN_CACHE_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cache/${BIN_CACHE_CONFIG_NAME}.zip")
         set(BIN_CACHE_PARENT_PATH "${CMAKE_CURRENT_BINARY_DIR}/cache")
@@ -155,6 +164,35 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
             set(PYTHON_CACHE_PATH "${BIN_CACHE_PATH}/python")
             set(CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO "${PYTHON_CACHE_PATH}/provizio_dds_python_types/_provizio_dds_python_types.so")
         endif(PYTHON_VERSION_TAG)
+
+        # A cache key that names no archive is indistinguishable from a configuration for which no
+        # cache was ever published, so say which key was looked for. Three things miss it by design:
+        # a build type other than Release, an architecture with no published cache, and any edit to a
+        # tracked file (the key covers their contents). Anything else is a bug in how the key is
+        # derived - which is exactly how a silently unpopulated architecture went unnoticed before.
+        if(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+            if(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+                # The key script resolves the IDLs revision by asking GitHub, so it exits non-zero
+                # with an empty stdout on any configure without egress; on a host it does not
+                # support it exits non-zero having printed its refusal to stdout, which would
+                # otherwise become the "key" and be reported as an archive missing under that name.
+                message(STATUS "Could not work out the prebuilt binaries key (bin_cache_config_name.sh "
+                    "exited with ${BIN_CACHE_CONFIG_RESULT}): everything will be built from source.")
+            elseif(BIN_CACHE_CONFIG_NAME STREQUAL "")
+                # Reported apart from the above, because saying a script that "exited with 0" is why
+                # no key could be worked out reads as a contradiction and sends the reader looking
+                # at the exit status rather than at the empty output that is the actual symptom.
+                message(STATUS "Could not work out the prebuilt binaries key (bin_cache_config_name.sh "
+                    "succeeded but named none): everything will be built from source.")
+            elseif(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}")
+                message(STATUS "No prebuilt binaries for this configuration (cache/${BIN_CACHE_CONFIG_NAME}.zip "
+                    "is absent): everything will be built from source. The cache is published for Release "
+                    "builds of unmodified checkouts on the supported architectures only.")
+            elseif(PYTHON_VERSION_TAG AND NOT EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}")
+                message(STATUS "No prebuilt Python binaries for this configuration "
+                    "(cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip is absent): everything will be built from source.")
+            endif(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+        endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
 
         # Extract general cache if needed
         if(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_SO}")
@@ -192,6 +230,24 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
             else(BIN_CACHE_ABI_COMPATIBLE)
                 message(STATUS "Prebuilt binaries located, but won't be used as ${BIN_CACHE_ABI_INCOMPATIBILITY_REASON}")
             endif(BIN_CACHE_ABI_COMPATIBLE)
+        else(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
+            # An archive was published under this key but does not hold what the build needs: a
+            # truncated or malformed publish, or Python binaries sought in the general archive
+            # because no interpreter was found to name their ABI group. The absent-archive cases
+            # are reported above and excluded here, so this is the last way a cache could be
+            # missed in silence.
+            if(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
+                AND(NOT PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
+                set(BIN_CACHE_MISSING_FILE "lib/libprovizio_dds.so")
+                if(EXISTS "${CACHED_PROVIZIO_DDS_SO}")
+                    set(BIN_CACHE_MISSING_FILE "python/provizio_dds_python_types/_provizio_dds_python_types.so")
+                endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}")
+                # "do not provide", not "were extracted but do not hold": an archive that failed to
+                # extract at all reaches this too, and the message has to be true of both.
+                message(STATUS "The prebuilt binaries published for this configuration do not provide "
+                    "${BIN_CACHE_MISSING_FILE}: everything will be built from source.")
+            endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
+                AND(NOT PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
         endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
     elseif(WIN32)
         # Find PowerShell
@@ -232,6 +288,19 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                 endif(WIN_PYTHON_VERSION_TAG)
                 set(CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD "${PYTHON_CACHE_PATH}/provizio_dds_python_types/_provizio_dds_python_types.pyd")
 
+                # Name the key that was looked for - see the Linux branch above for why a miss must
+                # not be silent
+                if(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+                    if(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}")
+                        message(STATUS "No prebuilt binaries for this configuration (cache/${BIN_CACHE_CONFIG_NAME}.zip "
+                            "is absent): everything will be built from source. The cache is published for Release "
+                            "builds of unmodified checkouts only.")
+                    elseif(WIN_PYTHON_VERSION_TAG AND NOT EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}")
+                        message(STATUS "No prebuilt Python binaries for this configuration "
+                            "(cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip is absent): everything will be built from source.")
+                    endif(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}")
+                endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+
                 # Extract general cache if needed
                 if(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
                     execute_process(
@@ -248,8 +317,37 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
 
                 if(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
                     set(HAS_BIN_CACHE TRUE)
+                else(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
+                    # See the Linux branch above: an archive published for this key that does not
+                    # hold what the build needs is the last silent miss left.
+                    if(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
+                        AND(NOT WIN_PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
+                        message(STATUS "The prebuilt binaries published for this configuration do not provide "
+                            "provizio_dds.dll, provizio_dds.lib or the Python extension module: everything will "
+                            "be built from source.")
+                    endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
+                        AND(NOT WIN_PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
                 endif(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
+            else(BIN_CACHE_CONFIG_RESULT EQUAL 0 AND NOT BIN_CACHE_CONFIG_NAME STREQUAL "")
+                # Gated like every other cache message, and split by cause for the same reasons as
+                # the Linux branch above: a build that would have dropped the cache anyway must not
+                # report a miss, and a script that "exited with 0" must not be given as the reason
+                # no key could be worked out.
+                if(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+                    if(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+                        message(STATUS "Could not work out the prebuilt binaries key (bin_cache_config_name.ps1 "
+                            "exited with ${BIN_CACHE_CONFIG_RESULT}): everything will be built from source.")
+                    else(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+                        message(STATUS "Could not work out the prebuilt binaries key (bin_cache_config_name.ps1 "
+                            "succeeded but named none): everything will be built from source.")
+                    endif(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+                endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
             endif(BIN_CACHE_CONFIG_RESULT EQUAL 0 AND NOT BIN_CACHE_CONFIG_NAME STREQUAL "")
+        else(POWERSHELL_EXECUTABLE)
+            if(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+                message(STATUS "PowerShell not found, so the prebuilt binaries key cannot be worked out: "
+                    "everything will be built from source.")
+            endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
         endif(POWERSHELL_EXECUTABLE)
     endif(UNIX AND NOT APPLE)
 endif(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BIN_CACHE}" STREQUAL "FALSE"))
