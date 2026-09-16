@@ -26,8 +26,11 @@ STATIC_ANALYSIS=${3:-"OFF"}
 
 cd "$(cd "$(dirname "$0")" && pwd -P)"
 
-# In aarch64, make sure libstdc++.so.6.0.28 is used, to be compatible with both Orin and TX2
-if [[ "$(uname -i)" == "aarch64" && "$(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6)" != "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28" ]]; then
+# In aarch64, make sure libstdc++.so.6.0.28 is used, to be compatible with both Orin and TX2.
+# The architecture comes from the POSIX "machine" option for the reason spelled out in
+# bin_cache_config_name.sh: the non-portable alternatives answer "unknown" on a uutils-coreutils
+# host, which would leave this guard silently never matching on the very hosts it protects.
+if [[ "$(uname -m)" == "aarch64" && "$(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6)" != "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28" ]]; then
   echo "/usr/lib/aarch64-linux-gnu/libstdc++.so.6 is $(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6) while /usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28 is required for compatibility!"
   exit 1
 fi
@@ -54,7 +57,6 @@ if [ -n "${PYTHON_VERSION_TAG}" ]; then
 fi
 
 PROVIZIO_DDS_CHECK_FILE="${TARGET_PATH}/lib/libprovizio_dds.so"
-CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO="${PYTHON_TARGET_PATH}/provizio_dds_python_types/_provizio_dds_python_types.so"
 
 # Check if it's already built
 ALREADY_BUILT="FALSE"

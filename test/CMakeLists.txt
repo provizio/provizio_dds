@@ -198,6 +198,7 @@ add_subdirectory(point_cloud2)
 add_subdirectory(accumulation)
 add_subdirectory(source_text)
 add_subdirectory(fast_dds_patches)
+add_subdirectory(bin_cache)
 
 # See the link_libraries() above: from here on, targets are not test executables.
 set_property(DIRECTORY PROPERTY LINK_LIBRARIES "")
