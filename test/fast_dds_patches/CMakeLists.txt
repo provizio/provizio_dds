@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-# Tests for the build-time Fast-DDS patches in cmake/fast_dds/. They exercise Fast-DDS'
+# Tests for the build-time Fast-DDS patches and steps in cmake/fast_dds/. They exercise Fast-DDS'
 # own internals, so they only make sense where this project BUILT Fast-DDS and therefore
 # applied those patches: LOOK_FOR_FAST_DDS=TRUE (a system Fast-DDS) and the prebuilt bin
 # cache both skip the source build, and FAST_DDS_SOURCE_DIR is unset in exactly those cases.
@@ -33,6 +33,18 @@ add_test(NAME fast_dds_patch_timer_migration
 # Seconds. It copies three files a few times and runs CMake in script mode; the ceiling only
 # has to outlast a loaded CI runner.
 set_tests_properties(fast_dds_patch_timer_migration PROPERTIES TIMEOUT 60)
+
+# Coverage for the step placing the OpenSSL runtime Fast-DDS loads next to it
+# (cmake/fast_dds/openssl_runtime.cmake): pure CMake script mode as well, with a stand-in for the
+# tool reading a library's imports, so every platform's case runs on any of them.
+add_test(NAME fast_dds_openssl_runtime
+         COMMAND "${CMAKE_COMMAND}"
+                 "-DRUNTIME_SCRIPT=${PROJECT_SOURCE_DIR}/cmake/fast_dds/openssl_runtime.cmake"
+                 "-DFAKE_TOOL=${CMAKE_CURRENT_LIST_DIR}/openssl_runtime_fake_tool.cmake"
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/openssl_runtime"
+                 -P "${CMAKE_CURRENT_LIST_DIR}/openssl_runtime_test.cmake")
+# Seconds. It writes a few small files and runs CMake in script mode a few dozen times.
+set_tests_properties(fast_dds_openssl_runtime PROPERTIES TIMEOUT 60)
 
 # Not on Windows, where these tests CANNOT be linked. ResourceEvent and TimedEventImpl are
 # Fast-DDS internals with no export annotations, and Fast-DDS does not auto-export every
