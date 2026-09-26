@@ -16,7 +16,12 @@
 # own internals, so they only make sense where this project BUILT Fast-DDS and therefore
 # applied those patches: LOOK_FOR_FAST_DDS=TRUE (a system Fast-DDS) and the prebuilt bin
 # cache both skip the source build, and FAST_DDS_SOURCE_DIR is unset in exactly those cases.
-if(NOT FAST_DDS_SOURCE_DIR OR NOT EXISTS "${FAST_DDS_SOURCE_DIR}/src/cpp/rtps/resources/ResourceEvent.h")
+#
+# That variable is the whole condition, deliberately. The sources it names do not exist yet when
+# a fresh tree is configured -- ExternalProject downloads them during the build, before anything
+# here compiles against them -- so asking whether a file in them exists would skip every test
+# below on the single configure a CI job runs.
+if(NOT FAST_DDS_SOURCE_DIR)
     message(STATUS "Fast-DDS was not built from source here; skipping its patch tests")
     return()
 endif()
