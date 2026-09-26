@@ -591,7 +591,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${PYTHON_BINDINGS}" "${STATIC_ANALYSIS}"
-      - run: .github/workflows/sudo.sh apt install -y ros-${{matrix.ros}}-demo-nodes-cpp
+      # With the image's own ROS packages upgraded alongside, so that all of them come from one sync
+      - run: .github/workflows/sudo.sh .github/workflows/install_ros_demo_nodes.sh ${{matrix.ros}}
       # Coding-standards checks are disabled here (incl. the ASan that StandardConfig auto-enables in
       # Debug): the ros:* container toolchains ship clang/gcc WITHOUT the compiler-rt sanitizer runtime
       # (libclang_rt.asan*), so an instrumented Debug build fails at the CMake compiler check. This job
