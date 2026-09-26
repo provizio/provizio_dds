@@ -35,7 +35,7 @@ need to touch — network auto-recovery, transports, discovery tuning, logging, 
 - CMake (>= 3.15)
 - Git
 - Ninja build system
-- OpenSSL (install via `install_dependencies.ps1` or manually provide headers/libs)
+- OpenSSL (install via `install_dependencies.ps1` or manually provide headers/libs). The Fast-DDS that provizio_dds builds links the same OpenSSL as provizio_dds, the one `find_package(OpenSSL)` finds — set `OPENSSL_ROOT_DIR`, or use a toolchain that provides one, such as Conan's, to choose it
 - SWIG 4.0+ (SWIG 4.4+ required when using Python 3.14 or newer; only if building Python bindings)
 
 **Python (Linux / macOS):**

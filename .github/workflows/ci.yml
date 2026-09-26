@@ -20,6 +20,11 @@ jobs:
         matrix:
             runner: [ubuntu-22.04, jetson-18.04]
             build_type: [Release]
+        # The one deliberate exception to the fail-fast: false the rest of this file states. All
+        # five build-cache matrices feed the single commit-cache job, and it needs every one of
+        # them: once any combination has failed, the cache cannot be committed at all, so the
+        # combinations still running would spend runner time on artifacts that are then thrown
+        # away. Here, unlike in a test matrix, there is nothing left to learn from them.
         fail-fast: true
     env:
       CC: gcc
@@ -47,6 +52,7 @@ jobs:
             runner: [ubuntu-22.04]
             build_type: [Release]
             python-version: ['3.8', '3.14']
+        # Deliberately kept: see the note on the build-cache matrix.
         fail-fast: true
     env:
       CC: gcc
@@ -80,6 +86,7 @@ jobs:
         matrix:
             build_type: [Release]
             python-version: ['3.8', '3.14']
+        # Deliberately kept: see the note on the build-cache matrix.
         fail-fast: true
     env:
       CC: gcc
@@ -124,6 +131,7 @@ jobs:
     strategy:
         matrix:
             build_type: [Release]
+        # Deliberately kept: see the note on the build-cache matrix.
         fail-fast: true
     steps:
       - uses: actions/checkout@v4
@@ -150,6 +158,7 @@ jobs:
         matrix:
             build_type: [Release]
             python-version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+        # Deliberately kept: see the note on the build-cache matrix.
         fail-fast: true
     steps:
       - uses: actions/checkout@v4
@@ -211,6 +220,8 @@ jobs:
     name: Build with Static Analysis
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04, macos-latest]
         build_type: [Debug, Release]
@@ -229,6 +240,11 @@ jobs:
     name: Test
     runs-on: ${{matrix.runner}}
     strategy:
+      # One combination's failure must not cancel the others. These are independent verification
+      # runs, and the whole point of the matrix is knowing which of them pass: a single flake
+      # taking the rest down with it hides every other result and reports several red jobs for
+      # one fault. Stated explicitly because the default is the opposite.
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04, jetson-20.04, macos-15-intel]
         build_type: [Debug, Release]
@@ -288,6 +304,8 @@ jobs:
     name: Test (ThreadSanitizer)
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest]
         cc: [clang]
@@ -348,6 +366,8 @@ jobs:
     needs: commit-cache
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04, jetson-20.04]
         cc: [gcc, clang]
@@ -421,6 +441,8 @@ jobs:
     name: Test with Fast-DDS preinstalled
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04]
         build_type: [Debug, Release]
@@ -447,6 +469,8 @@ jobs:
     name: Test pip package with Fast-DDS preinstalled
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04]
         cc: [gcc, clang]
@@ -459,20 +483,89 @@ jobs:
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" OFF /usr/
       - run: .github/workflows/test_pip_package.sh
 
+  resolve-ros-base-image:
+    name: Resolve the ROS base image
+    runs-on: ubuntu-latest
+    # packages: read is what lets GITHUB_TOKEN see this organisation's GHCR mirror, which is a
+    # private package. Whether a given run's token can actually read it depends on the package's
+    # own access settings rather than on where the pull request came from, so the script treats
+    # being unable to as an ordinary outcome: it resolves to the fallback and warns.
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      distros: ${{steps.resolve.outputs.distros}}
+      images: ${{steps.resolve.outputs.images}}
+    env:
+      # The single source of truth for which ROS 2 distros are covered: the compatibility matrix
+      # below is built from this job's output rather than repeating the list.
+      ROS_DISTROS: humble iron jazzy kilted lyrical
+      # This organisation's mirror of the ros:* images, kept current by the "Mirror ROS base
+      # images" workflow of provizio_radar_api_ros2. Preferred because Docker Hub rate-limits
+      # UNAUTHENTICATED pulls per source IP over a window hours long and answers anything past
+      # the limit with an immediate HTTP 429 that retrying cannot wait out -- and this matrix,
+      # one image pull per job from hosted runners whose egress IP is shared with every other
+      # customer, is the biggest Docker Hub surface in this workflow.
+      #
+      # Setting the CONTAINER_REGISTRY_PREFIX repository/organisation variable takes the images
+      # from somewhere else, and takes them from there ONLY: it also clears the fallback below,
+      # so a distro that registry cannot serve fails the job instead of quietly redirecting the
+      # matrix at Docker Hub. An air-gapped or policy-restricted setup sets that variable
+      # precisely so that no such redirect can happen. Note that whoever can set repository or
+      # organisation variables thereby chooses which images this workflow executes, and that write
+      # access to the mirror package is now a CI-integrity control in its own right: its contents
+      # are the code twenty jobs of this workflow run. The digest pinned below makes a run
+      # self-consistent; it is resolved per run, so it is not a pin against the mirror itself.
+      MIRROR_REPO: ${{vars.CONTAINER_REGISTRY_PREFIX || format('ghcr.io/{0}', github.repository_owner)}}/ros
+      # Used for any distro the mirror above cannot serve. Google's public pull-through cache of
+      # Docker Hub serves byte-identical content and needs no credentials, so it is the Docker
+      # Hub route that still works anonymously -- but it is still Docker Hub content and still
+      # rate-limited, which is why falling back to it raises a warning rather than passing
+      # quietly.
+      FALLBACK_REPO: mirror.gcr.io/library/ros
+      # Handed to the resolver so that IT can clear FALLBACK_REPO above, because an expression
+      # here cannot: GitHub's "a && b || c" ternary idiom returns c whenever b is falsy, and the
+      # empty string is falsy, so "prefix && '' || 'mirror...'" resolves to the fallback in both
+      # cases alike. Written that way, the promise of the paragraph above would be silently
+      # untrue for the one setup that depends on it.
+      CONTAINER_REGISTRY_PREFIX: ${{vars.CONTAINER_REGISTRY_PREFIX}}
+      # The compatibility matrix runs on ubuntu-latest, so an image the mirror holds for some
+      # other architecture is of no use to it and must not be resolved to.
+      REQUIRED_PLATFORM: linux/amd64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes, and the step after this one runs a script from the repository:
+          # no reason to leave a credential in .git/config for it to find.
+          persist-credentials: false
+      - id: resolve
+        # Scoped to this step rather than the job, so the token is not also in the environment of
+        # the checkout above. Passed through the environment rather than interpolated into the
+        # script, so nothing from the event context is ever parsed as shell.
+        env:
+          GHCR_USER: ${{github.actor}}
+          GHCR_TOKEN: ${{secrets.GITHUB_TOKEN}}
+        run: .github/workflows/resolve_ros_base_image.sh
+
   test-ros2-compatibility:
     name: Test compatibility with ROS2
     runs-on: ubuntu-latest
+    # The container is pulled by the runner before any step of this job runs, so which registry
+    # it comes from cannot be decided here -- resolve-ros-base-image decides it, per distro.
+    needs: resolve-ros-base-image
+    # packages: read lets the runner pull the GHCR mirror. No credentials: block is needed with
+    # it: the runner fills the credentials in from github.actor / GITHUB_TOKEN by itself when the
+    # image is on ghcr.io and none were given (actions/runner, ContainerOperationProvider's
+    # UpdateRegistryAuthForGitHubToken, which runs before the registry login), and supplies
+    # nothing for the fallback - which is exactly right for both. A static credentials: block
+    # would instead try those credentials against the fallback's registry and fail there.
+    permissions:
+      contents: read
+      packages: read
     container:
-      # Pulled through Google's public mirror of Docker Hub rather than Docker Hub itself.
-      # Docker Hub rate-limits UNAUTHENTICATED pulls per source IP over an hourly window and
-      # answers a request past the limit with an immediate HTTP 429 ("toomanyrequests"), which
-      # no amount of retrying can wait out. This matrix alone pulls a ros:* image per distro per
-      # job, so it is the biggest Docker Hub surface in this workflow. mirror.gcr.io is a
-      # pull-through cache serving byte-identical content, is not subject to those limits, and
-      # needs no credentials. Set the CONTAINER_REGISTRY_PREFIX repository/organisation variable
-      # to redirect this at a registry the runners authenticate against (or back at Docker Hub,
-      # with prefix "library", if that is ever preferable).
-      image: ${{ vars.CONTAINER_REGISTRY_PREFIX || 'mirror.gcr.io/library' }}/ros:${{matrix.ros}}
+      # Pinned to the digest the resolver read, so every job of this matrix runs the identical
+      # image even if the mirror's tag is re-pushed mid-run, and so the log records what ran.
+      image: ${{fromJSON(needs.resolve-ros-base-image.outputs.images)[matrix.ros]}}
       # The reliability request/response tests run a service + client (multiple Fast-DDS
       # participants) concurrently, and provizio's large-sample QoS sizes each participant's
       # shared-memory segment at ~34 MB. Docker's default 64 MB /dev/shm can't hold more than
@@ -486,7 +579,7 @@ jobs:
       # results of every remaining distro/compiler/build-type pairing.
       fail-fast: false
       matrix:
-        ros: [humble, iron, jazzy, kilted, lyrical]
+        ros: ${{fromJSON(needs.resolve-ros-base-image.outputs.distros)}}
         build_type: [Release, Debug]
         cc: [gcc, clang]
     env:
@@ -498,7 +591,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${PYTHON_BINDINGS}" "${STATIC_ANALYSIS}"
-      - run: .github/workflows/sudo.sh apt install -y ros-${{matrix.ros}}-demo-nodes-cpp
+      # With the image's own ROS packages upgraded alongside, so that all of them come from one sync
+      - run: .github/workflows/sudo.sh .github/workflows/install_ros_demo_nodes.sh ${{matrix.ros}}
       # Coding-standards checks are disabled here (incl. the ASan that StandardConfig auto-enables in
       # Debug): the ros:* container toolchains ship clang/gcc WITHOUT the compiler-rt sanitizer runtime
       # (libclang_rt.asan*), so an instrumented Debug build fails at the CMake compiler check. This job
@@ -513,6 +607,8 @@ jobs:
     name: Build (Windows)
     runs-on: windows-latest
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         build_type: [Debug, Release]
         with_python: [OFF, ON]

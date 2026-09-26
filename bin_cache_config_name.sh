@@ -31,7 +31,15 @@ BUILD_TYPE="${1:-Release}"
 PROVIZIO_DDS_IDLS_VERSION="${2:-"$(grep "set(PROVIZIO_DDS_IDLS_VERSION" ./CMakeLists.txt | awk '{print $2}' | tr -d '"')"}"
 PYTHON_VERSION_TAG="${3:-""}"
 
-CPU_ARCH="$(uname -i)"
+# Always "uname -m", and never "uname -i" or "uname -p" (portable-uname-exempt: naming the two is
+# the point of this comment). Linux's struct utsname carries no field for a hardware platform or a
+# processor, so an implementation is free to answer "unknown" for them - and uutils coreutils,
+# which Ubuntu 26.04 ships as its default coreutils, does exactly that. GNU coreutils synthesises
+# a plausible value instead, which is the only reason the non-portable option worked here until
+# now. Getting this wrong fails silently: an architecture of "unknown" names an archive that was
+# never going to exist, so the build just misses the cache and recompiles Fast-DDS from source,
+# some ten minutes per build.
+CPU_ARCH="$(uname -m)"
 
 if [ "${PROVIZIO_DDS_IDLS_VERSION}" == "WILDCARD" ]; then
   # Used when cleaning up obsolete bin cache
