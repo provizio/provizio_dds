@@ -53,15 +53,15 @@ add_test(NAME fast_dds_openssl_runtime
 # Seconds. It writes a few small files and runs CMake in script mode a few dozen times.
 set_tests_properties(fast_dds_openssl_runtime PROPERTIES TIMEOUT 60)
 
-# Not on Windows, where these tests CANNOT be linked. ResourceEvent and TimedEventImpl are
-# Fast-DDS internals with no export annotations, and Fast-DDS does not auto-export every
-# symbol -- verified against the shipped fastdds-3.6.lib, whose only ResourceEvent-related
-# export is RTPSParticipant::get_resource_event(); register_timer, unregister_timer,
-# init_thread, go_ready and update_interval_millisec appear nowhere in it. A private include
-# directory supplies declarations, not DLL exports, so the target would fail to link with
-# unresolved externals in every tests-enabled Windows build. Auto-exporting all of Fast-DDS is
-# not the answer either -- it exceeds Windows' 65535-symbol limit per DLL, which is precisely
-# why export_system_info.cmake exports one function by hand.
+# Not on Windows, where these tests CANNOT be linked. ResourceEvent and TimedEventImpl, like
+# StatefulWriter and RTPSDomainImpl, are Fast-DDS internals with no export annotations, and
+# Fast-DDS does not auto-export every symbol -- verified against the shipped fastdds-3.6.lib,
+# whose only ResourceEvent-related export is RTPSParticipant::get_resource_event();
+# register_timer, unregister_timer, init_thread, go_ready and update_interval_millisec appear
+# nowhere in it. A private include directory supplies declarations, not DLL exports, so the
+# targets would fail to link with unresolved externals in every tests-enabled Windows build.
+# Auto-exporting all of Fast-DDS is not the answer either -- it exceeds Windows' 65535-symbol
+# limit per DLL, which is precisely why export_system_info.cmake exports one function by hand.
 #
 # The patched code itself is platform-independent, and the sanitizers that turn its regression
 # into a hard failure rather than silent corruption only run on Linux, so this costs no real
@@ -86,5 +86,22 @@ add_test(NAME fast_dds_patch_timer_unregister
          COMMAND "$<TARGET_FILE:timer_unregister_test>"
          WORKING_DIRECTORY "$<TARGET_FILE_DIR:timer_unregister_test>")
 set_tests_properties(fast_dds_patch_timer_unregister PROPERTIES TIMEOUT 60)
+
+# Guards local_reader_under_writer_mutex.cmake: forces the order in which an intraprocess
+# heartbeat that read its reader without the writer mutex delivers to a reader removed meanwhile.
+add_executable(local_reader_lock_test local_reader_lock_test.cpp)
+target_link_libraries(local_reader_lock_test PUBLIC provizio_dds provizio_dds_types Threads::Threads)
+# Fast-DDS' private sources, which is where the patched StatefulWriter lives. Deliberate -- see
+# the test's own header comment.
+target_include_directories(local_reader_lock_test SYSTEM PRIVATE "${FAST_DDS_SOURCE_DIR}/src/cpp")
+
+# Seconds. The case takes about half a second on Linux, where it waits for the heartbeat to wait for
+# the writer mutex, and about a second elsewhere, most of it the half second it lets the heartbeat
+# reach that mutex; the ceiling only has to outlast a loaded CI runner, and a heartbeat that never
+# returns fails the case explicitly rather than hanging out its whole budget.
+add_test(NAME fast_dds_patch_local_reader_lock
+         COMMAND "$<TARGET_FILE:local_reader_lock_test>"
+         WORKING_DIRECTORY "$<TARGET_FILE_DIR:local_reader_lock_test>")
+set_tests_properties(fast_dds_patch_local_reader_lock PROPERTIES TIMEOUT 60)
 
 provizio_dds_finalize_tests()

@@ -962,6 +962,17 @@ else(HAS_BIN_CACHE)
             COMMAND ${CMAKE_COMMAND}
                 "-DREGISTRY_HPP=<SOURCE_DIR>/src/cpp/rtps/history/TopicPayloadPoolRegistry_impl/TopicPayloadPoolRegistry.hpp"
                 -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
+            # Make a writer take its own mutex before it looks up a reader of the same process. As
+            # shipped, the intraprocess heartbeat reads the reader proxy's local-reader pointer on the
+            # timer thread without it, while deleting the reader or the writer resets that pointer under
+            # it, and a reset between the test and the dereference is a null dereference -- the SegFault
+            # in network_recovery_concurrent_make_publisher_during_reset, both stacks read from its core
+            # dump. Upstream's own fix, eProsima/Fast-DDS#6422 (merged for v3.6.3.0), applied verbatim;
+            # drop it once FAST_DDS_VERSION carries that. Idempotent and self-checking like the four above.
+            COMMAND ${CMAKE_COMMAND}
+                "-DSTATEFUL_WRITER_CPP=<SOURCE_DIR>/src/cpp/rtps/writer/StatefulWriter.cpp"
+                "-DSTATELESS_WRITER_CPP=<SOURCE_DIR>/src/cpp/rtps/writer/StatelessWriter.cpp"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/local_reader_under_writer_mutex.cmake"
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
@@ -979,7 +990,7 @@ else(HAS_BIN_CACHE)
         #
         # Re-running is necessary but not sufficient, and only resource_event_per_timer_wait.cmake
         # is structurally covered for the rest: it carries a _revision / _revision_marker pair and
-        # migrates every file it writes, so a bump reaches an existing tree. The other three
+        # migrates every file it writes, so a bump reaches an existing tree. The other four
         # detect "patched" by a bare marker, which cannot tell one revision's text from another's
         # -- fine while their text never changes, which is why each of them says at its marker
         # what to add before changing it.
@@ -988,6 +999,7 @@ else(HAS_BIN_CACHE)
             "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
             "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
             "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/local_reader_under_writer_mutex.cmake"
         )
         if(PROVIZIO_DDS_OPENSSL_MODULE_DIR)
             # The FindOpenSSL given to Fast-DDS is an input of its configure that its arguments do not
