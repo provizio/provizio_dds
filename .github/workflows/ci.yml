@@ -437,6 +437,18 @@ jobs:
         if: always()
         run: rm -rf /tmp/provizio_dds.venv
 
+  # provizio_dds built against a Fast-DDS already installed on the system (LOOK_FOR_FAST_DDS=TRUE), the
+  # way a consumer who ships their own Fast-DDS builds it, instead of against the one provizio_dds
+  # builds from source. install_dependencies.sh puts stock upstream Fast-DDS in /usr.
+  #
+  # That Fast-DDS carries none of the fixes cmake/fast_dds/ patches into the one built from source --
+  # among them the timer deadlock that hung tests for their whole TIMEOUT, and the null payload pool
+  # and intraprocess-heartbeat races that crashed them -- and cannot: a preinstalled library is not
+  # ours to patch. The full suite would keep running into those known defects, so this job runs a
+  # smoke test only (PROVIZIO_DDS_CTEST_INCLUDE below): the build, the link and basic communication
+  # against the preinstalled Fast-DDS. Everything else is tested against the patched Fast-DDS by the
+  # other jobs; the fast_dds_patch_* tests are not even registered here, there being nothing of ours
+  # for them to check.
   test-preinstalled-fastdds:
     name: Test with Fast-DDS preinstalled
     runs-on: ${{matrix.runner}}
@@ -453,16 +465,24 @@ jobs:
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: OFF
       IGNORE_BIN_CACHE: TRUE
-      # Skip the reliability request/response stress tests in Debug (coding_standards auto-enables ASan
-      # there): under ASan they run several times slower and intermittently trip Fast-DDS's known
-      # asymmetric-matching "Timeout waiting for request/response" flake on slower runners, without adding
-      # coverage the non-stress request_response tests (still run under ASan) and the Release reliability
-      # runs don't. See the test-nix job for the full rationale.
-      PROVIZIO_DDS_CTEST_EXCLUDE: ${{ matrix.build_type == 'Debug' && 'reliability' || '' }}
+      # The smoke test: one C++ publisher / subscriber pair in two processes, and its Python twin where
+      # the bindings are built (the with_python ON half of the matrix; elsewhere it is not registered
+      # and only the C++ one runs). test.sh fails the job should the selection match no test.
+      PROVIZIO_DDS_CTEST_INCLUDE: '^(simplest_pub_sub|python_pub_python_sub)$'
     steps:
       - uses: actions/checkout@v4
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}" /usr/
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS="${ENABLE_ROS_TESTS}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS="${ENABLE_ROS_TESTS}" -DLOOK_FOR_FAST_DDS=TRUE
+      # LOOK_FOR_FAST_DDS falls back to building Fast-DDS from source when it finds none, and says so only
+      # in a configure line nobody reads -- which would make this one more from-source job, testing
+      # nothing it is here for, as it did for as long as it passed no LOOK_FOR_FAST_DDS at all. So check
+      # that the configure took the Fast-DDS in /usr.
+      - name: Check the preinstalled Fast-DDS was used
+        run: |
+          if ! grep -E '^fastdds_DIR:PATH=/usr/' build/CMakeCache.txt; then
+            echo "::error::provizio_dds did not build against the Fast-DDS preinstalled in /usr ($(grep '^fastdds_DIR' build/CMakeCache.txt))"
+            exit 1
+          fi
       - run: .github/workflows/test.sh
 
   test-nix-pip-package-preinstalled-fastdds:

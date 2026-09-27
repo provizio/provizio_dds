@@ -113,6 +113,13 @@ CTEST_EXTRA_ARGS=()
 if [[ -n "${PROVIZIO_DDS_CTEST_EXCLUDE:-}" ]]; then
     CTEST_EXTRA_ARGS+=(-E "${PROVIZIO_DDS_CTEST_EXCLUDE}")
 fi
+# Optional test selection (regex), for a job that is meant to run a few tests only: the one that
+# builds against a preinstalled, unpatched Fast-DDS runs a smoke test (see test-preinstalled-fastdds
+# in ci.yml). --no-tests=error because a selection that matches nothing -- a renamed test, a typo --
+# would otherwise pass having run nothing at all.
+if [[ -n "${PROVIZIO_DDS_CTEST_INCLUDE:-}" ]]; then
+    CTEST_EXTRA_ARGS+=(-R "${PROVIZIO_DDS_CTEST_INCLUDE}" --no-tests=error)
+fi
 
 # Confine all test DDS traffic to the loopback interface. Provizio's self-hosted
 # runners share a local network, so without this a participant on another host
