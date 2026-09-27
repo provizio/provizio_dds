@@ -994,12 +994,21 @@ else(HAS_BIN_CACHE)
         # detect "patched" by a bare marker, which cannot tell one revision's text from another's
         # -- fine while their text never changes, which is why each of them says at its marker
         # what to add before changing it.
-        ExternalProject_Add_StepDependencies(libfast_dds patch
+        #
+        # The scripts are named once, here, because test/fast_dds_patches checks that its
+        # line-endings test covers every one of them: a script added to the PATCH_COMMAND above
+        # belongs in this list, and the test then fails until it is covered. patch_io.cmake is
+        # no patch of its own, but every script reads and writes the sources through it.
+        set(PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS
             "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
             "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
             "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
             "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
             "${PROJECT_SOURCE_DIR}/cmake/fast_dds/local_reader_under_writer_mutex.cmake"
+        )
+        ExternalProject_Add_StepDependencies(libfast_dds patch
+            ${PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS}
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/patch_io.cmake"
         )
         if(PROVIZIO_DDS_OPENSSL_MODULE_DIR)
             # The FindOpenSSL given to Fast-DDS is an input of its configure that its arguments do not

@@ -56,7 +56,10 @@ if(NOT EXISTS "${HOST_HPP}")
     message(FATAL_ERROR "host_id_without_interfaces.cmake: file not found: ${HOST_HPP}")
 endif()
 
-file(READ "${HOST_HPP}" _contents)
+# Sources are read and written through patch_io.cmake, which keeps the line endings of the
+# checkout and of the host from mattering (see there).
+include("${CMAKE_CURRENT_LIST_DIR}/patch_io.cmake")
+provizio_dds_patch_read("${HOST_HPP}" _contents)
 
 # NO REVISION MARKER HERE, deliberately, and there is a rule attached to that. A tree
 # carries no record of WHICH revision of a patch script wrote it, so a bare "already patched"
@@ -145,5 +148,5 @@ endforeach()
 
 string(REPLACE "${_ctor_anchor}" "${_ctor_patched}" _contents "${_contents}")
 string(REPLACE "${_decl_anchor}" "${_decl_patched}" _contents "${_contents}")
-file(WRITE "${HOST_HPP}" "${_contents}")
+provizio_dds_patch_write("${HOST_HPP}" "${_contents}")
 message(STATUS "host_id_without_interfaces: Host derives its id from the machine id where no interface has carrier")

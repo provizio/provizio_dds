@@ -43,7 +43,10 @@ if(NOT EXISTS "${REGISTRY_HPP}")
     message(FATAL_ERROR "topic_payload_pool_registry_lock_first.cmake: file not found: ${REGISTRY_HPP}")
 endif()
 
-file(READ "${REGISTRY_HPP}" _contents)
+# Sources are read and written through patch_io.cmake, which keeps the line endings of the
+# checkout and of the host from mattering (see there).
+include("${CMAKE_CURRENT_LIST_DIR}/patch_io.cmake")
+provizio_dds_patch_read("${REGISTRY_HPP}" _contents)
 
 # NO REVISION MARKER HERE, deliberately, and there is a rule attached to that. A tree
 # carries no record of WHICH revision of a patch script wrote it, so a bare "already patched"
@@ -101,5 +104,5 @@ if(_pos EQUAL -1)
 endif()
 string(REPLACE "${_anchor}" "${_patched}" _contents "${_contents}")
 
-file(WRITE "${REGISTRY_HPP}" "${_contents}")
+provizio_dds_patch_write("${REGISTRY_HPP}" "${_contents}")
 message(STATUS "topic_payload_pool_registry_lock_first: patched TopicPayloadPoolRegistry.hpp")

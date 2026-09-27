@@ -75,6 +75,10 @@ foreach(_var IN ITEMS STATEFUL_WRITER_CPP STATELESS_WRITER_CPP)
     endif()
 endforeach()
 
+# Sources are read and written through patch_io.cmake, which keeps the line endings of the
+# checkout and of the host from mattering (see there).
+include("${CMAKE_CURRENT_LIST_DIR}/patch_io.cmake")
+
 # NO REVISION MARKER HERE, deliberately, and there is a rule attached to that. A tree
 # carries no record of WHICH revision of a patch script wrote it, so a bare "already patched"
 # marker means only "some revision did" -- and the moment the replacement text below changes,
@@ -160,7 +164,7 @@ set(_stateless_upstream [==[
 function(_local_reader_patch_in_memory key anchor replacement upstream_text)
     set(_path "${${key}}")
     get_filename_component(_name "${_path}" NAME)
-    file(READ "${_path}" _contents)
+    provizio_dds_patch_read("${_path}" _contents)
 
     string(FIND "${_contents}" "${_marker}" _already_pos)
     if(NOT _already_pos EQUAL -1)
@@ -197,7 +201,7 @@ endif()
 
 foreach(_key IN ITEMS STATEFUL_WRITER_CPP STATELESS_WRITER_CPP)
     if(DEFINED _patched_${_key})
-        file(WRITE "${${_key}}" "${_patched_${_key}}")
+        provizio_dds_patch_write("${${_key}}" "${_patched_${_key}}")
         get_filename_component(_name "${${_key}}" NAME)
         message(STATUS "local_reader_under_writer_mutex: patched ${_name}")
     endif()

@@ -44,7 +44,10 @@ endif()
 set(_undecorated "    static bool update_interfaces();")
 set(_decorated "    FASTDDS_EXPORTED_API static bool update_interfaces();")
 
-file(READ "${SYSTEMINFO_HPP}" _contents)
+# Sources are read and written through patch_io.cmake, which keeps the line endings of the
+# checkout and of the host from mattering (see there).
+include("${CMAKE_CURRENT_LIST_DIR}/patch_io.cmake")
+provizio_dds_patch_read("${SYSTEMINFO_HPP}" _contents)
 
 # NO REVISION MARKER HERE, deliberately, and there is a rule attached to that. A tree
 # carries no record of WHICH revision of a patch script wrote it, so a bare "already patched"
@@ -78,5 +81,5 @@ if(_pos EQUAL -1)
 endif()
 
 string(REPLACE "${_undecorated}" "${_decorated}" _contents "${_contents}")
-file(WRITE "${SYSTEMINFO_HPP}" "${_contents}")
+provizio_dds_patch_write("${SYSTEMINFO_HPP}" "${_contents}")
 message(STATUS "export_system_info: decorated SystemInfo::update_interfaces with FASTDDS_EXPORTED_API")
