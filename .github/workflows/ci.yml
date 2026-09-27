@@ -485,23 +485,10 @@ jobs:
           fi
       - run: .github/workflows/test.sh
 
-  test-nix-pip-package-preinstalled-fastdds:
-    name: Test pip package with Fast-DDS preinstalled
-    runs-on: ${{matrix.runner}}
-    strategy:
-      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest, ubuntu-22.04]
-        cc: [gcc, clang]
-    env:
-      CC: ${{matrix.cc}}
-      STATIC_ANALYSIS: OFF
-      IGNORE_BIN_CACHE: TRUE
-    steps:
-      - uses: actions/checkout@v4
-      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" OFF /usr/
-      - run: .github/workflows/test_pip_package.sh
+  # No pip-package counterpart of the job above, deliberately: a pip package always bundles
+  # provizio_dds's own, patched Fast-DDS -- the configure refuses LOOK_FOR_FAST_DDS for one (see the
+  # check near the top of CMakeLists.txt) -- so a Fast-DDS preinstalled on the machine plays no part
+  # in it.
 
   resolve-ros-base-image:
     name: Resolve the ROS base image

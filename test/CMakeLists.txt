@@ -214,6 +214,7 @@ if(FAST_DDS_SOURCE_DIR)
     endif()
 endif()
 add_subdirectory(bin_cache)
+add_subdirectory(pip_package)
 
 # See the link_libraries() above: from here on, targets are not test executables.
 set_property(DIRECTORY PROPERTY LINK_LIBRARIES "")

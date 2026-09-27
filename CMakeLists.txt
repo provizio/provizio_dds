@@ -57,6 +57,23 @@ set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binari
 set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
 set(DISABLE_EIGEN OFF CACHE BOOL "Force plain-CPU linear algebra in point clouds accumulation for this build even when Eigen3 is installed (consumers make their own choice at compile time -- the accumulation maths path is header-only)")
 
+# A Python package build -- PYTHON_BINDINGS with PYTHON_PACKAGES_INSTALL_DIR, which is how setup.py
+# configures the pip package, and how the prebuilt Python binaries it unpacks are built -- always
+# uses provizio_dds's own Fast-DDS: the one built from source here, with the fixes cmake/fast_dds/
+# patches into it, or the prebuilt binaries made from that. The package bundles those libraries
+# next to the bindings, which load them from there, so it runs on whatever machine it is installed
+# on. A system Fast-DDS would carry none of the fixes, and none of it would be packaged: the wheel
+# would depend on whichever Fast-DDS the machine it lands on happens to have. So LOOK_FOR_FAST_DDS
+# is refused for it -- here, ahead of project(), before anything is configured or built.
+if(LOOK_FOR_FAST_DDS AND PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
+    message(FATAL_ERROR
+        "LOOK_FOR_FAST_DDS cannot be used for a Python package build (PYTHON_BINDINGS with "
+        "PYTHON_PACKAGES_INSTALL_DIR, as setup.py configures one): a pip package always bundles "
+        "provizio_dds's own, patched Fast-DDS. Drop LOOK_FOR_FAST_DDS (from CMAKE_ARGUMENTS, when "
+        "installing with pip), or leave PYTHON_PACKAGES_INSTALL_DIR empty to build bindings that use "
+        "the system's Fast-DDS in place.")
+endif()
+
 # Force Release CRT when building Python bindings in Debug mode on Windows.
 # Python interpreters (actions/setup-python, system installs) are Release-built
 # and use /MD. Debug builds use /MDd, creating a CRT mismatch that causes access
