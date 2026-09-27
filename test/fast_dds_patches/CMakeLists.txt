@@ -51,6 +51,24 @@ add_test(NAME fast_dds_openssl_runtime
 # Seconds. It writes a few small files and runs CMake in script mode a few dozen times.
 set_tests_properties(fast_dds_openssl_runtime PROPERTIES TIMEOUT 60)
 
+# Line-ending coverage for every patch script (see cmake/fast_dds/patch_io.cmake): pure CMake
+# script mode as well, applying each to LF and CRLF renderings of the pristine sources, with the
+# script as checked out and as a CRLF copy. It runs everywhere Fast-DDS is built from source --
+# Windows above all, where file(WRITE) writes CRLF and a CRLF checkout of either repository is the
+# likeliest. PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS (top-level CMakeLists.txt) names every script the
+# build applies, so that the test can fail on one it does not cover.
+find_package(Git REQUIRED)
+string(REPLACE ";" "|" _fast_dds_patch_scripts "${PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS}")
+add_test(NAME fast_dds_patch_line_endings
+         COMMAND "${CMAKE_COMMAND}"
+                 "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+                 "-DFAST_DDS_SOURCE_DIR=${FAST_DDS_SOURCE_DIR}"
+                 "-DPATCH_SCRIPTS=${_fast_dds_patch_scripts}"
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/line_endings"
+                 -P "${CMAKE_CURRENT_LIST_DIR}/line_endings_test.cmake")
+# Seconds. It renders sixteen small files with git and runs CMake in script mode forty times.
+set_tests_properties(fast_dds_patch_line_endings PROPERTIES TIMEOUT 120)
+
 # Not on Windows, where these tests CANNOT be linked. ResourceEvent and TimedEventImpl, like
 # StatefulWriter and RTPSDomainImpl, are Fast-DDS internals with no export annotations, and
 # Fast-DDS does not auto-export every symbol -- verified against the shipped fastdds-3.6.lib,

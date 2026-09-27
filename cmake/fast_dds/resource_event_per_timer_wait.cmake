@@ -73,6 +73,11 @@ foreach(_var IN ITEMS RESOURCE_EVENT_H RESOURCE_EVENT_CPP WRITER_PROXY_CPP)
     endif()
 endforeach()
 
+# Sources are read and written through patch_io.cmake, which keeps the line endings of the
+# checkout and of the host from mattering (see there) -- the migrations below included, which
+# match earlier revisions' text in a tree that may have been written on Windows.
+include("${CMAKE_CURRENT_LIST_DIR}/patch_io.cmake")
+
 # Every replacement below carries this tag in a comment; a file that has it has been patched by
 # some revision of this script.
 set(_marker "[provizio_dds]")
@@ -147,7 +152,7 @@ endfunction()
 # ResourceEvent.h
 # ---------------------------------------------------------------------------------------------
 function(_provizio_patch_resource_event_h _out)
-file(READ "${RESOURCE_EVENT_H}" _contents)
+provizio_dds_patch_read("${RESOURCE_EVENT_H}" _contents)
 string(FIND "${_contents}" "${_revision_marker}" _current_pos)
 # Any marker NOT written by this revision -- the bare form, or another rN. See
 # _provizio_find_stale_marker for why the question is asked that way round.
@@ -239,7 +244,7 @@ endfunction()
 # ResourceEvent.cpp
 # ---------------------------------------------------------------------------------------------
 function(_provizio_patch_resource_event_cpp _out)
-file(READ "${RESOURCE_EVENT_CPP}" _contents)
+provizio_dds_patch_read("${RESOURCE_EVENT_CPP}" _contents)
 string(FIND "${_contents}" "${_revision_marker}" _current_pos)
 # "Already at this revision" means EVERY marker in the file says so. A file carrying a marker
 # from any other revision -- the bare form, or another rN -- is migrated; taking this
@@ -707,7 +712,7 @@ endfunction()
 # WriterProxy.cpp
 # ---------------------------------------------------------------------------------------------
 function(_provizio_patch_writer_proxy_cpp _out)
-file(READ "${WRITER_PROXY_CPP}" _contents)
+provizio_dds_patch_read("${WRITER_PROXY_CPP}" _contents)
 string(FIND "${_contents}" "${_revision_marker}" _current_pos)
 _provizio_find_stale_marker(_contents)
 if(NOT _current_pos EQUAL -1 AND _provizio_stale_pos EQUAL -1)
@@ -759,14 +764,14 @@ _provizio_patch_resource_event_cpp(_patched_resource_event_cpp)
 _provizio_patch_writer_proxy_cpp(_patched_writer_proxy_cpp)
 
 if(DEFINED _patched_resource_event_h)
-    file(WRITE "${RESOURCE_EVENT_H}" "${_patched_resource_event_h}")
+    provizio_dds_patch_write("${RESOURCE_EVENT_H}" "${_patched_resource_event_h}")
     message(STATUS "resource_event_per_timer_wait: patched ResourceEvent.h")
 endif()
 if(DEFINED _patched_resource_event_cpp)
-    file(WRITE "${RESOURCE_EVENT_CPP}" "${_patched_resource_event_cpp}")
+    provizio_dds_patch_write("${RESOURCE_EVENT_CPP}" "${_patched_resource_event_cpp}")
     message(STATUS "resource_event_per_timer_wait: patched ResourceEvent.cpp")
 endif()
 if(DEFINED _patched_writer_proxy_cpp)
-    file(WRITE "${WRITER_PROXY_CPP}" "${_patched_writer_proxy_cpp}")
+    provizio_dds_patch_write("${WRITER_PROXY_CPP}" "${_patched_writer_proxy_cpp}")
     message(STATUS "resource_event_per_timer_wait: patched WriterProxy.cpp")
 endif()
