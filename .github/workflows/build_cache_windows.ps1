@@ -266,6 +266,8 @@ try {
             )
             if ($Python -eq "ON") {
                 $cmakeArgs += "-DPYTHON_PACKAGES_INSTALL_DIR=$pythonTargetPath"
+                # The Python binaries cached here are what setup.py packages, so they are built as a pip package
+                $cmakeArgs += "-DPYTHON_PIP_PACKAGE=ON"
             }
             cmake @cmakeArgs
             if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }

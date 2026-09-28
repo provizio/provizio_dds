@@ -2,7 +2,10 @@ cmake_minimum_required(VERSION 3.10.0)
 
 project(foonathan_memory)
 
-find_package(foonathan_memory QUIET)
+# The vendored one only, for a pip package: see PYTHON_PIP_PACKAGE in the top-level CMakeLists.txt
+if(NOT PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY)
+    find_package(foonathan_memory QUIET)
+endif()
 
 set(FOONATHAN_MEMORY_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/install")
 

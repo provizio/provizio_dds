@@ -1,4 +1,10 @@
-find_package(foonathan_memory QUIET NO_MODULE)
+# The vendored one only, for a pip package: see PYTHON_PIP_PACKAGE in the top-level CMakeLists.txt.
+# Whatever an earlier lookup made of foonathan_memory is not consulted either then.
+if(PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY)
+    set(foonathan_memory_FOUND FALSE)
+else()
+    find_package(foonathan_memory QUIET NO_MODULE)
+endif()
 
 if(NOT foonathan_memory_FOUND)
     set(foonathan_memory_DIR "${CMAKE_BINARY_DIR}/../foonathan_memory/install")

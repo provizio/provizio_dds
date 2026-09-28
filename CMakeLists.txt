@@ -46,6 +46,7 @@ set(ENABLE_PRIVILEGED_TESTS OFF CACHE BOOL
     "Register the tests that need root / passwordless sudo (they create network namespaces)")
 set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be generated")
 set(PYTHON_PACKAGES_INSTALL_DIR "" CACHE STRING "Defines an install directory for Python artifacts (or use default if empty)")
+set(PYTHON_PIP_PACKAGE OFF CACHE BOOL "Build a pip package, as setup.py does: bundles provizio_dds's own Fast-DDS with everything it loads, and refuses LOOK_FOR_FAST_DDS (needs PYTHON_BINDINGS and PYTHON_PACKAGES_INSTALL_DIR)")
 if(PYTHON_PACKAGES_INSTALL_DIR)
     # Normalize to forward slashes. An absolute destination is baked verbatim into
     # the generated cmake_install.cmake, so a native Windows path with backslashes
@@ -83,22 +84,45 @@ function(provizio_dds_install_openssl_runtime directory)
     ")
 endfunction()
 
-# A Python package build -- PYTHON_BINDINGS with PYTHON_PACKAGES_INSTALL_DIR, which is how setup.py
-# configures the pip package, and how the prebuilt Python binaries it unpacks are built -- always
-# uses provizio_dds's own Fast-DDS: the one built from source here, with the fixes cmake/fast_dds/
-# patches into it, or the prebuilt binaries made from that. The package bundles those libraries
-# next to the bindings, which load them from there, so it runs on whatever machine it is installed
-# on. A system Fast-DDS would carry none of the fixes, and none of it would be packaged: the wheel
-# would depend on whichever Fast-DDS the machine it lands on happens to have. So LOOK_FOR_FAST_DDS
-# is refused for it -- here, ahead of project(), before anything is configured or built.
-if(LOOK_FOR_FAST_DDS AND PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
-    message(FATAL_ERROR
-        "LOOK_FOR_FAST_DDS cannot be used for a Python package build (PYTHON_BINDINGS with "
-        "PYTHON_PACKAGES_INSTALL_DIR, as setup.py configures one): a pip package always bundles "
-        "provizio_dds's own, patched Fast-DDS. Drop LOOK_FOR_FAST_DDS (from CMAKE_ARGUMENTS, when "
-        "installing with pip), or leave PYTHON_PACKAGES_INSTALL_DIR empty to build bindings that use "
-        "the system's Fast-DDS in place.")
-endif()
+# A pip package (PYTHON_PIP_PACKAGE: what setup.py builds, and what the prebuilt Python binaries it
+# unpacks are built as) always uses provizio_dds's own Fast-DDS: the one built from source here,
+# with the fixes cmake/fast_dds/ patches into it, or the prebuilt binaries made from that. The
+# package bundles those libraries next to the bindings, which load them from there, so it runs on
+# whatever machine it is installed on. A system Fast-DDS would carry none of the fixes, and none of
+# it would be packaged: the wheel would depend on whichever Fast-DDS the machine it lands on happens
+# to have. So LOOK_FOR_FAST_DDS is refused for one -- here, ahead of project(), before anything is
+# configured or built, and again just after it, which reads a toolchain file that could set it too
+# -- and the Fast-DDS built for it takes no foonathan_memory from the system either (see
+# PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY below).
+#
+# The Python bindings installed as packages (PYTHON_PACKAGES_INSTALL_DIR) are not a pip package by
+# themselves: a distribution's recipe that supplies its own Fast-DDS installs them that way against
+# it, bundling nothing, and is left to.
+macro(provizio_dds_check_pip_package)
+    if(PYTHON_PIP_PACKAGE)
+        if(NOT PYTHON_BINDINGS OR NOT PYTHON_PACKAGES_INSTALL_DIR)
+            message(FATAL_ERROR
+                "PYTHON_PIP_PACKAGE needs PYTHON_BINDINGS=ON and a PYTHON_PACKAGES_INSTALL_DIR: a pip "
+                "package is the Python bindings installed as packages there.")
+        endif()
+        if(LOOK_FOR_FAST_DDS)
+            # Not remembered. The cache this configure leaves behind would otherwise hold it, and the
+            # next configure of the same tree -- the one following the advice below -- would be refused
+            # all over again: setup.py configures the one build directory from one install to the next.
+            unset(LOOK_FOR_FAST_DDS CACHE)
+            message(FATAL_ERROR
+                "LOOK_FOR_FAST_DDS cannot be used for a pip package (PYTHON_PIP_PACKAGE, which setup.py "
+                "sets): a pip package always bundles provizio_dds's own, patched Fast-DDS. Drop "
+                "LOOK_FOR_FAST_DDS (from CMAKE_ARGUMENTS, when installing with pip, or from the toolchain "
+                "file) and configure again. To install the Python bindings against a Fast-DDS of the "
+                "system's instead, configure without PYTHON_PIP_PACKAGE.")
+        endif()
+    endif()
+endmacro()
+# Whether a pip package is asked for, as it is ahead of project(): a toolchain file, which project()
+# reads, turning PYTHON_PIP_PACKAGE off would otherwise turn the check after it off as well
+set(_PROVIZIO_DDS_PIP_PACKAGE_REQUESTED "${PYTHON_PIP_PACKAGE}")
+provizio_dds_check_pip_package()
 
 # Force Release CRT when building Python bindings in Debug mode on Windows.
 # Python interpreters (actions/setup-python, system installs) are Release-built
@@ -149,6 +173,14 @@ message(STATUS "Version: ${PROVIZIO_DDS_VERSION}")
 
 # Project
 project(provizio_dds VERSION ${PROVIZIO_DDS_VERSION})
+# Again, now that a toolchain file has been read (see provizio_dds_check_pip_package above), which
+# may not turn off a pip package asked for either
+if(_PROVIZIO_DDS_PIP_PACKAGE_REQUESTED AND NOT PYTHON_PIP_PACKAGE)
+    message(FATAL_ERROR
+        "PYTHON_PIP_PACKAGE was asked for (setup.py asks for it), but the toolchain file turns it off. "
+        "A pip package is what setup.py builds: leave PYTHON_PIP_PACKAGE to it, and configure again.")
+endif()
+provizio_dds_check_pip_package()
 
 # Eigen3 (optional): accelerates the point-clouds-accumulation linear algebra (include/provizio/dds/accumulation.h).
 # The maths path is HEADER-ONLY: provizio/dds/detail/accumulation_math.h auto-detects Eigen at COMPILE time via
@@ -809,7 +841,20 @@ else(HAS_BIN_CACHE)
         if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
             set(_FOONATHAN_BUILD_TYPE "Release")
         endif()
-        set(_FOONATHAN_CMAKE_ARGS -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}" "-DCMAKE_BUILD_TYPE=${_FOONATHAN_BUILD_TYPE}")
+        # A pip package bundles everything its Fast-DDS loads, and nothing installs a foonathan_memory
+        # along with it: the static library of the vendored one, linked in, is the only kind it can
+        # carry. One found on the system first -- a ROS 2 distribution's, a preinstalled Fast-DDS's --
+        # is a shared library the wheel would depend on without containing: working on the machine
+        # that built it, and failing to import anywhere else, or there once ROS is no longer sourced.
+        # So a pip package takes it from the vendored build only, in both lookups: the one deciding
+        # whether to build it (cmake/foonathan_memory) and the one Fast-DDS links it by
+        # (cmake/modules/Findfoonathan_memory.cmake, given to its build too).
+        set(PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY OFF)
+        if(PYTHON_PIP_PACKAGE)
+            set(PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY ON)
+        endif()
+        set(_FOONATHAN_CMAKE_ARGS -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}" "-DCMAKE_BUILD_TYPE=${_FOONATHAN_BUILD_TYPE}"
+            "-DPROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY=${PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY}")
         if(PROVIZIO_DDS_SANITIZER_FLAGS)
             list(APPEND _FOONATHAN_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}" "-DCMAKE_C_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}")
         endif()
@@ -837,7 +882,8 @@ else(HAS_BIN_CACHE)
         endif()
         # A list, in the form LIST_SEPARATOR (see ExternalProject_Add below) passes as one argument
         string(REPLACE ";" "|" _FAST_DDS_MODULE_PATH "${_FAST_DDS_MODULE_PATH}")
-        set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${_FAST_DDS_MODULE_PATH}")
+        set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${_FAST_DDS_MODULE_PATH}"
+            "-DPROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY=${PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY}")
         # Fast-DDS turns on CMAKE_COMPILE_WARNING_AS_ERROR (its own -Werror / MSVC /WX) for every build
         # except TSan. As a vendored third-party dependency, its internal warnings must never gate our
         # CI: newer toolchains warn on code we don't own (e.g. macos-latest's Apple clang flags a
