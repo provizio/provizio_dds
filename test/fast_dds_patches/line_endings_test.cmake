@@ -33,31 +33,27 @@
 # on any host. Everything happens on copies under WORK_DIR; the build tree is never written to.
 #
 # Invoked as:
-#   cmake -DGIT_EXECUTABLE=<git> -DFAST_DDS_SOURCE_DIR=<path> -DPATCH_SCRIPTS=<script|script|...>
-#         -DWORK_DIR=<scratch dir> -P line_endings_test.cmake
+#   cmake -DGIT_EXECUTABLE=<git> -DFAST_DDS_SOURCE_DIR=<path> -DPATCH_DIR=<cmake/fast_dds>
+#         -DPATCHES_FILE=<file> -DWORK_DIR=<scratch dir> -P line_endings_test.cmake
+#
+# PATCHES_FILE holds PROVIZIO_DDS_FAST_DDS_PATCHES of the top-level CMakeLists.txt, one entry per
+# line: a script in PATCH_DIR, then the variable it takes each file it patches in and that file's
+# path in the Fast-DDS sources, |-separated. The PATCH_COMMAND is made from that same list, so every
+# script the build applies is covered here, with the files it is given there.
 
 cmake_minimum_required(VERSION 3.15)
 
-foreach(_var IN ITEMS GIT_EXECUTABLE FAST_DDS_SOURCE_DIR PATCH_SCRIPTS WORK_DIR)
+foreach(_var IN ITEMS GIT_EXECUTABLE FAST_DDS_SOURCE_DIR PATCH_DIR PATCHES_FILE WORK_DIR)
     if(NOT DEFINED ${_var} OR "${${_var}}" STREQUAL "")
         message(FATAL_ERROR "line_endings_test.cmake: ${_var} must be defined")
     endif()
 endforeach()
 
-# Every patch script with the files it patches: the variable it takes each one in, and that file's
-# path in the Fast-DDS sources -- as the PATCH_COMMAND in the top-level CMakeLists.txt passes them.
-# The check below fails when a script applied there is missing here, so a new one cannot go
-# uncovered; a path or a variable out of step with the PATCH_COMMAND fails the case itself.
-set(_patches
-    "export_system_info.cmake|SYSTEMINFO_HPP=src/cpp/utils/SystemInfo.hpp"
-    "host_id_without_interfaces.cmake|HOST_HPP=src/cpp/utils/Host.hpp"
-    "resource_event_per_timer_wait.cmake|RESOURCE_EVENT_H=src/cpp/rtps/resources/ResourceEvent.h|RESOURCE_EVENT_CPP=src/cpp/rtps/resources/ResourceEvent.cpp|WRITER_PROXY_CPP=src/cpp/rtps/reader/WriterProxy.cpp"
-    "topic_payload_pool_registry_lock_first.cmake|REGISTRY_HPP=src/cpp/rtps/history/TopicPayloadPoolRegistry_impl/TopicPayloadPoolRegistry.hpp"
-    "local_reader_under_writer_mutex.cmake|STATEFUL_WRITER_CPP=src/cpp/rtps/writer/StatefulWriter.cpp|STATELESS_WRITER_CPP=src/cpp/rtps/writer/StatelessWriter.cpp")
-
-string(REPLACE "|" ";" _applied_scripts "${PATCH_SCRIPTS}")
-list(GET _applied_scripts 0 _first_script)
-get_filename_component(_patch_dir "${_first_script}" DIRECTORY)
+file(STRINGS "${PATCHES_FILE}" _patches)
+if(NOT _patches)
+    message(FATAL_ERROR "line_endings_test: ${PATCHES_FILE} names no patch")
+endif()
+set(_patch_dir "${PATCH_DIR}")
 
 # The same reading every patch script uses (it is also what classifies line endings below).
 include("${_patch_dir}/patch_io.cmake")
@@ -68,23 +64,21 @@ foreach(_entry IN LISTS _patches)
     list(GET _fields 0 _script)
     list(APPEND _covered "${_script}")
 endforeach()
-set(_applied)
-foreach(_script_path IN LISTS _applied_scripts)
-    get_filename_component(_script "${_script_path}" NAME)
-    list(APPEND _applied "${_script}")
-    if(NOT _script IN_LIST _covered)
-        message(FATAL_ERROR
-            "line_endings_test: ${_script} is applied to Fast-DDS but not covered here. Add it to "
-            "_patches with the files it patches, as its PATCH_COMMAND entry passes them.")
+
+# Every file patched gets a name of its own for the copies below, numbered in the order met, since
+# two of them may share a file name (a CMakeLists.txt, say) that would otherwise have the second
+# overwrite the first.
+set(_relatives)
+function(_flat_name relative out_var)
+    list(FIND _relatives "${relative}" _index)
+    if(_index EQUAL -1)
+        list(LENGTH _relatives _index)
+        list(APPEND _relatives "${relative}")
+        set(_relatives "${_relatives}" PARENT_SCOPE)
     endif()
-endforeach()
-foreach(_script IN LISTS _covered)
-    if(NOT _script IN_LIST _applied)
-        message(FATAL_ERROR
-            "line_endings_test: _patches lists ${_script}, which PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS "
-            "does not: remove it here, or list it there if the PATCH_COMMAND still runs it.")
-    endif()
-endforeach()
+    get_filename_component(_leaf "${relative}" NAME)
+    set(${out_var} "${_index}_${_leaf}" PARENT_SCOPE)
+endfunction()
 
 if(CMAKE_HOST_WIN32)
     set(_host_line_ending "crlf")
@@ -156,16 +150,16 @@ endfunction()
 
 file(REMOVE_RECURSE "${WORK_DIR}")
 
-# The pristine sources, once per line ending. Laid out flat, by file name -- no two patched files
-# share one -- rather than at their paths in the Fast-DDS tree, which under a deep enough build
-# directory would exceed the 260 characters Windows allows a path.
+# The pristine sources, once per line ending. Laid out flat, by the names given above, rather than
+# at their paths in the Fast-DDS tree, which under a deep enough build directory would exceed the
+# 260 characters Windows allows a path.
 foreach(_line_ending IN ITEMS lf crlf)
     foreach(_entry IN LISTS _patches)
         string(REPLACE "|" ";" _fields "${_entry}")
         list(REMOVE_AT _fields 0)
         foreach(_file IN LISTS _fields)
             string(REGEX REPLACE "^[A-Z_]+=" "" _relative "${_file}")
-            get_filename_component(_leaf "${_relative}" NAME)
+            _flat_name("${_relative}" _leaf)
             _render_pristine("${_relative}" "${_line_ending}" "${WORK_DIR}/pristine/${_line_ending}/${_leaf}")
         endforeach()
     endforeach()
@@ -200,7 +194,7 @@ foreach(_entry IN LISTS _patches)
             foreach(_file IN LISTS _fields)
                 string(REGEX MATCH "^[A-Z_]+" _variable "${_file}")
                 string(REGEX REPLACE "^[A-Z_]+=" "" _relative "${_file}")
-                get_filename_component(_leaf "${_relative}" NAME)
+                _flat_name("${_relative}" _leaf)
                 configure_file("${WORK_DIR}/pristine/${_line_ending}/${_leaf}" "${_run_dir}/${_leaf}" COPYONLY)
                 list(APPEND _args "-D${_variable}=${_run_dir}/${_leaf}")
                 list(APPEND _outputs "${_leaf}")

@@ -917,6 +917,81 @@ else(HAS_BIN_CACHE)
                 "${FAST_DDS_INSTALL_DIR}/lib/libfastdds${CMAKE_SHARED_LIBRARY_SUFFIX}"
             )
         endif()
+        # The patches applied to the Fast-DDS sources, each a script in cmake/fast_dds/ with the
+        # files it edits: the variable the script takes each one in, and that file's path in the
+        # sources. Named here and nowhere else. The PATCH_COMMAND below is made from this list, the
+        # patch step re-runs when any of these scripts changes, and test/fast_dds_patches puts every
+        # one of them through LF and CRLF sources (see cmake/fast_dds/patch_io.cmake) -- so a script
+        # listed here is applied, re-applied and covered, and nothing else has to be kept in step.
+        # Each is idempotent, and self-checking: it fails the build rather than guess when the
+        # sources are not what it expects.
+        set(PROVIZIO_DDS_FAST_DDS_PATCHES
+            # Decorate eprosima::SystemInfo::update_interfaces() with FASTDDS_EXPORTED_API so it is
+            # reachable in the Windows DLL export table (provizio_dds calls it to refresh Fast-DDS's
+            # interface cache on network-recovery resets -- APT-11792). A no-op on Linux / macOS
+            # (default visibility already exports it). See the script for why this targeted patch
+            # is used instead of CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS (which overflows the 65535-symbol
+            # Windows DLL export limit on a library this large).
+            "export_system_info.cmake|SYSTEMINFO_HPP=src/cpp/utils/SystemInfo.hpp"
+            # Give a process that creates its first participant before any interface has carrier a
+            # host id derived from the machine id, instead of the one fixed value Fast-DDS otherwise
+            # hands every such process on every host (APT-12250: two radars booted together took
+            # each other's shared-memory locators for their own and never heard each other, and a
+            # network-recovery rebuild cannot change the id). See the script for the full story.
+            "host_id_without_interfaces.cmake|HOST_HPP=src/cpp/utils/Host.hpp"
+            # Make ResourceEvent::unregister_timer wait only for the callback of the timer being
+            # unregistered, not for the whole timer thread to go idle. As shipped, a thread that holds
+            # an endpoint mutex and destroys or recreates a TimedEvent deadlocks with any timer
+            # callback that wants that mutex -- the participant-lease reaper does -- and the test
+            # process hangs until CTest kills it (eProsima/Fast-DDS#6502, open; caught with both
+            # stacks on macos-15-intel and reproduced on Linux). WriterProxy::stop() relied on the
+            # wide wait to fence both of its timers, so it is adjusted alongside. See the script for
+            # the analysis. Drop it once upstream fixes #6502.
+            "resource_event_per_timer_wait.cmake|RESOURCE_EVENT_H=src/cpp/rtps/resources/ResourceEvent.h|RESOURCE_EVENT_CPP=src/cpp/rtps/resources/ResourceEvent.cpp|WRITER_PROXY_CPP=src/cpp/rtps/reader/WriterProxy.cpp"
+            # Make the per-topic payload-pool registry lock() its weak_ptr before deciding the pool
+            # is alive. As shipped it tests expired() first, and an endpoint on another thread can
+            # release the last reference in between, so create_datareader gets a null pool and
+            # dereferences it -- the SegFault CI saw in
+            # network_recovery_concurrent_make_publisher_during_reset, reproduced deterministically
+            # (see the script).
+            "topic_payload_pool_registry_lock_first.cmake|REGISTRY_HPP=src/cpp/rtps/history/TopicPayloadPoolRegistry_impl/TopicPayloadPoolRegistry.hpp"
+            # Make a writer take its own mutex before it looks up a reader of the same process. As
+            # shipped, the intraprocess heartbeat reads the reader proxy's local-reader pointer on the
+            # timer thread without it, while deleting the reader or the writer resets that pointer
+            # under it, and a reset between the test and the dereference is a null dereference -- the
+            # SegFault in network_recovery_concurrent_make_publisher_during_reset, both stacks read
+            # from its core dump. Upstream's own fix, eProsima/Fast-DDS#6422 (merged for v3.6.3.0),
+            # applied verbatim; drop it once FAST_DDS_VERSION carries that.
+            "local_reader_under_writer_mutex.cmake|STATEFUL_WRITER_CPP=src/cpp/rtps/writer/StatefulWriter.cpp|STATELESS_WRITER_CPP=src/cpp/rtps/writer/StatelessWriter.cpp"
+            # Make libfastdds keep, on macOS as well, the relative install rpath it is built with
+            # (FAST_DDS_CMAKE_ARGS), which Fast-DDS replaces there with this build tree's absolute
+            # install directory: shipped as it is, that leaves libfastdds finding its @rpath
+            # dependencies -- the OpenSSL placed next to it among them -- in this build tree only. A
+            # no-op off Apple. See the script.
+            "install_rpath_as_given.cmake|FAST_DDS_CPP_CMAKELISTS=src/cpp/CMakeLists.txt"
+        )
+        set(PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS)
+        set(_FAST_DDS_PATCH_COMMAND)
+        foreach(_FAST_DDS_PATCH IN LISTS PROVIZIO_DDS_FAST_DDS_PATCHES)
+            string(REPLACE "|" ";" _FAST_DDS_PATCH_FIELDS "${_FAST_DDS_PATCH}")
+            list(GET _FAST_DDS_PATCH_FIELDS 0 _FAST_DDS_PATCH_SCRIPT)
+            list(REMOVE_AT _FAST_DDS_PATCH_FIELDS 0)
+            set(_FAST_DDS_PATCH_SCRIPT "${PROJECT_SOURCE_DIR}/cmake/fast_dds/${_FAST_DDS_PATCH_SCRIPT}")
+            list(APPEND PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS "${_FAST_DDS_PATCH_SCRIPT}")
+            # The first script is the PATCH_COMMAND, each one after it a COMMAND of it
+            if(_FAST_DDS_PATCH_COMMAND)
+                list(APPEND _FAST_DDS_PATCH_COMMAND COMMAND)
+            else()
+                list(APPEND _FAST_DDS_PATCH_COMMAND PATCH_COMMAND)
+            endif()
+            list(APPEND _FAST_DDS_PATCH_COMMAND "${CMAKE_COMMAND}")
+            foreach(_FAST_DDS_PATCH_FILE IN LISTS _FAST_DDS_PATCH_FIELDS)
+                string(REGEX REPLACE "^([A-Z_]+)=(.+)$" "-D\\1=<SOURCE_DIR>/\\2" _FAST_DDS_PATCH_FILE "${_FAST_DDS_PATCH_FILE}")
+                list(APPEND _FAST_DDS_PATCH_COMMAND "${_FAST_DDS_PATCH_FILE}")
+            endforeach()
+            list(APPEND _FAST_DDS_PATCH_COMMAND -P "${_FAST_DDS_PATCH_SCRIPT}")
+        endforeach()
+
         ExternalProject_Add(libfast_dds
             GIT_REPOSITORY "https://github.com/${FAST_DDS_GITHUB_PROJECT}.git"
             GIT_TAG "${FAST_DDS_VERSION}"
@@ -933,63 +1008,8 @@ else(HAS_BIN_CACHE)
             # dropping this with it.
             GIT_SHALLOW TRUE
             UPDATE_COMMAND ""
-            # Decorate eprosima::SystemInfo::update_interfaces() with
-            # FASTDDS_EXPORTED_API so it is reachable in the Windows DLL
-            # export table (provizio_dds calls it to refresh Fast-DDS's
-            # interface cache on network-recovery resets — APT-11792). The
-            # script is a no-op on Linux / macOS (default visibility already
-            # exports it) and idempotent. See export_system_info.cmake for
-            # why this targeted patch is used instead of
-            # CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS (the latter overflows the
-            # 65535-symbol Windows DLL export limit on a library this large).
-            PATCH_COMMAND ${CMAKE_COMMAND}
-                "-DSYSTEMINFO_HPP=<SOURCE_DIR>/src/cpp/utils/SystemInfo.hpp"
-                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
-            # Give a process that creates its first participant before any interface has
-            # carrier a host id derived from the machine id, instead of the one fixed value
-            # Fast-DDS otherwise hands every such process on every host (APT-12250: two
-            # radars booted together took each other's shared-memory locators for their
-            # own and never heard each other, and a network-recovery rebuild cannot change
-            # the id). Idempotent and self-checking like the script above; see
-            # host_id_without_interfaces.cmake for the full story.
-            COMMAND ${CMAKE_COMMAND}
-                "-DHOST_HPP=<SOURCE_DIR>/src/cpp/utils/Host.hpp"
-                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
-            # Make ResourceEvent::unregister_timer wait only for the callback of the timer being
-            # unregistered, not for the whole timer thread to go idle. As shipped, a thread that
-            # holds an endpoint mutex and destroys or recreates a TimedEvent deadlocks with any
-            # timer callback that wants that mutex -- the participant-lease reaper does -- and
-            # the test process hangs until CTest kills it (eProsima/Fast-DDS#6502, open; caught
-            # with both stacks on macos-15-intel and reproduced on Linux). WriterProxy::stop()
-            # relied on the wide wait to fence both of its timers, so it is adjusted alongside.
-            # Idempotent and self-checking like the two scripts above; see
-            # resource_event_per_timer_wait.cmake for the analysis. Drop it once upstream fixes
-            # #6502.
-            COMMAND ${CMAKE_COMMAND}
-                "-DRESOURCE_EVENT_H=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.h"
-                "-DRESOURCE_EVENT_CPP=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.cpp"
-                "-DWRITER_PROXY_CPP=<SOURCE_DIR>/src/cpp/rtps/reader/WriterProxy.cpp"
-                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
-            # Make the per-topic payload-pool registry lock() its weak_ptr before deciding the pool
-            # is alive. As shipped it tests expired() first, and an endpoint on another thread can
-            # release the last reference in between, so create_datareader gets a null pool and
-            # dereferences it -- the SegFault CI saw in
-            # network_recovery_concurrent_make_publisher_during_reset, reproduced deterministically
-            # (see the script). Idempotent and self-checking like the three above.
-            COMMAND ${CMAKE_COMMAND}
-                "-DREGISTRY_HPP=<SOURCE_DIR>/src/cpp/rtps/history/TopicPayloadPoolRegistry_impl/TopicPayloadPoolRegistry.hpp"
-                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
-            # Make a writer take its own mutex before it looks up a reader of the same process. As
-            # shipped, the intraprocess heartbeat reads the reader proxy's local-reader pointer on the
-            # timer thread without it, while deleting the reader or the writer resets that pointer under
-            # it, and a reset between the test and the dereference is a null dereference -- the SegFault
-            # in network_recovery_concurrent_make_publisher_during_reset, both stacks read from its core
-            # dump. Upstream's own fix, eProsima/Fast-DDS#6422 (merged for v3.6.3.0), applied verbatim;
-            # drop it once FAST_DDS_VERSION carries that. Idempotent and self-checking like the four above.
-            COMMAND ${CMAKE_COMMAND}
-                "-DSTATEFUL_WRITER_CPP=<SOURCE_DIR>/src/cpp/rtps/writer/StatefulWriter.cpp"
-                "-DSTATELESS_WRITER_CPP=<SOURCE_DIR>/src/cpp/rtps/writer/StatelessWriter.cpp"
-                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/local_reader_under_writer_mutex.cmake"
+            # The patches listed above, in order
+            ${_FAST_DDS_PATCH_COMMAND}
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
@@ -1007,22 +1027,11 @@ else(HAS_BIN_CACHE)
         #
         # Re-running is necessary but not sufficient, and only resource_event_per_timer_wait.cmake
         # is structurally covered for the rest: it carries a _revision / _revision_marker pair and
-        # migrates every file it writes, so a bump reaches an existing tree. The other four
-        # detect "patched" by a bare marker, which cannot tell one revision's text from another's
-        # -- fine while their text never changes, which is why each of them says at its marker
-        # what to add before changing it.
-        #
-        # The scripts are named once, here, because test/fast_dds_patches checks that its
-        # line-endings test covers every one of them: a script added to the PATCH_COMMAND above
-        # belongs in this list, and the test then fails until it is covered. patch_io.cmake is
-        # no patch of its own, but every script reads and writes the sources through it.
-        set(PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS
-            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
-            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
-            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
-            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
-            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/local_reader_under_writer_mutex.cmake"
-        )
+        # migrates every file it writes, so a bump reaches an existing tree. The others detect
+        # "patched" by a bare marker, which cannot tell one revision's text from another's -- fine
+        # while their text never changes, which is why each of them says at its marker what to add
+        # before changing it. patch_io.cmake is no patch of its own, but every script reads and
+        # writes the sources through it.
         ExternalProject_Add_StepDependencies(libfast_dds patch
             ${PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS}
             "${PROJECT_SOURCE_DIR}/cmake/fast_dds/patch_io.cmake"
