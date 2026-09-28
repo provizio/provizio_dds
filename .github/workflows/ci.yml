@@ -516,8 +516,9 @@ jobs:
       #
       # Setting the CONTAINER_REGISTRY_PREFIX repository/organisation variable takes the images
       # from somewhere else, and takes them from there ONLY: it also clears the fallback below,
-      # so a distro that registry cannot serve fails the job instead of quietly redirecting the
-      # matrix at Docker Hub. An air-gapped or policy-restricted setup sets that variable
+      # so a distro that registry cannot serve fails its own jobs -- which pull its tag from there
+      # unpinned -- instead of quietly redirecting the matrix at Docker Hub, and without keeping
+      # any other distro's jobs from running. An air-gapped or policy-restricted setup sets that variable
       # precisely so that no such redirect can happen. Note that whoever can set repository or
       # organisation variables thereby chooses which images this workflow executes, and that write
       # access to the mirror package is now a CI-integrity control in its own right: its contents
