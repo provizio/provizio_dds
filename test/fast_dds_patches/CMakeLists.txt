@@ -57,18 +57,22 @@ set_tests_properties(fast_dds_openssl_runtime PROPERTIES TIMEOUT 60)
 # script mode as well, applying each to LF and CRLF renderings of the pristine sources, with the
 # script as checked out and as a CRLF copy. It runs everywhere Fast-DDS is built from source --
 # Windows above all, where file(WRITE) writes CRLF and a CRLF checkout of either repository is the
-# likeliest. PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS (top-level CMakeLists.txt) names every script the
-# build applies, so that the test can fail on one it does not cover.
+# likeliest. It takes the patches from PROVIZIO_DDS_FAST_DDS_PATCHES (top-level CMakeLists.txt),
+# the one list the PATCH_COMMAND is made from, so every script the build applies is covered. Handed
+# over as a file, one entry per line: an entry holds the separators a command line would split it at.
 find_package(Git REQUIRED)
-string(REPLACE ";" "|" _fast_dds_patch_scripts "${PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS}")
+set(_fast_dds_patches_file "${CMAKE_CURRENT_BINARY_DIR}/fast_dds_patches.txt")
+string(REPLACE ";" "\n" _fast_dds_patches "${PROVIZIO_DDS_FAST_DDS_PATCHES}")
+file(WRITE "${_fast_dds_patches_file}" "${_fast_dds_patches}\n")
 add_test(NAME fast_dds_patch_line_endings
          COMMAND "${CMAKE_COMMAND}"
                  "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
                  "-DFAST_DDS_SOURCE_DIR=${FAST_DDS_SOURCE_DIR}"
-                 "-DPATCH_SCRIPTS=${_fast_dds_patch_scripts}"
+                 "-DPATCH_DIR=${PROJECT_SOURCE_DIR}/cmake/fast_dds"
+                 "-DPATCHES_FILE=${_fast_dds_patches_file}"
                  "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/line_endings"
                  -P "${CMAKE_CURRENT_LIST_DIR}/line_endings_test.cmake")
-# Seconds. It renders sixteen small files with git and runs CMake in script mode forty times.
+# Seconds. It renders eighteen small files with git and runs CMake in script mode forty-eight times.
 set_tests_properties(fast_dds_patch_line_endings PROPERTIES TIMEOUT 120)
 
 # Not on Windows, where these tests CANNOT be linked. ResourceEvent and TimedEventImpl, like

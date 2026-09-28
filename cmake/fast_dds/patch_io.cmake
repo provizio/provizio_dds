@@ -74,6 +74,12 @@ function(provizio_dds_patch_write path contents)
     # where the target itself does not. No two writes overlap: the scripts run one after another,
     # each writing its files in turn.
     get_filename_component(_directory "${path}" DIRECTORY)
+    if(_directory STREQUAL "")
+        # A bare file name, as a script run by hand may be given, is one in the current directory,
+        # which a temporary made of the empty directory and a slash would not be: it would be one
+        # in the root of the file system.
+        set(_directory ".")
+    endif()
     set(_temporary "${_directory}/provizio_dds_patch.tmp")
     file(WRITE "${_temporary}" "${contents}")
 
