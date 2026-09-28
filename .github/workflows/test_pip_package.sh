@@ -102,16 +102,30 @@ fi
 PIP_LOG=/tmp/pip_install_provizio_dds.log
 python3 -m pip install -v . 2>&1 | tee "${PIP_LOG}"
 
-# Verify the binary cache was used (unless IGNORE_BIN_CACHE is set, e.g. for
-# preinstalled-fastdds tests that intentionally build from source).
-IGNORE_BIN_CACHE_UPPER="$(echo "${IGNORE_BIN_CACHE:-}" | tr '[:lower:]' '[:upper:]')"
-if [ "${IGNORE_BIN_CACHE_UPPER}" != "TRUE" ] && [ "$(uname -s)" != "Darwin" ]; then
-    if ! grep -q "Bin cache located and will be used" "${PIP_LOG}"; then
-        echo "::error::Binary cache was NOT used during pip install — check cache artifacts and CMake config"
+# Verify the package was built the way this job is here to test. PIP_PACKAGE_BUILD=source is the
+# build from source that a user's pip install falls back to whenever no prebuilt binaries fit their
+# host or configuration -- which the job forces as a user would, through CMAKE_ARGUMENTS, since the
+# prebuilt binaries would otherwise be taken wherever they exist. Anywhere else, on Linux, the
+# prebuilt binaries must have been used: every other pip job runs on the commit CI publishes them in.
+# macOS has none to use.
+case "${PIP_PACKAGE_BUILD:-}" in
+source)
+    if ! grep -q "Building C++ libraries from source" "${PIP_LOG}"; then
+        echo "::error::The pip install did NOT build from source, which is what this job is here to test"
         exit 1
     fi
-    echo "Verified: binary cache was used"
-fi
+    echo "Verified: built from source"
+    ;;
+*)
+    if [ "$(uname -s)" != "Darwin" ]; then
+        if ! grep -q "Bin cache located and will be used" "${PIP_LOG}"; then
+            echo "::error::Binary cache was NOT used during pip install — check cache artifacts and CMake config"
+            exit 1
+        fi
+        echo "Verified: binary cache was used"
+    fi
+    ;;
+esac
 rm -f "${PIP_LOG}"
 
 # Test it works fine by executing Python tests directly (without copying provizio_dds.py and other beside the tests)
