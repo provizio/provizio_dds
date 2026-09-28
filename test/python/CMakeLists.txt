@@ -14,12 +14,39 @@ add_custom_target(python_tests ALL
     COMMAND ${PYTHON_EXECUTABLE} -c "import subprocess, sys$<SEMICOLON> subprocess.call([sys.executable, '-m', 'pip', 'install', ${PYTHON_TEST_DEPS}, '--quiet'])"
     VERBATIM
 )
+# The Fast-DDS built here, and the OpenSSL runtime placed next to it, as the build left them: found
+# when this runs rather than when the tree was configured, and what an earlier configure had copied
+# that this one does not removed -- all of it where no Fast-DDS is built here -- ahead of the other
+# copies below, so that none of theirs is what it removes, and copied after them, so that a file of
+# the same name as one of theirs is the one beside Fast-DDS (see copy_runtime.cmake).
+set(_FAST_DDS_RUNTIME_GLOBS)
+if(FAST_DDS_INSTALL_DIR)
+    # The directory as it is: a [, * or ? in it is no pattern
+    string(REGEX REPLACE "([[*?])" "[\\1]" _FAST_DDS_INSTALL_PATTERN "${FAST_DDS_INSTALL_DIR}")
+    set(_FAST_DDS_RUNTIME_GLOBS "${_FAST_DDS_INSTALL_PATTERN}/lib/*${CMAKE_SHARED_LIBRARY_SUFFIX}*")
+    if(WIN32)
+        # On Windows, DLLs are in bin/, not lib/
+        list(APPEND _FAST_DDS_RUNTIME_GLOBS "${_FAST_DDS_INSTALL_PATTERN}/bin/*.dll")
+    endif()
+    string(REPLACE ";" "|" _FAST_DDS_RUNTIME_GLOBS "${_FAST_DDS_RUNTIME_GLOBS}")
+endif()
+# VERBATIM, or the | reaches cmd.exe unquoted on Windows, which takes it for a pipe
+add_custom_command(TARGET python_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} "-DDESTINATION=${TEST_PATH}" -DSTEP=prune
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/copy_runtime.cmake"
+    VERBATIM
+)
 file(GLOB TEST_SCRIPTS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
 foreach(FILE ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${TEST_SCRIPTS})
     add_custom_command(TARGET python_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy "${FILE}" "${TEST_PATH}"
     )
 endforeach()
+add_custom_command(TARGET python_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} "-DDESTINATION=${TEST_PATH}" "-DGLOBS=${_FAST_DDS_RUNTIME_GLOBS}" -DSTEP=copy
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/copy_runtime.cmake"
+    VERBATIM
+)
 if("${CMAKE_SHARED_LIBRARY_SUFFIX}" STREQUAL ".dylib")
     # Python expects .so and .so only in import
     add_custom_command(TARGET python_tests POST_BUILD
@@ -49,6 +76,14 @@ add_dependencies(python_tests provizio_dds_python_types provizio_dds)
 if(FAST_DDS_DEPENDENCIES)
     add_dependencies(python_tests ${FAST_DDS_DEPENDENCIES})
 endif(FAST_DDS_DEPENDENCIES)
+
+# What the copies above leave in the tests' directory, from one configure to the next: CMake in
+# script mode
+add_test(NAME python_copy_runtime
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/copy_runtime_test"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/copy_runtime_test.cmake")
+set_tests_properties(python_copy_runtime PROPERTIES TIMEOUT 60)
 
 add_test(NAME python_pub_python_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"

@@ -126,6 +126,8 @@ else()
 endif()
 ```
 
+On Linux and macOS the install may also hold `lib/provizio_dds/`: the OpenSSL runtime the bundled Fast-DDS was built against goes there when the loader would not find that same OpenSSL by itself — on Linux, one outside the system's library directories; on macOS, one named by an `@rpath`-relative install name (not Homebrew's, which is named by its absolute path) — and always, for the Linux prebuilt binaries. Fast-DDS finds it there through its own rpath, and it is kept out of `lib/` itself so that no other program on the machine loads it in place of the system's. Anything that repackages or copies the install (a `.deb`, a container image) must take `lib/provizio_dds/` along with `lib/`. On Windows those DLLs go to `bin/`, next to the rest.
+
 `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON` above is not only about skipping clang-tidy: provizio_dds's coding standards also enable **ASan, LSan and UBSan for any `Debug` build**. That is right for working on provizio_dds itself, but an instrumented `libprovizio_dds` linked into your own non-instrumented application warns `ASan runtime does not come first in initial library list` and makes ASan's own findings unreliable. Keep the flag on for a library you intend to consume; drop it only when you deliberately want the sanitizers.
 
 **Python (pip):**
