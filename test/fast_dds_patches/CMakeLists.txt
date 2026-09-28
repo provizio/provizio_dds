@@ -53,6 +53,19 @@ add_test(NAME fast_dds_openssl_runtime
 # Seconds. It writes a few small files and runs CMake in script mode a few dozen times.
 set_tests_properties(fast_dds_openssl_runtime PROPERTIES TIMEOUT 60)
 
+# Coverage for the FindOpenSSL given to Fast-DDS when OpenSSL is found as a package
+# (cmake/fast_dds/openssl_package.cmake): configures of two small projects standing in for
+# provizio_dds and for the Fast-DDS build, with stand-in packages, so it needs neither a package
+# manager nor a compiler, and runs on every platform.
+add_test(NAME fast_dds_openssl_package
+         COMMAND "${CMAKE_COMMAND}"
+                 "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/openssl_package"
+                 "-DGENERATOR=${CMAKE_GENERATOR}"
+                 -P "${CMAKE_CURRENT_LIST_DIR}/openssl_package_test.cmake")
+# Seconds. Fifty-four configures of projects that enable no language (fifty-two on Windows).
+set_tests_properties(fast_dds_openssl_package PROPERTIES TIMEOUT 180)
+
 # Line-ending coverage for every patch script (see cmake/fast_dds/patch_io.cmake): pure CMake
 # script mode as well, applying each to LF and CRLF renderings of the pristine sources, with the
 # script as checked out and as a CRLF copy. It runs everywhere Fast-DDS is built from source --

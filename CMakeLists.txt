@@ -19,6 +19,7 @@ include(FetchContent)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/imported_targets.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/openssl_package.cmake")
 
 # Configuration
 set(PROVIZIO_DDS_IDLS_VERSION "2.1.1" CACHE STRING "provizio_dds_idls version")
@@ -711,11 +712,10 @@ else(HAS_BIN_CACHE)
 
         # OpenSSL is used by Fast-DDS for its TLS transport, and its security plugin when SECURITY is on
         find_package(OpenSSL REQUIRED)
-        # How Fast-DDS is to find this same OpenSSL (see FAST_DDS_CMAKE_ARGS)
-        list(GET OPENSSL_INCLUDE_DIR 0 _OPENSSL_INCLUDE_DIR)
-        # Without a trailing separator, which would make the include directory its own parent
-        file(TO_CMAKE_PATH "${_OPENSSL_INCLUDE_DIR}" _OPENSSL_INCLUDE_DIR)
-        string(REGEX REPLACE "/+$" "" _OPENSSL_INCLUDE_DIR "${_OPENSSL_INCLUDE_DIR}")
+        # How Fast-DDS is to find this same OpenSSL (see FAST_DDS_CMAKE_ARGS). Empty for a package
+        # whose configuration names no include directory plainly, which only the package branch below
+        # can get: FindOpenSSL always sets one
+        provizio_dds_openssl_include_dir(_OPENSSL_INCLUDE_DIR)
         get_filename_component(_OPENSSL_ROOT "${_OPENSSL_INCLUDE_DIR}" DIRECTORY)
         set(PROVIZIO_DDS_OPENSSL_ARGS)
         if(DEFINED OPENSSL_USE_STATIC_LIBS)
@@ -727,8 +727,6 @@ else(HAS_BIN_CACHE)
             # as packages of their own — a static OpenSSL's zlib — which FindOpenSSL knows nothing
             # of. Fast-DDS is given a FindOpenSSL loading that same configuration, in the configuration
             # (build type) provizio_dds consumes it in.
-            get_filename_component(PROVIZIO_DDS_OPENSSL_CONFIG_DIR "${OpenSSL_CONFIG}" DIRECTORY)
-            set(PROVIZIO_DDS_OPENSSL_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
             string(TOUPPER "${CMAKE_BUILD_TYPE}" _OPENSSL_BUILD_TYPE_UPPER)
             if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
                 # Fast-DDS builds as Release then, for the release CRT, which a Debug package's OpenSSL
@@ -743,8 +741,7 @@ else(HAS_BIN_CACHE)
                 set(PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG "${CMAKE_BUILD_TYPE}")
             endif()
             set(PROVIZIO_DDS_OPENSSL_MODULE_DIR "${CMAKE_CURRENT_BINARY_DIR}/fast_dds_openssl")
-            configure_file("${PROJECT_SOURCE_DIR}/cmake/fast_dds/FindOpenSSL.cmake.in"
-                "${PROVIZIO_DDS_OPENSSL_MODULE_DIR}/FindOpenSSL.cmake" @ONLY)
+            provizio_dds_write_openssl_find_module("${PROVIZIO_DDS_OPENSSL_MODULE_DIR}" "${PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG}")
         else()
             # Found by CMake's FindOpenSSL, which Fast-DDS runs too. Given a root, it searches that
             # alone; given the files it found — the cache entries it keeps them in — it takes exactly
@@ -771,81 +768,15 @@ else(HAS_BIN_CACHE)
             endif()
         endif()
         # Where that OpenSSL's shared libraries can be, for those Fast-DDS loads to be placed next to
-        # it (see the openssl_runtime step of libfast_dds), those of the configuration Fast-DDS takes
-        # the package in first, as a library of one name can be in both: the directories of the files
-        # found, as results (FindOpenSSL's, keyworded debug / optimized where it found both) or as
-        # imported targets' locations (not a package's interface targets, which name no file), with
-        # the bin directory next to each, where an import library's DLL is; then those of the root.
+        # it (see the openssl_runtime step of libfast_dds), those of the configuration Fast-DDS links
+        # first: of its build type, or what a target, or the FindOpenSSL given to Fast-DDS, maps that
+        # onto
+        set(_OPENSSL_MAPPED_CONFIG "")
         if(PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG)
-            # The configuration the FindOpenSSL given to Fast-DDS maps it onto
-            list(GET PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG 0 _OPENSSL_FOR_BUILD_TYPE)
-        else()
-            set(_OPENSSL_FOR_BUILD_TYPE "${_FAST_DDS_BUILD_TYPE}")
+            list(GET PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG 0 _OPENSSL_MAPPED_CONFIG)
         endif()
-        string(TOUPPER "${_OPENSSL_FOR_BUILD_TYPE}" _OPENSSL_FOR_BUILD_TYPE_UPPER)
-        set(_OPENSSL_LIBRARY_FILES_FIRST)
-        set(_OPENSSL_LIBRARY_FILES)
-        set(_OPENSSL_LIBRARY_KEYWORD)
-        foreach(_OPENSSL_ITEM IN LISTS OPENSSL_SSL_LIBRARY OPENSSL_CRYPTO_LIBRARY)
-            if(_OPENSSL_ITEM MATCHES "^(debug|optimized|general)$")
-                set(_OPENSSL_LIBRARY_KEYWORD "${_OPENSSL_ITEM}")
-                continue()
-            endif()
-            if(EXISTS "${_OPENSSL_ITEM}")
-                if((_OPENSSL_LIBRARY_KEYWORD STREQUAL "debug" AND _OPENSSL_FOR_BUILD_TYPE STREQUAL "Debug") OR
-                        (_OPENSSL_LIBRARY_KEYWORD STREQUAL "optimized" AND NOT _OPENSSL_FOR_BUILD_TYPE STREQUAL "Debug"))
-                    list(APPEND _OPENSSL_LIBRARY_FILES_FIRST "${_OPENSSL_ITEM}")
-                else()
-                    list(APPEND _OPENSSL_LIBRARY_FILES "${_OPENSSL_ITEM}")
-                endif()
-            endif()
-            set(_OPENSSL_LIBRARY_KEYWORD)
-        endforeach()
-        foreach(_OPENSSL_TARGET IN ITEMS OpenSSL::SSL OpenSSL::Crypto)
-            if(TARGET ${_OPENSSL_TARGET})
-                get_target_property(_OPENSSL_TARGET_TYPE ${_OPENSSL_TARGET} TYPE)
-                if(NOT _OPENSSL_TARGET_TYPE STREQUAL "INTERFACE_LIBRARY")
-                    # Read here only: before CMake 3.19 an interface library's other properties cannot be
-                    get_target_property(_OPENSSL_TARGET_CONFIGS ${_OPENSSL_TARGET} IMPORTED_CONFIGURATIONS)
-                    foreach(_OPENSSL_PROPERTY IN ITEMS IMPORTED_LOCATION IMPORTED_IMPLIB)
-                        if(_OPENSSL_TARGET_CONFIGS)
-                            foreach(_OPENSSL_CONFIG IN LISTS _OPENSSL_TARGET_CONFIGS)
-                                get_target_property(_OPENSSL_ITEM ${_OPENSSL_TARGET} ${_OPENSSL_PROPERTY}_${_OPENSSL_CONFIG})
-                                if(_OPENSSL_ITEM AND EXISTS "${_OPENSSL_ITEM}")
-                                    if(_OPENSSL_CONFIG STREQUAL _OPENSSL_FOR_BUILD_TYPE_UPPER)
-                                        list(APPEND _OPENSSL_LIBRARY_FILES_FIRST "${_OPENSSL_ITEM}")
-                                    else()
-                                        list(APPEND _OPENSSL_LIBRARY_FILES "${_OPENSSL_ITEM}")
-                                    endif()
-                                endif()
-                            endforeach()
-                        endif()
-                        get_target_property(_OPENSSL_ITEM ${_OPENSSL_TARGET} ${_OPENSSL_PROPERTY})
-                        if(_OPENSSL_ITEM AND EXISTS "${_OPENSSL_ITEM}")
-                            list(APPEND _OPENSSL_LIBRARY_FILES "${_OPENSSL_ITEM}")
-                        endif()
-                    endforeach()
-                endif()
-            endif()
-        endforeach()
-        set(PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS)
-        foreach(_OPENSSL_LIBRARY IN LISTS _OPENSSL_LIBRARY_FILES_FIRST _OPENSSL_LIBRARY_FILES)
-            get_filename_component(_OPENSSL_LIBRARY_DIR "${_OPENSSL_LIBRARY}" DIRECTORY)
-            get_filename_component(_OPENSSL_LIBRARY_BIN_DIR "${_OPENSSL_LIBRARY_DIR}/../bin" ABSOLUTE)
-            list(APPEND PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS "${_OPENSSL_LIBRARY_DIR}")
-            if(IS_DIRECTORY "${_OPENSSL_LIBRARY_BIN_DIR}")
-                list(APPEND PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS "${_OPENSSL_LIBRARY_BIN_DIR}")
-            endif()
-        endforeach()
-        # The root is the include directory's parent, where there is one
-        if(IS_DIRECTORY "${_OPENSSL_INCLUDE_DIR}")
-            foreach(_OPENSSL_SUBDIR IN ITEMS bin lib lib64)
-                if(IS_DIRECTORY "${_OPENSSL_ROOT}/${_OPENSSL_SUBDIR}")
-                    list(APPEND PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS "${_OPENSSL_ROOT}/${_OPENSSL_SUBDIR}")
-                endif()
-            endforeach()
-        endif()
-        list(REMOVE_DUPLICATES PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS)
+        provizio_dds_openssl_runtime_dirs(PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS "${_FAST_DDS_BUILD_TYPE}"
+            "${_OPENSSL_MAPPED_CONFIG}")
 
         # foonathan_memory_vendor (Required for Fast-DDS)
         set(FOONATHAN_MEMORY_DIR "${CMAKE_CURRENT_BINARY_DIR}/foonathan_memory")
@@ -927,6 +858,9 @@ else(HAS_BIN_CACHE)
         # what was found there, which would otherwise be taken as found.
         list(APPEND FAST_DDS_CMAKE_ARGS "-UOPENSSL_*" "-ULIB_EAY*" "-USSL_EAY*" "-UOpenSSL_DIR"
             "-DCMAKE_REQUIRE_FIND_PACKAGE_OpenSSL=ON" ${PROVIZIO_DDS_OPENSSL_ARGS})
+        # And ahead of every argument, whichever OpenSSL Fast-DDS is given now, what puts back the cache
+        # a configure that stopped inside the lookup of an OpenSSL package left (see openssl_package.cmake)
+        list(PREPEND FAST_DDS_CMAKE_ARGS "${PROVIZIO_DDS_FAST_DDS_OPENSSL_RECOVERY}")
 
         # Parse Fast-DDS version once for byproducts and library naming below
         # Prefer FAST_DDS_NUMERIC_VERSION (for branch refs); fall back to parsing
@@ -1077,7 +1011,9 @@ else(HAS_BIN_CACHE)
         if(PROVIZIO_DDS_OPENSSL_MODULE_DIR)
             # The FindOpenSSL given to Fast-DDS is an input of its configure that its arguments do not
             # show: when it changes (OpenSSL found as another package), an existing build has to
-            # configure again for Fast-DDS to link that one. configure_file() rewrites it only then.
+            # configure again for Fast-DDS to link that one. configure_file() rewrites it only when
+            # its text changes, which includes a package location, a lookup result or a value given on
+            # the command line first cached after it was written (see openssl_package.cmake).
             ExternalProject_Add_StepDependencies(libfast_dds configure
                 "${PROVIZIO_DDS_OPENSSL_MODULE_DIR}/FindOpenSSL.cmake")
         endif()
@@ -1977,8 +1913,14 @@ else(HAS_BIN_CACHE)
 
             # Copy OpenSSL DLLs so they are found before any ABI-incompatible copies
             # (e.g. MinGW-built) that may appear in PATH via os.add_dll_directory().
-            if(OPENSSL_FOUND)
-                get_filename_component(_OPENSSL_ROOT "${OPENSSL_INCLUDE_DIR}" DIRECTORY)
+            # Looked for beside the headers of an OpenSSL found with FindOpenSSL's variables, as a
+            # package need not set them -- for a Fast-DDS of the system's only: those a Fast-DDS built
+            # here imports are beside it, where its openssl_runtime step places them, and taken from
+            # there by test/python and by the install below, as a DLL of the same name beside the
+            # headers can be of another configuration, or another build.
+            provizio_dds_openssl_include_dir(_OPENSSL_INCLUDE_DIR)
+            if(OPENSSL_FOUND AND _OPENSSL_INCLUDE_DIR AND NOT FAST_DDS_INSTALL_DIR)
+                get_filename_component(_OPENSSL_ROOT "${_OPENSSL_INCLUDE_DIR}" DIRECTORY)
                 file(GLOB _OPENSSL_DLLS "${_OPENSSL_ROOT}/bin/libssl*.dll" "${_OPENSSL_ROOT}/bin/libcrypto*.dll")
                 if(NOT _OPENSSL_DLLS)
                     message(WARNING "OpenSSL DLLs not found under ${_OPENSSL_ROOT}/bin/ (expected libssl*.dll, libcrypto*.dll)")
@@ -2051,12 +1993,18 @@ else(HAS_BIN_CACHE)
 
         # On Windows, Fast-DDS links against OpenSSL for its TLS transport.  Bundle the
         # correct MSVC-built OpenSSL DLLs so they are found before any ABI-incompatible
-        # copies (MinGW, MySQL, PHP, etc.) that may exist elsewhere on the system.
-        if(WIN32 AND OPENSSL_FOUND)
-            get_filename_component(_OPENSSL_ROOT "${OPENSSL_INCLUDE_DIR}" DIRECTORY)
-            install(DIRECTORY "${_OPENSSL_ROOT}/bin/"
-                DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
-                FILES_MATCHING PATTERN "libssl*.dll" PATTERN "libcrypto*.dll")
+        # copies (MinGW, MySQL, PHP, etc.) that may exist elsewhere on the system: those beside
+        # the headers, for a Fast-DDS of the system's -- a Fast-DDS built here brings those it
+        # imports with it, installed above, which a DLL of the same name from there could replace
+        if(WIN32 AND OPENSSL_FOUND AND NOT FAST_DDS_INSTALL_DIR)
+            # Beside the headers, as above
+            provizio_dds_openssl_include_dir(_OPENSSL_INCLUDE_DIR)
+            if(_OPENSSL_INCLUDE_DIR)
+                get_filename_component(_OPENSSL_ROOT "${_OPENSSL_INCLUDE_DIR}" DIRECTORY)
+                install(DIRECTORY "${_OPENSSL_ROOT}/bin/"
+                    DESTINATION "${PROVIZIO_DDS_PYTHON_LIBS_DIR}"
+                    FILES_MATCHING PATTERN "libssl*.dll" PATTERN "libcrypto*.dll")
+            endif()
         endif()
 
         # provizio_dds DLL is needed by the Python extension modules at runtime
