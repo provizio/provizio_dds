@@ -176,6 +176,32 @@ def bin_cache_incompatibility(cache_dir):
 
     return None
 
+
+def resolve_bin_cache_name(command, **kwargs):
+    """Returns the bin cache name the key script prints, or "" when there is none to use.
+
+    None to use when the script cannot run or fails - it asks GitHub for the IDLs revision, so it
+    fails on any machine without egress, and it refuses a host it does not support - which costs a
+    Fast-DDS compile, where letting the error out of here would cost the whole install. None either
+    when what it printed is not a plausible name.
+    """
+    try:
+        name = subprocess.check_output(command, text=True, **kwargs).strip()
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"Warning: failed to resolve the bin cache name: {e}", flush=True)
+        return ""
+
+    # The name is interpolated into paths that are extracted into and later removed, so check its
+    # shape here rather than inheriting the guarantee from how the script builds it. Its parts are
+    # a platform and architecture, two hashes and a build type, and nothing else belongs in it; nor
+    # can it start with a dot, which is what keeps "." and ".." - a name that would make those paths
+    # build_dir itself, or its parent - from passing for one.
+    if name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._]*", name):
+        print(f"Warning: refusing an implausible bin cache name: {name!r}", flush=True)
+        return ""
+    return name
+
+
 # Build the CMake project and copy its artifacts to the destination directory
 source_dir = os.path.dirname(os.path.realpath(__file__))
 build_dir = source_dir + "/build/python_packaging"
@@ -199,26 +225,9 @@ else:
     if platform == "linux" and cmake_arguments == "":
         # On Linux, 3.8-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
         python_abi_tag = "3_14" if sys.version_info >= (3, 14) else "3"
-        try:
-            python_cache_config_name = subprocess.check_output(
-                [source_dir + "/bin_cache_config_name.sh", "", "", python_abi_tag],
-                text=True
-            ).strip()
-        except (subprocess.CalledProcessError, OSError) as e:
-            # Not being able to name the cache costs a Fast-DDS compile; letting it out of here
-            # costs the whole install. The key script asks GitHub for the IDLs revision, so it
-            # exits non-zero on any machine without egress, and it refuses outright on a host it
-            # does not support - neither of which is a reason to abandon an install that can
-            # still build from source.
-            print(f"Warning: failed to resolve the bin cache name: {e}", flush=True)
-            python_cache_config_name = ""
-
-        # The key is interpolated into paths that are extracted into and later removed, so check
-        # its shape here rather than inheriting the guarantee from how the script builds it. Its
-        # parts are an architecture, two hashes and a build type; nothing else belongs in it.
-        if python_cache_config_name and not re.fullmatch(r"[A-Za-z0-9._]+", python_cache_config_name):
-            print(f"Warning: refusing an implausible bin cache name: {python_cache_config_name!r}", flush=True)
-            python_cache_config_name = ""
+        python_cache_config_name = resolve_bin_cache_name(
+            [source_dir + "/bin_cache_config_name.sh", "", "", python_abi_tag]
+        )
 
         if python_cache_config_name:
             python_cache_zip = source_dir + "/cache/" + python_cache_config_name + ".zip"
@@ -241,7 +250,6 @@ else:
                 else:
                     print(f"Bin cache located, but won't be used as {incompatibility}")
                     shutil.rmtree(f"{build_dir}/{python_cache_config_name}")
-                    needs_building = True
             else:
                 # Name the key that was looked for. A key naming no archive is otherwise
                 # indistinguishable from a configuration for which no cache was ever
@@ -252,20 +260,10 @@ else:
         # On Windows, .pyd files link against specific pythonXY.dll, so each version needs its own cache
         python_ver_tag = f"{sys.version_info.major}{sys.version_info.minor}"
         ps_script = os.path.join(source_dir, "bin_cache_config_name.ps1")
-        try:
-            python_cache_config_name = subprocess.check_output(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_script,
-                 "-PythonVersionTag", python_ver_tag],
-                text=True, cwd=source_dir
-            ).strip()
-        except (subprocess.CalledProcessError, OSError) as e:
-            print(f"Warning: failed to resolve Windows cache name: {e}", flush=True)
-            python_cache_config_name = ""
-
-        # See the Linux branch above for why the shape is checked here.
-        if python_cache_config_name and not re.fullmatch(r"[A-Za-z0-9._]+", python_cache_config_name):
-            print(f"Warning: refusing an implausible bin cache name: {python_cache_config_name!r}", flush=True)
-            python_cache_config_name = ""
+        python_cache_config_name = resolve_bin_cache_name(
+            ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_script, "-PythonVersionTag", python_ver_tag],
+            cwd=source_dir,
+        )
 
         if python_cache_config_name:
             python_cache_zip = os.path.join(source_dir, "cache", python_cache_config_name + ".zip")
@@ -303,6 +301,12 @@ else:
             "cmake", "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
             "-DPYTHON_BINDINGS=ON",
+            "-DPYTHON_PIP_PACKAGE=ON",
+            # Given every time, and ahead of CMAKE_ARGUMENTS, whose value comes later and so wins:
+            # build_dir is configured again by the next install, and would otherwise keep a value
+            # an earlier one's CMAKE_ARGUMENTS gave it - LOOK_FOR_FAST_DDS, say, which a pip
+            # package refuses, and would go on refusing after CMAKE_ARGUMENTS no longer asks for it.
+            "-DLOOK_FOR_FAST_DDS=OFF",
             "-DENABLE_CHECK_FORMAT=OFF",
             "-DENABLE_TESTS=OFF",
             "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON",
