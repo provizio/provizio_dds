@@ -19,6 +19,7 @@ include(FetchContent)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/imported_targets.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/extract.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/openssl_package.cmake")
 
 # Configuration
@@ -226,25 +227,36 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                 # at the exit status rather than at the empty output that is the actual symptom.
                 message(STATUS "Could not work out the prebuilt binaries key (bin_cache_config_name.sh "
                     "succeeded but named none): everything will be built from source.")
-            elseif(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}")
+            # Absent only when no earlier configure extracted it here either: the binaries of this key
+            # are those of this configuration, and are used from there -- which is how a checkout of
+            # the commit before CI's "Bin cache" one, whose key is the same, finds them.
+            elseif(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_SO}")
                 message(STATUS "No prebuilt binaries for this configuration (cache/${BIN_CACHE_CONFIG_NAME}.zip "
                     "is absent): everything will be built from source. The cache is published for Release "
                     "builds of unmodified checkouts on the supported architectures only.")
-            elseif(PYTHON_VERSION_TAG AND NOT EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}")
+            elseif(PYTHON_VERSION_TAG AND NOT EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                    AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
                 message(STATUS "No prebuilt Python binaries for this configuration "
                     "(cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip is absent): everything will be built from source.")
             endif(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
         endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
 
         # Extract general cache if needed
+        set(BIN_CACHE_EXTRACTION_FAILURE "")
         if(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_SO}")
-            execute_process(COMMAND unzip -q "${BIN_CACHE_SOURCE_PATH}" -d "${BIN_CACHE_PARENT_PATH}")
+            provizio_dds_bin_cache_extract("${BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
+                COMMAND unzip -q "${BIN_CACHE_SOURCE_PATH}" -d "${BIN_CACHE_PARENT_PATH}")
+            set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${BIN_CACHE_CONFIG_NAME}.zip")
         endif(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_SO}")
 
         # Extract Python-versioned cache if needed
-        if(PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
-            execute_process(COMMAND unzip -q "${PYTHON_BIN_CACHE_SOURCE_PATH}" -d "${BIN_CACHE_PARENT_PATH}")
-        endif(PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
+        if(NOT BIN_CACHE_EXTRACTION_FAILURE AND PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
+            provizio_dds_bin_cache_extract("${PYTHON_BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
+                COMMAND unzip -q "${PYTHON_BIN_CACHE_SOURCE_PATH}" -d "${BIN_CACHE_PARENT_PATH}")
+            set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip")
+        endif(NOT BIN_CACHE_EXTRACTION_FAILURE AND PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+            AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
 
         if(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
             # Whether the prebuilt binaries can be used here is decided by the glibc / libstdc++ ABI
@@ -275,21 +287,22 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
         else(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
             # An archive was published under this key but does not hold what the build needs: a
             # truncated or malformed publish, or Python binaries sought in the general archive
-            # because no interpreter was found to name their ABI group. The absent-archive cases
-            # are reported above and excluded here, so this is the last way a cache could be
-            # missed in silence.
-            if(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
+            # because no interpreter was found to name their ABI group -- or could not be extracted
+            # at all, which is reported as that. The absent-archive cases are reported above and
+            # excluded here, so this is the last way a cache could be missed in silence.
+            if(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
+                message(STATUS "The prebuilt binaries published for this configuration could not be extracted "
+                    "from ${BIN_CACHE_EXTRACTION_ARCHIVE} (${BIN_CACHE_EXTRACTION_FAILURE}): everything will be "
+                    "built from source.")
+            elseif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
                 AND(NOT PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
                 set(BIN_CACHE_MISSING_FILE "lib/libprovizio_dds.so")
                 if(EXISTS "${CACHED_PROVIZIO_DDS_SO}")
                     set(BIN_CACHE_MISSING_FILE "python/provizio_dds_python_types/_provizio_dds_python_types.so")
                 endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}")
-                # "do not provide", not "were extracted but do not hold": an archive that failed to
-                # extract at all reaches this too, and the message has to be true of both.
                 message(STATUS "The prebuilt binaries published for this configuration do not provide "
                     "${BIN_CACHE_MISSING_FILE}: everything will be built from source.")
-            endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
-                AND(NOT PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
+            endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
         endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
     elseif(WIN32)
         # Find PowerShell
@@ -333,42 +346,50 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                 # Name the key that was looked for - see the Linux branch above for why a miss must
                 # not be silent
                 if(NOT BIN_CACHE_WOULD_BE_DISCARDED)
-                    if(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}")
+                    # Absent only when no earlier configure extracted it either: see the Linux branch
+                    if(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
                         message(STATUS "No prebuilt binaries for this configuration (cache/${BIN_CACHE_CONFIG_NAME}.zip "
                             "is absent): everything will be built from source. The cache is published for Release "
                             "builds of unmodified checkouts only.")
-                    elseif(WIN_PYTHON_VERSION_TAG AND NOT EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}")
+                    elseif(WIN_PYTHON_VERSION_TAG AND NOT EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                            AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
                         message(STATUS "No prebuilt Python binaries for this configuration "
                             "(cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip is absent): everything will be built from source.")
-                    endif(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}")
+                    endif(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
                 endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
 
                 # Extract general cache if needed
+                set(BIN_CACHE_EXTRACTION_FAILURE "")
                 if(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
-                    execute_process(
-                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force"
-                    )
+                    provizio_dds_bin_cache_extract("${BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
+                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force")
+                    set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${BIN_CACHE_CONFIG_NAME}.zip")
                 endif(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
 
                 # Extract Python-versioned cache if needed
-                if(WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
-                    execute_process(
-                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${PYTHON_BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force"
-                    )
-                endif(WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                if(NOT BIN_CACHE_EXTRACTION_FAILURE AND WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                        AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                    provizio_dds_bin_cache_extract("${PYTHON_BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
+                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${PYTHON_BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force")
+                    set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip")
+                endif(NOT BIN_CACHE_EXTRACTION_FAILURE AND WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                    AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
 
                 if(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
                     set(HAS_BIN_CACHE TRUE)
                 else(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
                     # See the Linux branch above: an archive published for this key that does not
-                    # hold what the build needs is the last silent miss left.
-                    if(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
+                    # hold what the build needs, or could not be extracted, is the last silent miss left.
+                    if(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
+                        message(STATUS "The prebuilt binaries published for this configuration could not be extracted "
+                            "from ${BIN_CACHE_EXTRACTION_ARCHIVE} (${BIN_CACHE_EXTRACTION_FAILURE}): everything will be "
+                            "built from source.")
+                    elseif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
                         AND(NOT WIN_PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
                         message(STATUS "The prebuilt binaries published for this configuration do not provide "
                             "provizio_dds.dll, provizio_dds.lib or the Python extension module: everything will "
                             "be built from source.")
-                    endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
-                        AND(NOT WIN_PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
+                    endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
                 endif(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
             else(BIN_CACHE_CONFIG_RESULT EQUAL 0 AND NOT BIN_CACHE_CONFIG_NAME STREQUAL "")
                 # Gated like every other cache message, and split by cause for the same reasons as
