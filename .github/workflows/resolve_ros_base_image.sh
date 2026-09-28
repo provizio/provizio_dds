@@ -30,8 +30,11 @@
 #   ROS_DISTROS               - space-separated distros to resolve; also the matrix's own list
 #   MIRROR_REPO               - the preferred repository, e.g. ghcr.io/<org>/ros
 #   FALLBACK_REPO             - where to go when the mirror cannot serve a distro, e.g.
-#                               mirror.gcr.io/library/ros. Empty means there is no second choice
-#                               and a distro the mirror cannot serve is a hard failure
+#                               mirror.gcr.io/library/ros. Empty means there is no second choice:
+#                               a distro the mirror cannot serve is then handed to the matrix as the
+#                               mirror's own tag, unpinned, for its jobs to pull -- and to fail on
+#                               if the mirror truly cannot serve it -- while every other distro's
+#                               jobs run as usual
 #   CONTAINER_REGISTRY_PREFIX - non-empty when the operator has pinned the images to a registry of
 #                               their own, which also clears FALLBACK_REPO. Applied here rather
 #                               than in the workflow because GitHub's "a && b || c" expression
@@ -54,12 +57,17 @@ GHCR_USER="${GHCR_USER:-""}"
 GHCR_TOKEN="${GHCR_TOKEN:-""}"
 
 # Pinning the images to one registry means taking them from there and from there ONLY, so it also
-# clears the fallback: a distro that registry cannot serve then fails the job instead of quietly
-# redirecting the matrix at Docker Hub. An air-gapped or policy-restricted setup pins the registry
-# precisely so that no such redirect can happen.
+# clears the fallback: a distro that registry cannot serve then fails its own jobs instead of
+# quietly redirecting the matrix at Docker Hub. An air-gapped or policy-restricted setup pins the
+# registry precisely so that no such redirect can happen.
 if [ -n "${CONTAINER_REGISTRY_PREFIX}" ]; then
     FALLBACK_REPO=""
 fi
+
+# The mirror this organisation keeps, which the "Mirror ROS base images" workflow of
+# provizio_radar_api_ros2 populates. Only for telling apart, in the warning at the end, a mirror that
+# workflow can repopulate from a fork's own namespace, which nothing populates.
+readonly ORGANISATION_MIRROR_REPO="ghcr.io/provizio/ros"
 
 # Everything below ends up either in a container image reference the runner executes or in a
 # GITHUB_OUTPUT line and a ::warning workflow command. All three are parsed, none is escaped, and
@@ -77,13 +85,22 @@ MIRROR_REPO="${MIRROR_REPO,,}"
 FALLBACK_REPO="${FALLBACK_REPO,,}"
 
 # Anything echoed here that this script did not produce - a repository name an operator set, a
-# registry's own error text - is text, not a workflow command. The runner reads a line beginning
-# "::name::value" as one, so a value carrying a newline could open such a line of its own
-# (::error::, ::add-mask::, ::stop-commands::). A newline is what makes that possible, so values
-# reported inline have theirs removed; multi-line output worth keeping as such is prefixed
-# instead, at the one place below that prints any.
+# registry's own error text, a platform a manifest states - is text, not a workflow command. The
+# runner reads a line beginning "::name::value" as one, and it ends a line at a CR as well as at a
+# LF, so a value carrying either could open such a line of its own (::error::, ::add-mask::,
+# ::stop-commands::). Values reported inline have both removed; multi-line output worth keeping as
+# such has every line prefixed instead, a CR counting as a line break there too. The runner also
+# still reads the older "##[name]value" form, and that one anywhere in a line, so it is broken up
+# wherever it appears, in either kind of output: a "##[stop-commands]" there would otherwise
+# silence the warnings this script exists to raise.
+without_legacy_commands() {
+    sed 's/##\[/# #[/g'
+}
 single_line() {
-    printf '%s' "$1" | tr -d '\r\n'
+    printf '%s' "$1" | tr -d '\r\n' | without_legacy_commands
+}
+prefixed_lines() {
+    tr '\r' '\n' <"$1" | without_legacy_commands | sed 's/^/    | /'
 }
 
 # How the mirror can be read, if at all: "authenticated", "anonymous", "auth-failed" or
@@ -91,19 +108,29 @@ single_line() {
 # done about it, so they are reported apart rather than as one "no image" outcome.
 mirror_state="anonymous"
 
+# The mirror as messages name it. Once it has matched REPO_PATTERN it cannot carry a line break, and
+# until then only the single-line form of what was given may be printed.
+mirror_shown="${MIRROR_REPO}"
+
 if ! [[ "${MIRROR_REPO}" =~ ${REPO_PATTERN} ]]; then
-    # Reported, not fatal. An unusable mirror is exactly what the fallback exists for, and where
-    # there is no fallback the per-distro check below still fails the job. Exiting here instead
-    # would take down all twenty compatibility jobs of any fork that simply has no mirror.
-    # Reported as it was given rather than as it was lowercased: this is the one message whose
-    # job is to help whoever set the value find their mistake in it.
-    echo "MIRROR_REPO is not a plain registry/namespace/name: '$(single_line "${MIRROR_REPO_AS_GIVEN}")'"
+    # Reported as it was given rather than as it was lowercased: this is the one message whose job
+    # is to help whoever set the value find their mistake in it. Only an operator's
+    # CONTAINER_REGISTRY_PREFIX gets here -- the name ci.yml builds otherwise, from the repository
+    # owner's login, always matches -- and that prefix also clears the fallback, so this is a
+    # configuration error of the whole matrix rather than of any one distro: no image reference can
+    # be made from the name for any of them.
+    mirror_shown="$(single_line "${MIRROR_REPO_AS_GIVEN}")"
+    echo "MIRROR_REPO is not a plain registry/namespace/name: '${mirror_shown}'"
     mirror_state="malformed"
+    if [ -z "${FALLBACK_REPO}" ]; then
+        echo "::error title=ROS base image mirror unusable::'${mirror_shown}' is not a usable repository name, so no ROS 2 base image can be taken from it, and no fallback is configured. Check the CONTAINER_REGISTRY_PREFIX variable."
+        exit 1
+    fi
 fi
 if [ -n "${FALLBACK_REPO}" ] && ! [[ "${FALLBACK_REPO}" =~ ${REPO_PATTERN} ]]; then
     # This one is fatal: ci.yml sets it to a literal, so a malformed value is a broken workflow
     # rather than a property of whoever is running it, and there is nothing to fall back to.
-    echo "FALLBACK_REPO is not a plain registry/namespace/name: '${FALLBACK_REPO}'"
+    echo "FALLBACK_REPO is not a plain registry/namespace/name: '$(single_line "${FALLBACK_REPO}")'"
     exit 1
 fi
 
@@ -119,9 +146,10 @@ cleanup() {
         docker logout ghcr.io >/dev/null 2>&1 || true
     fi
 }
-# INT and TERM as well as EXIT: a cancelled run (this workflow sets cancel-in-progress) signals
-# the job rather than letting it exit, and an EXIT trap alone would leave the credential behind.
-trap cleanup EXIT INT TERM
+# EXIT alone, and that covers a signal too: bash runs the EXIT trap when INT or TERM ends the script.
+# Trapping those two as well would do worse than nothing, replacing their default action -- ending
+# the script -- with running cleanup and then carrying on, logged out of the mirror halfway through.
+trap cleanup EXIT
 
 # The mirror is a private package of this organisation, so it has to be read as somebody.
 # Skipped outright when the mirror has been pointed somewhere other than ghcr.io, where a GitHub
@@ -132,26 +160,52 @@ if [ "${mirror_state}" = "anonymous" ] && [ "${MIRROR_REPO#ghcr.io/}" != "${MIRR
         # public, so it is the first thing to check when the reads below come back empty-handed.
         echo "No ghcr.io credential was given, so ${MIRROR_REPO} can only be read anonymously."
     else
-        logged_in_to_ghcr="yes"
         if printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin >/dev/null 2>&1; then
+            # Only once the login has succeeded: logging out after a failed one would erase a
+            # ghcr.io credential that was in this runner's docker config before, not one of ours.
+            logged_in_to_ghcr="yes"
             mirror_state="authenticated"
         else
-            echo "Could not authenticate to ghcr.io as '${GHCR_USER}'."
+            echo "Could not authenticate to ghcr.io as '$(single_line "${GHCR_USER}")'."
             mirror_state="auth-failed"
         fi
     fi
 fi
 
+# The manifest of <reference>, on stdout, with what the registry said about it in inspect_errors.
+# Asked again after a failure unless the answer was one, rather than a hiccup: a tag the registry does
+# not have, or a credential it refuses, comes back the same however often it is asked, whereas a 5xx
+# or a dropped connection passed on as it is would send the distro to the fallback -- rate-limited
+# Docker Hub content -- or, where there is none, fail its jobs, over one bad second.
+readonly INSPECT_ATTEMPTS=3
+inspect_manifest() {
+    local attempt=1 output
+    while :; do
+        if output="$(docker buildx imagetools inspect "$1" 2>"${inspect_errors}")"; then
+            printf '%s\n' "${output}"
+            return 0
+        fi
+        if [ "${attempt}" -ge "${INSPECT_ATTEMPTS}" ] ||
+            grep -qiE 'not found|manifest unknown|unauthorized|denied|forbidden' "${inspect_errors}"; then
+            return 1
+        fi
+        sleep $((attempt * 5))
+        attempt=$((attempt + 1))
+    done
+}
+
 distros_json=""
 images_json=""
+# Distros sent to the fallback, and, where there is none, those left to pull the mirror's tag unpinned
 unavailable=""
+unpinned=""
 
 # Word splitting on ROS_DISTROS is wanted; globbing is not, or a "*" in the list would expand
 # against the working directory and feed filenames into an image reference.
 set -f
 for distro in ${ROS_DISTROS}; do
     if ! [[ "${distro}" =~ ${DISTRO_PATTERN} ]]; then
-        echo "'${distro}' is not a plain ROS distro name; refusing to put it in an image"
+        echo "'$(single_line "${distro}")' is not a plain ROS distro name; refusing to put it in an image"
         echo "reference or a matrix that interpolates it into shell."
         exit 1
     fi
@@ -161,7 +215,7 @@ for distro in ${ROS_DISTROS}; do
         # imagetools, not "docker pull": it reads the manifest and nothing else, so resolving five
         # distros costs a few HTTP requests rather than five image downloads on a runner that will
         # not use them.
-        if inspected="$(docker buildx imagetools inspect "${MIRROR_REPO}:${distro}" 2>"${inspect_errors}")"; then
+        if inspected="$(inspect_manifest "${MIRROR_REPO}:${distro}")"; then
             # Pin what the matrix pulls to the digest resolved here, so all of its jobs run the
             # identical image even if the tag is re-pushed underneath them, and so the log records
             # exactly what was run.
@@ -184,7 +238,7 @@ for distro in ${ROS_DISTROS}; do
                 echo "${distro}: the mirror's manifest carries no usable digest"
             elif [ -n "${platforms}" ] && ! printf '%s\n' "${platforms}" | grep -qxF "${REQUIRED_PLATFORM}"; then
                 echo "${distro}: ${MIRROR_REPO}:${distro} states no ${REQUIRED_PLATFORM} image; it states" \
-                    "$(printf '%s' "${platforms}" | tr '\n' ' ')"
+                    "$(single_line "$(printf '%s' "${platforms}" | tr '\r\n' '  ')")"
             else
                 image="${MIRROR_REPO}@${digest}"
                 echo "${distro}: ${MIRROR_REPO}:${distro} -> ${image}"
@@ -195,7 +249,7 @@ for distro in ${ROS_DISTROS}; do
             # warning at the end of this script cannot tell them apart by itself.
             echo "${distro}: could not read ${MIRROR_REPO}:${distro}:"
             if [ -s "${inspect_errors}" ]; then
-                sed 's/^/    | /' "${inspect_errors}"
+                prefixed_lines "${inspect_errors}"
             else
                 echo "    (the command failed without saying why)"
             fi
@@ -203,17 +257,21 @@ for distro in ${ROS_DISTROS}; do
     fi
 
     if [ -z "${image}" ]; then
-        unavailable="${unavailable}${distro} "
-
-        if [ -z "${FALLBACK_REPO}" ]; then
+        if [ -n "${FALLBACK_REPO}" ]; then
+            unavailable="${unavailable}${distro} "
+            image="${FALLBACK_REPO}:${distro}"
+            echo "${distro}: ${image} (fallback)"
+        else
             # No second choice was configured, so quietly running something else is not an option
-            # this script gets to take.
-            echo "${distro}: ${MIRROR_REPO} cannot serve it and no fallback is configured."
-            exit 1
+            # this script gets to take -- and neither is failing the other distros' jobs over this
+            # one, which exiting here would do: every job of the matrix needs this one's output.
+            # So the distro gets the mirror's own tag, unpinned, and its jobs pull that, failing on
+            # it if the mirror truly cannot serve it -- as they would with no resolver at all -- or
+            # running as usual if it was only this read that failed.
+            unpinned="${unpinned}${distro} "
+            image="${MIRROR_REPO}:${distro}"
+            echo "${distro}: ${image} (unpinned: no fallback is configured)"
         fi
-
-        image="${FALLBACK_REPO}:${distro}"
-        echo "${distro}: ${image} (fallback)"
     fi
 
     distros_json="${distros_json}${distros_json:+, }\"${distro}\""
@@ -239,11 +297,11 @@ if [ -n "${unavailable}" ]; then
     case "${mirror_state}" in
     auth-failed)
         warning_title="ROS base image mirror unreachable"
-        warning_reason="Could not authenticate to ghcr.io as '${GHCR_USER}', so ${MIRROR_REPO} was not consulted at all. The mirror itself may be fine; check the job's token and its packages: read permission."
+        warning_reason="Could not authenticate to ghcr.io as '$(single_line "${GHCR_USER}")', so ${MIRROR_REPO} was not consulted at all. The mirror itself may be fine; check the job's token and its packages: read permission."
         ;;
     malformed)
         warning_title="ROS base image mirror unusable"
-        warning_reason="'$(single_line "${MIRROR_REPO_AS_GIVEN}")' is not a usable repository name, so no mirror was consulted at all. This is what a fork with no mirror of its own looks like; point one out with the CONTAINER_REGISTRY_PREFIX variable."
+        warning_reason="'${mirror_shown}' is not a usable repository name, so no mirror was consulted at all. Check the CONTAINER_REGISTRY_PREFIX variable."
         ;;
     anonymous)
         warning_title="ROS base image fallback used"
@@ -251,11 +309,22 @@ if [ -n "${unavailable}" ]; then
         ;;
     *)
         warning_title="ROS base image fallback used"
-        warning_reason="${MIRROR_REPO} served no usable image. If it is merely missing them, run the 'Mirror ROS base images' workflow of provizio_radar_api_ros2 to repopulate it."
+        if [ "${MIRROR_REPO}" = "${ORGANISATION_MIRROR_REPO}" ]; then
+            warning_reason="${MIRROR_REPO} served no usable image. If it is merely missing them, run the 'Mirror ROS base images' workflow of provizio_radar_api_ros2 to repopulate it."
+        else
+            # With no CONTAINER_REGISTRY_PREFIX the mirror is named after the repository's owner, so
+            # for a fork it is a namespace of the fork's own that nothing populates.
+            warning_reason="${MIRROR_REPO} served no usable image. A fork has no mirror of its own unless one is set up: point the CONTAINER_REGISTRY_PREFIX variable at one to take the images from there only, or leave the fallback to serve them."
+        fi
         ;;
     esac
 
-    echo "::warning title=${warning_title}::${warning_reason} Affected: ${unavailable}- falling back to ${FALLBACK_REPO}, which serves Docker Hub content and is rate-limited per source IP. This job's log says what happened for each distro."
+    echo "::warning title=${warning_title}::${warning_reason} Affected: ${unavailable}- falling back to ${FALLBACK_REPO}, which serves Docker Hub content and is rate-limited per source IP. This job's log says what the registry answered for each distro."
+fi
+
+# Unpinned distros are only possible with no fallback, which is an operator's pinned registry
+if [ -n "${unpinned}" ]; then
+    echo "::warning title=ROS base image not pinned::${MIRROR_REPO} served no usable image for: ${unpinned}- and no fallback is configured, so their jobs pull the tag from it unpinned, and fail there if it cannot serve them. The other distros' jobs are unaffected. This job's log says what the registry answered for each distro."
 fi
 
 # Both values are single-line by construction: every distro matched DISTRO_PATTERN and every
