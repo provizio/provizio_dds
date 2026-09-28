@@ -91,6 +91,40 @@ if(WIN32)
     return()
 endif()
 
+# The rpath the Fast-DDS library was installed with: the relative entries it is built with, and no
+# path into this build tree (see install_rpath_test.cmake). On macOS it is what
+# install_rpath_as_given.cmake keeps. Read with the tool the openssl_runtime step reads libraries with.
+if(APPLE)
+    set(_rpath_tool "${CMAKE_OTOOL}")
+    if(NOT _rpath_tool)
+        find_program(PROVIZIO_DDS_OTOOL otool)
+        set(_rpath_tool "${PROVIZIO_DDS_OTOOL}")
+    endif()
+    set(_rpath_tool_kind otool)
+    set(_rpath_origin "@loader_path")
+else()
+    set(_rpath_tool "${CMAKE_READELF}")
+    if(NOT _rpath_tool)
+        find_program(PROVIZIO_DDS_READELF NAMES readelf llvm-readelf)
+        set(_rpath_tool "${PROVIZIO_DDS_READELF}")
+    endif()
+    set(_rpath_tool_kind readelf)
+    set(_rpath_origin "$ORIGIN")
+endif()
+if(_rpath_tool)
+    add_test(NAME fast_dds_install_rpath
+             COMMAND "${CMAKE_COMMAND}"
+                     "-DLIBRARY=${FAST_DDS_INSTALL_DIR}/lib/libfastdds${CMAKE_SHARED_LIBRARY_SUFFIX}"
+                     "-DTOOL=${_rpath_tool}" "-DTOOL_KIND=${_rpath_tool_kind}"
+                     "-DEXPECTED=${_rpath_origin}|${_rpath_origin}/../lib|${_rpath_origin}/${PROVIZIO_DDS_PRIVATE_LIB_DIR}"
+                     "-DBUILD_DIR=${CMAKE_BINARY_DIR}"
+                     -P "${CMAKE_CURRENT_LIST_DIR}/install_rpath_test.cmake")
+    # Seconds. One run of readelf or otool.
+    set_tests_properties(fast_dds_install_rpath PROPERTIES TIMEOUT 60)
+else()
+    message(STATUS "No ${_rpath_tool_kind} to read Fast-DDS's rpath with; skipping fast_dds_install_rpath")
+endif()
+
 add_executable(timer_unregister_test timer_unregister_test.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(timer_unregister_test PUBLIC provizio_dds Threads::Threads)

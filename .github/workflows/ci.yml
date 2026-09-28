@@ -437,6 +437,28 @@ jobs:
         if: always()
         run: rm -rf /tmp/provizio_dds.venv
 
+  # A C++ consumer's install from the prebuilt binaries -- the plain Release configure of an unmodified
+  # checkout, the commonest way provizio_dds is consumed -- which no other job makes: the pip jobs take
+  # the prebuilt binaries through setup.py, and every other C++ job builds from source. Checks that the
+  # install keeps the OpenSSL runtime the binaries carry out of lib/, where every other program on the
+  # machine would load it, and that the installed Fast-DDS still loads it from where it went.
+  test-nix-bin-cache-install:
+    name: Test installing the prebuilt binaries
+    needs: commit-cache
+    runs-on: ${{matrix.runner}}
+    strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
+      matrix:
+        # jetson-20.04 for the aarch64 binaries, whose OpenSSL (1.1) a newer host does not have at all
+        runner: [ubuntu-latest, ubuntu-22.04, jetson-20.04]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "OFF" "OFF"
+      - run: .github/workflows/test_bin_cache_install.sh
+
   # provizio_dds built against a Fast-DDS already installed on the system (LOOK_FOR_FAST_DDS=TRUE), the
   # way a consumer who ships their own Fast-DDS builds it, instead of against the one provizio_dds
   # builds from source. install_dependencies.sh puts stock upstream Fast-DDS in /usr.

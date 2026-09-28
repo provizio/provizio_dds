@@ -57,6 +57,30 @@ set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binari
 set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
 set(DISABLE_EIGEN OFF CACHE BOOL "Force plain-CPU linear algebra in point clouds accumulation for this build even when Eigen3 is installed (consumers make their own choice at compile time -- the accumulation maths path is header-only)")
 
+# Where, under the lib/ of an install (Linux and macOS), the OpenSSL runtime Fast-DDS loads goes: a
+# directory of provizio_dds's own, which Fast-DDS's libraries find through an rpath entry of theirs,
+# rather than lib/ itself. An install prefix's lib/ is often on every program's library search path
+# -- /usr/local/lib is, on most Linux distributions -- and an OpenSSL of ours there would be loaded
+# in place of the system's by every program that has no rpath: curl, ssh, python's ssl module, with
+# our build's certificates and configuration; installed over the system's own if it lived there too.
+# build_cache.sh gives the prebuilt binaries the same rpath entry, so it names this directory as well.
+set(PROVIZIO_DDS_PRIVATE_LIB_DIR "provizio_dds")
+
+# What an install(DIRECTORY) of a directory holding that runtime into lib/ is given to leave it out,
+# and what installs it into lib/${PROVIZIO_DDS_PRIVATE_LIB_DIR} instead: the OpenSSL libraries in
+# <directory> as they are at install time -- whatever the openssl_runtime step placed there after this
+# configure, or whatever the prebuilt binaries carry -- rather than as a configure-time list of them.
+set(PROVIZIO_DDS_OPENSSL_RUNTIME_EXCLUDES PATTERN "libssl*" EXCLUDE PATTERN "libcrypto*" EXCLUDE)
+function(provizio_dds_install_openssl_runtime directory)
+    install(CODE "
+        file(GLOB _provizio_dds_openssl_runtime \"${directory}/libssl*\" \"${directory}/libcrypto*\")
+        if(_provizio_dds_openssl_runtime)
+            file(INSTALL \${_provizio_dds_openssl_runtime}
+                DESTINATION \"\${CMAKE_INSTALL_PREFIX}/lib/${PROVIZIO_DDS_PRIVATE_LIB_DIR}\")
+        endif()
+    ")
+endfunction()
+
 # A Python package build -- PYTHON_BINDINGS with PYTHON_PACKAGES_INSTALL_DIR, which is how setup.py
 # configures the pip package, and how the prebuilt Python binaries it unpacks are built -- always
 # uses provizio_dds's own Fast-DDS: the one built from source here, with the fixes cmake/fast_dds/
@@ -567,15 +591,22 @@ if(HAS_BIN_CACHE)
         install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
             PATTERN "cmake" EXCLUDE)
         install(DIRECTORY "${BIN_CACHE_PATH}/bin/" DESTINATION bin)
-    elseif(DONT_INSTALL_STDCPP_LIBS)
-        install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
-            PATTERN "libstdc++.so*" EXCLUDE
-            PATTERN "libgcc_s.so*" EXCLUDE
-            PATTERN "cmake" EXCLUDE
-        )
     else()
-        install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
-            PATTERN "cmake" EXCLUDE)
+        # The prebuilt binaries carry the OpenSSL their Fast-DDS was built against, next to it, and
+        # it goes where an install keeps that apart (see PROVIZIO_DDS_PRIVATE_LIB_DIR)
+        if(DONT_INSTALL_STDCPP_LIBS)
+            install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
+                PATTERN "libstdc++.so*" EXCLUDE
+                PATTERN "libgcc_s.so*" EXCLUDE
+                PATTERN "cmake" EXCLUDE
+                ${PROVIZIO_DDS_OPENSSL_RUNTIME_EXCLUDES}
+            )
+        else()
+            install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
+                PATTERN "cmake" EXCLUDE
+                ${PROVIZIO_DDS_OPENSSL_RUNTIME_EXCLUDES})
+        endif()
+        provizio_dds_install_openssl_runtime("${BIN_CACHE_PATH}/lib")
     endif()
 
     if(PYTHON_BINDINGS)
@@ -870,9 +901,14 @@ else(HAS_BIN_CACHE)
             # every one of them, and $ORIGIN/../lib covers an executable installed beside them in
             # bin/. Naming it absolutely as well only bakes this build tree into libraries that
             # install(DIRECTORY) then ships verbatim -- a path that means nothing on any other
-            # machine, which is the same fault the rpath above was just cleared of. On macOS the
-            # rpath is a ;-list, passed as one argument in the form LIST_SEPARATOR takes.
-            string(REPLACE ";" "|" _FAST_DDS_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}")
+            # machine, which is the same fault the rpath above was just cleared of. What is appended
+            # is PROVIZIO_DDS_PRIVATE_LIB_DIR next to them, where an install keeps the OpenSSL runtime
+            # placed next to Fast-DDS apart from the rest of lib/ (see the install rules below). On
+            # macOS Fast-DDS would replace the whole value with the absolute path above but for
+            # install_rpath_as_given.cmake. The rpath is a ;-list there, passed as one argument in the
+            # form LIST_SEPARATOR takes.
+            set(_FAST_DDS_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_DIV}${RPATH_ORIGIN}/${PROVIZIO_DDS_PRIVATE_LIB_DIR}")
+            string(REPLACE ";" "|" _FAST_DDS_INSTALL_RPATH "${_FAST_DDS_INSTALL_RPATH}")
             list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${_FAST_DDS_INSTALL_RPATH}")
         endif()
         if(PROVIZIO_DDS_SANITIZER_FLAGS)
@@ -1046,16 +1082,19 @@ else(HAS_BIN_CACHE)
         # The shared OpenSSL libraries Fast-DDS loads go next to its own, where the loader looks for
         # them ahead of the system's directories, so that it loads the OpenSSL Fast-DDS was built
         # against rather than another of the same name: built against 3.6, say, and run on the
-        # distribution's 3.0. From there the install below and a consumer's build tree take them
-        # along. Which ones is read from Fast-DDS's installed libraries (see openssl_runtime.cmake),
-        # after the fact, so that it is what they do load: on Windows the OpenSSL DLLs they import,
-        # the DLL search starting in the executable's directory; on Linux those they look up by
-        # SONAME, through their $ORIGIN RUNPATH (which LD_LIBRARY_PATH, or a library of the same
-        # SONAME loaded already, still comes before), unless found in the system's directories, where
-        # the loader looks anyway; on macOS those they name by an @rpath-relative install name,
-        # through their @loader_path rpath, while one named by an absolute path (Homebrew's) is
-        # loaded from that path whatever lies next to Fast-DDS. A static OpenSSL is loaded as none.
-        # The step runs whatever it finds, to remove what an earlier configuration placed there.
+        # distribution's 3.0. From there the Python package and a consumer's build tree take them
+        # along as they are, and the install below into lib/${PROVIZIO_DDS_PRIVATE_LIB_DIR}, out of
+        # the way of every other program (see PROVIZIO_DDS_PRIVATE_LIB_DIR). Which ones is read from
+        # Fast-DDS's installed libraries (see openssl_runtime.cmake), after the fact, so that it is
+        # what they do load: on Windows the OpenSSL DLLs they import, the DLL search starting in the
+        # executable's directory; on Linux those they look up by SONAME, through their $ORIGIN and
+        # $ORIGIN/${PROVIZIO_DDS_PRIVATE_LIB_DIR} RUNPATH (which LD_LIBRARY_PATH, or a library of the
+        # same SONAME loaded already, still comes before), unless found in the system's directories,
+        # where the loader looks anyway; on macOS those they name by an @rpath-relative install
+        # name, through the same entries of their rpath, which Fast-DDS keeps there only thanks to
+        # install_rpath_as_given.cmake, while one named by an absolute path (Homebrew's) is loaded
+        # from that path whatever lies next to Fast-DDS. A static OpenSSL is loaded as none. The step
+        # runs whatever it finds, to remove what an earlier configuration placed there.
         set(_OPENSSL_SYSTEM_DIRS)
         if(WIN32)
             set(_OPENSSL_RUNTIME_DESTINATION "${FAST_DDS_INSTALL_DIR}/bin")
@@ -1090,7 +1129,11 @@ else(HAS_BIN_CACHE)
         endif()
         # Inputs of the step besides the script, which no reinstall of Fast-DDS would follow: the
         # libraries it could place, but the system's, which it places none of. Only files that are
-        # there, since a missing input would fail the build (a dangling link, one removed since).
+        # there, since a missing input would fail the build (a dangling link). And globbed with
+        # CONFIGURE_DEPENDS, so that the build itself notices when that set changes -- an OpenSSL
+        # upgraded, moved or uninstalled since this configure -- and configures again, dropping the
+        # file gone from the inputs: an input that is no longer there fails every build with "missing
+        # and no known rule to make it", and nothing else would ever configure the tree again.
         set(_OPENSSL_SYSTEM_DIRS_REAL)
         foreach(_OPENSSL_SYSTEM_DIR IN LISTS _OPENSSL_SYSTEM_DIRS)
             get_filename_component(_OPENSSL_SYSTEM_DIR "${_OPENSSL_SYSTEM_DIR}" REALPATH)
@@ -1108,7 +1151,7 @@ else(HAS_BIN_CACHE)
             get_filename_component(_OPENSSL_RUNTIME_DIR_REAL "${_OPENSSL_RUNTIME_DIR}" REALPATH)
             if(NOT _OPENSSL_RUNTIME_DIR_REAL IN_LIST _OPENSSL_SYSTEM_DIRS_REAL)
                 foreach(_OPENSSL_RUNTIME_PATTERN IN LISTS _OPENSSL_RUNTIME_PATTERNS)
-                    file(GLOB _OPENSSL_RUNTIME_DIR_FILES "${_OPENSSL_RUNTIME_DIR}/${_OPENSSL_RUNTIME_PATTERN}")
+                    file(GLOB _OPENSSL_RUNTIME_DIR_FILES CONFIGURE_DEPENDS "${_OPENSSL_RUNTIME_DIR}/${_OPENSSL_RUNTIME_PATTERN}")
                     foreach(_OPENSSL_RUNTIME_FILE IN LISTS _OPENSSL_RUNTIME_DIR_FILES)
                         if(EXISTS "${_OPENSSL_RUNTIME_FILE}")
                             list(APPEND _OPENSSL_RUNTIME_INPUTS "${_OPENSSL_RUNTIME_FILE}")
@@ -1371,8 +1414,12 @@ else(HAS_BIN_CACHE)
             install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/bin/" DESTINATION bin
                 FILES_MATCHING PATTERN "*.dll")
         else()
+            # The OpenSSL runtime the openssl_runtime step placed next to Fast-DDS goes where an
+            # install keeps it apart (see PROVIZIO_DDS_PRIVATE_LIB_DIR)
             install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib
-                FILES_MATCHING PATTERN "*.so*" PATTERN "*.dylib*" PATTERN "cmake" EXCLUDE)
+                FILES_MATCHING PATTERN "*.so*" PATTERN "*.dylib*" PATTERN "cmake" EXCLUDE
+                ${PROVIZIO_DDS_OPENSSL_RUNTIME_EXCLUDES})
+            provizio_dds_install_openssl_runtime("${FAST_DDS_INSTALL_DIR}/lib")
         endif(WIN32)
     endif(FAST_DDS_INSTALL_DIR)
 
@@ -1896,21 +1943,15 @@ else(HAS_BIN_CACHE)
             ${PROVIZIO_DDS_PYTHON_LIBS}
         )
 
-        if(FAST_DDS_INSTALL_DIR)
-            file(GLOB FASTDDS_LIBS "${FAST_DDS_INSTALL_DIR}/lib/*${CMAKE_SHARED_LIBRARY_SUFFIX}*")
-            if(WIN32)
-                # On Windows, DLLs are in bin/, not lib/
-                file(GLOB FASTDDS_BIN_LIBS "${FAST_DDS_INSTALL_DIR}/bin/*.dll")
-                list(APPEND FASTDDS_LIBS ${FASTDDS_BIN_LIBS})
-            endif()
-            set(PROVIZIO_DDS_ALL_PYTHON_LIBS ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${FASTDDS_LIBS})
-        endif(FAST_DDS_INSTALL_DIR)
-
+        # The libraries of a Fast-DDS built here -- its own, and the OpenSSL runtime placed next to
+        # them -- are not listed here: test/python copies them at build time, as that build left
+        # them. A list made now would be empty on a first configure, before Fast-DDS is built, and on
+        # a later one would hold what an earlier build left there: an OpenSSL the openssl_runtime
+        # step then removes, say, whose copy would fail the build.
         if(WIN32)
             # On Windows, Python extension modules (.pyd) need the provizio_dds DLLs at runtime.
-            # These are added via generator expressions in test/python/CMakeLists.txt.
-            # Fast-DDS DLLs must also be copied because file(GLOB) above runs at configure
-            # time before ExternalProject builds them, so FASTDDS_LIBS is empty.
+            # These are added via generator expressions in test/python/CMakeLists.txt, and the
+            # Fast-DDS DLLs with them where Fast-DDS was found rather than built.
             set(PROVIZIO_DDS_PYTHON_EXTRA_DLLS provizio_dds provizio_dds_types)
             if(TARGET fastcdr AND TARGET fastdds)
                 list(APPEND PROVIZIO_DDS_PYTHON_EXTRA_DLLS fastcdr fastdds)

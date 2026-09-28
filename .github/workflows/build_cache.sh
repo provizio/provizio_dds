@@ -124,7 +124,10 @@ else
         local lib_basename
         local lib_realpath
 
-        # Update RUNPATH to make it look for its dependencies in the same directory or ../lib/.
+        # Update RUNPATH to make it look for its dependencies in the same directory or ../lib/,
+        # and in provizio_dds/ next to it: an install of these binaries puts the OpenSSL they
+        # carry there, apart from the rest of lib/, as PROVIZIO_DDS_PRIVATE_LIB_DIR in the
+        # CMakeLists says why (the name must match it).
         # Applied to EVERY binary, provizio's own included. They used to be exempted as already
         # having the right RUNPATH, which was untrue for years: CMake was handing them a leading
         # empty element (the loader reads that as the current working directory) followed by the
@@ -133,7 +136,7 @@ else
         # the belt to that braces -- and the one place a future regression would be caught
         # whatever the generator did.
         # shellcheck disable=SC2016
-        patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib' "${binary}"
+        patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/provizio_dds' "${binary}"
 
         # Use ldd to find shared libraries the binary depends on
         ldd "${binary}" | awk '/=>/ { print $(NF-1) }' | while read -r lib; do
