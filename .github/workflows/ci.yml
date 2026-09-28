@@ -498,19 +498,51 @@ jobs:
       # LOOK_FOR_FAST_DDS falls back to building Fast-DDS from source when it finds none, and says so only
       # in a configure line nobody reads -- which would make this one more from-source job, testing
       # nothing it is here for, as it did for as long as it passed no LOOK_FOR_FAST_DDS at all. So check
-      # that the configure took the Fast-DDS in /usr.
+      # that the configure took the Fast-DDS in /usr: that it found it there, and that it built none of
+      # its own -- a Fast-DDS package found but not usable (its configuration setting itself not found)
+      # leaves fastdds_DIR pointing at it all the same, while the fallback is what creates the build
+      # directory checked for.
       - name: Check the preinstalled Fast-DDS was used
         run: |
-          if ! grep -E '^fastdds_DIR:PATH=/usr/' build/CMakeCache.txt; then
-            echo "::error::provizio_dds did not build against the Fast-DDS preinstalled in /usr ($(grep '^fastdds_DIR' build/CMakeCache.txt))"
+          if ! grep -E '^fastdds_DIR:PATH=/usr/' build/CMakeCache.txt || [ -d build/fast_dds_build ]; then
+            echo "::error::provizio_dds did not build against the Fast-DDS preinstalled in /usr ($(grep '^fastdds_DIR' build/CMakeCache.txt); build/fast_dds_build $([ -d build/fast_dds_build ] && echo exists || echo 'does not exist'))"
             exit 1
           fi
       - run: .github/workflows/test.sh
 
-  # No pip-package counterpart of the job above, deliberately: a pip package always bundles
-  # provizio_dds's own, patched Fast-DDS -- the configure refuses LOOK_FOR_FAST_DDS for one (see the
-  # check near the top of CMakeLists.txt) -- so a Fast-DDS preinstalled on the machine plays no part
-  # in it.
+  # The pip package built from source on Linux: what a user's pip install falls back to whenever no
+  # prebuilt binaries fit their host or configuration, and the only way it goes when CMAKE_ARGUMENTS
+  # is set -- which is how this job forces it, as prebuilt binaries would otherwise be taken wherever
+  # they exist. Every other Linux pip job checks out the commit CI publishes them in, and fails
+  # unless they were used, so this is the one covering setup.py's own configure and build of a pip
+  # package (PYTHON_PIP_PACKAGE), with the Fast-DDS it bundles, on Linux. (macOS pip jobs always
+  # build from source, there being no prebuilt binaries for it.)
+  #
+  # There is no job for a pip package against a preinstalled Fast-DDS, deliberately: a pip package
+  # always bundles provizio_dds's own, patched Fast-DDS -- the configure refuses LOOK_FOR_FAST_DDS
+  # for one -- and takes nothing of the Fast-DDS stack from the system, not even foonathan_memory
+  # (pip_package_vendored_foonathan_memory covers that part).
+  test-nix-pip-package-from-source:
+    name: Test pip package built from source
+    runs-on: ${{matrix.runner}}
+    strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-22.04]
+        cc: [gcc, clang]
+    env:
+      CC: ${{matrix.cc}}
+      STATIC_ANALYSIS: OFF
+      # setup.py looks for no prebuilt binaries with CMAKE_ARGUMENTS set, and this one keeps the
+      # configure from taking the ones CMake would find by itself
+      CMAKE_ARGUMENTS: -DIGNORE_BIN_CACHE=ON
+      # And test_pip_package.sh checks it did build from source
+      PIP_PACKAGE_BUILD: source
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}"
+      - run: .github/workflows/test_pip_package.sh
 
   resolve-ros-base-image:
     name: Resolve the ROS base image
