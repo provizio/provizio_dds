@@ -19,6 +19,7 @@ include(FetchContent)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/imported_targets.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/openssl_package.cmake")
 
 # Configuration
 set(PROVIZIO_DDS_IDLS_VERSION "2.1.1" CACHE STRING "provizio_dds_idls version")
@@ -727,8 +728,6 @@ else(HAS_BIN_CACHE)
             # as packages of their own — a static OpenSSL's zlib — which FindOpenSSL knows nothing
             # of. Fast-DDS is given a FindOpenSSL loading that same configuration, in the configuration
             # (build type) provizio_dds consumes it in.
-            get_filename_component(PROVIZIO_DDS_OPENSSL_CONFIG_DIR "${OpenSSL_CONFIG}" DIRECTORY)
-            set(PROVIZIO_DDS_OPENSSL_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
             string(TOUPPER "${CMAKE_BUILD_TYPE}" _OPENSSL_BUILD_TYPE_UPPER)
             if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
                 # Fast-DDS builds as Release then, for the release CRT, which a Debug package's OpenSSL
@@ -743,8 +742,7 @@ else(HAS_BIN_CACHE)
                 set(PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG "${CMAKE_BUILD_TYPE}")
             endif()
             set(PROVIZIO_DDS_OPENSSL_MODULE_DIR "${CMAKE_CURRENT_BINARY_DIR}/fast_dds_openssl")
-            configure_file("${PROJECT_SOURCE_DIR}/cmake/fast_dds/FindOpenSSL.cmake.in"
-                "${PROVIZIO_DDS_OPENSSL_MODULE_DIR}/FindOpenSSL.cmake" @ONLY)
+            provizio_dds_write_openssl_find_module("${PROVIZIO_DDS_OPENSSL_MODULE_DIR}" "${PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG}")
         else()
             # Found by CMake's FindOpenSSL, which Fast-DDS runs too. Given a root, it searches that
             # alone; given the files it found — the cache entries it keeps them in — it takes exactly
@@ -1075,7 +1073,9 @@ else(HAS_BIN_CACHE)
         if(PROVIZIO_DDS_OPENSSL_MODULE_DIR)
             # The FindOpenSSL given to Fast-DDS is an input of its configure that its arguments do not
             # show: when it changes (OpenSSL found as another package), an existing build has to
-            # configure again for Fast-DDS to link that one. configure_file() rewrites it only then.
+            # configure again for Fast-DDS to link that one. configure_file() rewrites it only when
+            # its text changes, which includes a package location first cached after it was written
+            # (see openssl_package.cmake).
             ExternalProject_Add_StepDependencies(libfast_dds configure
                 "${PROVIZIO_DDS_OPENSSL_MODULE_DIR}/FindOpenSSL.cmake")
         endif()
