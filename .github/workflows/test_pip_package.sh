@@ -119,7 +119,7 @@ source)
 *)
     if [ "$(uname -s)" != "Darwin" ]; then
         if ! grep -q "Bin cache located and will be used" "${PIP_LOG}"; then
-            echo "::error::Binary cache was NOT used during pip install — check cache artifacts and CMake config"
+            echo "::error::Binary cache was NOT used during pip install - check cache artifacts and CMake config"
             exit 1
         fi
         echo "Verified: binary cache was used"

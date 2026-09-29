@@ -837,7 +837,7 @@ jobs:
           . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
           python -m pip install -v . 2>&1 | Tee-Object -FilePath "$env:TEMP\pip_install.log"
           if (-not (Select-String -Path "$env:TEMP\pip_install.log" -Pattern "Bin cache located and will be used" -Quiet)) {
-            Write-Error "Binary cache was NOT used during pip install — check cache artifacts and CMake config"
+            Write-Error "Binary cache was NOT used during pip install - check cache artifacts and CMake config"
             exit 1
           }
           Write-Host "Verified: binary cache was used"
