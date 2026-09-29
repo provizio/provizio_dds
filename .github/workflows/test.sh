@@ -103,10 +103,10 @@ if grep -q '^PYTHON_BINDINGS:BOOL=ON' CMakeCache.txt &&
         export PROVIZIO_DDS_LEGACY_PYTHON
         echo "Cross-version compat enabled: legacy python at ${PROVIZIO_DDS_LEGACY_PYTHON}"
     elif [[ "${CI:-}" == "true" ]]; then
-        echo "::error::Failed to set up legacy provizio_dds 1.10.1 venv in CI — cross-version compat would silently skip, which defeats the matrix"
+        echo "::error::Failed to set up legacy provizio_dds 1.10.1 venv in CI - cross-version compat would silently skip, which defeats the matrix"
         exit 1
     else
-        echo "Warning: Failed to set up legacy provizio_dds 1.10.1 venv — cross_version_compat_test will report Skipped, not run"
+        echo "Warning: Failed to set up legacy provizio_dds 1.10.1 venv - cross_version_compat_test will report Skipped, not run"
     fi
 fi
 
