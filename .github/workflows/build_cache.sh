@@ -26,12 +26,27 @@ STATIC_ANALYSIS=${3:-"OFF"}
 
 cd "$(cd "$(dirname "$0")" && pwd -P)"
 
-# In aarch64, make sure libstdc++.so.6.0.28 is used, to be compatible with both Orin and TX2.
+# In aarch64, make sure libstdc++.so.6.0.28 is used: Ubuntu 20.04's own (JetPack 5), the oldest the
+# aarch64 binaries support, so that a newer toolchain on the machine building them cannot raise the
+# libstdc++ they require past what such a host provides.
 # The architecture comes from the POSIX "machine" option for the reason spelled out in
 # bin_cache_config_name.sh: the non-portable alternatives answer "unknown" on a uutils-coreutils
 # host, which would leave this guard silently never matching on the very hosts it protects.
 if [[ "$(uname -m)" == "aarch64" && "$(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6)" != "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28" ]]; then
   echo "/usr/lib/aarch64-linux-gnu/libstdc++.so.6 is $(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6) while /usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28 is required for compatibility!"
+  exit 1
+fi
+
+# patchelf rewrites every binary published from here: their RUNPATH below, and at install the names
+# they link Fast-DDS by (fully_qualified_fastdds_libs.sh). 0.14 is the oldest the published binaries
+# are rewritten with, the one of the Ubuntu 22.04 host building the x86_64 ones; an older one, such
+# as Ubuntu 20.04's 0.10, is refused here rather than left to rewrite them. install_dependencies.sh
+# builds 0.18 on 20.04, but only warns when it cannot download it.
+PATCHELF_MINIMUM="0.14"
+# || true: without patchelf the pipeline fails, and pipefail would end the script before it said why
+PATCHELF_FOUND="$(patchelf --version 2>/dev/null | awk '{print $2}' || true)"
+if [ "$(printf '%s\n' "${PATCHELF_MINIMUM}" "${PATCHELF_FOUND:-0}" | sort -V | head -n1)" != "${PATCHELF_MINIMUM}" ]; then
+  echo "patchelf ${PATCHELF_FOUND:-(none)} is older than ${PATCHELF_MINIMUM}, the oldest the prebuilt binaries are rewritten with"
   exit 1
 fi
 

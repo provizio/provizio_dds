@@ -57,11 +57,11 @@ cd ../../
 # intervenes, which is what this loop is for.
 #
 # Two guards, not one. The age guard alone was justified as "a self-hosted runner takes one
-# job at a time", which is not true of this workflow: jetson-18.04 and jetson-20.04 are one
-# physical machine sharing /tmp, and the ARM pip matrix alone schedules more than a dozen jobs
-# onto it. A from-source build for a new Python on ARM can legitimately exceed an hour, so the
-# age guard by itself would delete a SIBLING JOB's tree mid-build, and the failure would
-# surface somewhere else entirely.
+# job at a time", which is not a safe assumption for this workflow's self-hosted jetson pool:
+# its runners have shared a physical machine and its /tmp before, and the ARM pip matrix alone
+# schedules more than a dozen jobs onto it. A from-source build for a new Python on ARM can
+# legitimately exceed an hour, so the age guard by itself would delete a SIBLING JOB's tree
+# mid-build, and the failure would surface somewhere else entirely.
 #
 #   -user: only our own temporaries. install_dependencies.sh runs pip as root, so a cancelled
 #          job leaves root-owned pip-* trees the runner user cannot remove -- and under

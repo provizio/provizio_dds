@@ -18,7 +18,7 @@ jobs:
     runs-on: ${{matrix.runner}}
     strategy:
         matrix:
-            runner: [ubuntu-22.04, jetson-18.04]
+            runner: [ubuntu-22.04, jetson-20.04]
             build_type: [Release]
         # The one deliberate exception to the fail-fast: false the rest of this file states. All
         # five build-cache matrices feed the single commit-cache job, and it needs every one of
@@ -78,10 +78,10 @@ jobs:
 
   build-cache-python-arm:
     # ARM Python caches (actions/setup-python doesn't work on self-hosted ARM).
-    # Uses jetson-18.04 (same as build-cache) so libstdc++ 6.0.28 check passes.
+    # Uses jetson-20.04, as build-cache does, whose libstdc++ 6.0.28 build_cache.sh requires.
     # Requires python3.8 and python3.14 pre-installed with -dev and -venv on the runner.
     name: Build Python bin cache (ARM, Python ${{matrix.python-version}})
-    runs-on: jetson-18.04
+    runs-on: jetson-20.04
     strategy:
         matrix:
             build_type: [Release]

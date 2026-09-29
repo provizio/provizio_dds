@@ -52,7 +52,7 @@ need to touch — network auto-recovery, transports, discovery tuning, logging, 
 - Pip 3
 - All C++ (Windows) dependencies above (pip install builds from source)
 
-When using non-binary-prebuilt configurations (i.e. any macOS, Linux Debug, non-x64/non-aarch64, non-default provizio_dds_idls) all the C++ dependencies will also be required.
+When using non-binary-prebuilt configurations (i.e. any macOS, Linux Debug, non-x64/non-aarch64, non-default provizio_dds_idls) all the C++ dependencies will also be required. The Linux prebuilt binaries are also used only on a host that provides the glibc and libstdc++ symbol versions they reference, which each archive records and the configure checks; anywhere else, everything is built from source. They are built on Ubuntu 22.04 (x86_64) and Ubuntu 20.04, JetPack 5 (aarch64). Ubuntu 18.04 is not supported.
 
 There is a convenience Bash script to install all dependencies in *apt*-featuring Linux and macOS. In Linux it's to be executed with root privileges, f.e. using `sudo`.
 
