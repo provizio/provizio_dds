@@ -12,6 +12,14 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
+# What extracting an archive leaves in the cache directory (cmake/bin_cache/extract.cmake), on every
+# platform that extracts one: CMake in script mode
+add_test(NAME bin_cache_extract
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+            "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/extract"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/extract_test.cmake")
+set_tests_properties(bin_cache_extract PROPERTIES TIMEOUT 60)
+
 # The binary cache key is derived by bin_cache_config_name.sh, which only Linux uses and runs
 # (the Windows key comes from bin_cache_config_name.ps1, which reads the architecture from the
 # environment and is not exposed to any of this). Registering it elsewhere would only ever
