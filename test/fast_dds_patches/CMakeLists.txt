@@ -12,11 +12,16 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-# Tests for the build-time Fast-DDS patches in cmake/fast_dds/. They exercise Fast-DDS'
+# Tests for the build-time Fast-DDS patches and steps in cmake/fast_dds/. They exercise Fast-DDS'
 # own internals, so they only make sense where this project BUILT Fast-DDS and therefore
 # applied those patches: LOOK_FOR_FAST_DDS=TRUE (a system Fast-DDS) and the prebuilt bin
 # cache both skip the source build, and FAST_DDS_SOURCE_DIR is unset in exactly those cases.
-if(NOT FAST_DDS_SOURCE_DIR OR NOT EXISTS "${FAST_DDS_SOURCE_DIR}/src/cpp/rtps/resources/ResourceEvent.h")
+#
+# That variable is the whole condition, deliberately. The sources it names do not exist yet when
+# a fresh tree is configured -- ExternalProject downloads them during the build, before anything
+# here compiles against them -- so asking whether a file in them exists would skip every test
+# below on the single configure a CI job runs.
+if(NOT FAST_DDS_SOURCE_DIR)
     message(STATUS "Fast-DDS was not built from source here; skipping its patch tests")
     return()
 endif()
@@ -34,15 +39,62 @@ add_test(NAME fast_dds_patch_timer_migration
 # has to outlast a loaded CI runner.
 set_tests_properties(fast_dds_patch_timer_migration PROPERTIES TIMEOUT 60)
 
-# Not on Windows, where these tests CANNOT be linked. ResourceEvent and TimedEventImpl are
-# Fast-DDS internals with no export annotations, and Fast-DDS does not auto-export every
-# symbol -- verified against the shipped fastdds-3.6.lib, whose only ResourceEvent-related
-# export is RTPSParticipant::get_resource_event(); register_timer, unregister_timer,
-# init_thread, go_ready and update_interval_millisec appear nowhere in it. A private include
-# directory supplies declarations, not DLL exports, so the target would fail to link with
-# unresolved externals in every tests-enabled Windows build. Auto-exporting all of Fast-DDS is
-# not the answer either -- it exceeds Windows' 65535-symbol limit per DLL, which is precisely
-# why export_system_info.cmake exports one function by hand.
+# Coverage for the step placing the OpenSSL runtime Fast-DDS loads next to it
+# (cmake/fast_dds/openssl_runtime.cmake): pure CMake script mode as well, with a stand-in for the
+# tool reading a library's imports, so every platform's case runs on any of them.
+add_test(NAME fast_dds_openssl_runtime
+         COMMAND "${CMAKE_COMMAND}"
+                 "-DRUNTIME_SCRIPT=${PROJECT_SOURCE_DIR}/cmake/fast_dds/openssl_runtime.cmake"
+                 "-DFAKE_TOOL=${CMAKE_CURRENT_LIST_DIR}/openssl_runtime_fake_tool.cmake"
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/openssl_runtime"
+                 -P "${CMAKE_CURRENT_LIST_DIR}/openssl_runtime_test.cmake")
+# Seconds. It writes a few small files and runs CMake in script mode a few dozen times.
+set_tests_properties(fast_dds_openssl_runtime PROPERTIES TIMEOUT 60)
+
+# Coverage for the FindOpenSSL given to Fast-DDS when OpenSSL is found as a package
+# (cmake/fast_dds/openssl_package.cmake): configures of two small projects standing in for
+# provizio_dds and for the Fast-DDS build, with stand-in packages, so it needs neither a package
+# manager nor a compiler, and runs on every platform.
+add_test(NAME fast_dds_openssl_package
+         COMMAND "${CMAKE_COMMAND}"
+                 "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/openssl_package"
+                 "-DGENERATOR=${CMAKE_GENERATOR}"
+                 -P "${CMAKE_CURRENT_LIST_DIR}/openssl_package_test.cmake")
+# Seconds. Ten configures of projects that enable no language.
+set_tests_properties(fast_dds_openssl_package PROPERTIES TIMEOUT 120)
+
+# Line-ending coverage for every patch script (see cmake/fast_dds/patch_io.cmake): pure CMake
+# script mode as well, applying each to LF and CRLF renderings of the pristine sources, with the
+# script as checked out and as a CRLF copy. It runs everywhere Fast-DDS is built from source --
+# Windows above all, where file(WRITE) writes CRLF and a CRLF checkout of either repository is the
+# likeliest. It takes the patches from PROVIZIO_DDS_FAST_DDS_PATCHES (top-level CMakeLists.txt),
+# the one list the PATCH_COMMAND is made from, so every script the build applies is covered. Handed
+# over as a file, one entry per line: an entry holds the separators a command line would split it at.
+find_package(Git REQUIRED)
+set(_fast_dds_patches_file "${CMAKE_CURRENT_BINARY_DIR}/fast_dds_patches.txt")
+string(REPLACE ";" "\n" _fast_dds_patches "${PROVIZIO_DDS_FAST_DDS_PATCHES}")
+file(WRITE "${_fast_dds_patches_file}" "${_fast_dds_patches}\n")
+add_test(NAME fast_dds_patch_line_endings
+         COMMAND "${CMAKE_COMMAND}"
+                 "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+                 "-DFAST_DDS_SOURCE_DIR=${FAST_DDS_SOURCE_DIR}"
+                 "-DPATCH_DIR=${PROJECT_SOURCE_DIR}/cmake/fast_dds"
+                 "-DPATCHES_FILE=${_fast_dds_patches_file}"
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/line_endings"
+                 -P "${CMAKE_CURRENT_LIST_DIR}/line_endings_test.cmake")
+# Seconds. It renders eighteen small files with git and runs CMake in script mode forty-eight times.
+set_tests_properties(fast_dds_patch_line_endings PROPERTIES TIMEOUT 120)
+
+# Not on Windows, where these tests CANNOT be linked. ResourceEvent and TimedEventImpl, like
+# StatefulWriter and RTPSDomainImpl, are Fast-DDS internals with no export annotations, and
+# Fast-DDS does not auto-export every symbol -- verified against the shipped fastdds-3.6.lib,
+# whose only ResourceEvent-related export is RTPSParticipant::get_resource_event();
+# register_timer, unregister_timer, init_thread, go_ready and update_interval_millisec appear
+# nowhere in it. A private include directory supplies declarations, not DLL exports, so the
+# targets would fail to link with unresolved externals in every tests-enabled Windows build.
+# Auto-exporting all of Fast-DDS is not the answer either -- it exceeds Windows' 65535-symbol
+# limit per DLL, which is precisely why export_system_info.cmake exports one function by hand.
 #
 # The patched code itself is platform-independent, and the sanitizers that turn its regression
 # into a hard failure rather than silent corruption only run on Linux, so this costs no real
@@ -50,6 +102,40 @@ set_tests_properties(fast_dds_patch_timer_migration PROPERTIES TIMEOUT 60)
 if(WIN32)
     message(STATUS "Fast-DDS patch tests need its unexported internals; skipping on Windows")
     return()
+endif()
+
+# The rpath the Fast-DDS library was installed with: the relative entries it is built with, and no
+# path into this build tree (see install_rpath_test.cmake). On macOS it is what
+# install_rpath_as_given.cmake keeps. Read with the tool the openssl_runtime step reads libraries with.
+if(APPLE)
+    set(_rpath_tool "${CMAKE_OTOOL}")
+    if(NOT _rpath_tool)
+        find_program(PROVIZIO_DDS_OTOOL otool)
+        set(_rpath_tool "${PROVIZIO_DDS_OTOOL}")
+    endif()
+    set(_rpath_tool_kind otool)
+    set(_rpath_origin "@loader_path")
+else()
+    set(_rpath_tool "${CMAKE_READELF}")
+    if(NOT _rpath_tool)
+        find_program(PROVIZIO_DDS_READELF NAMES readelf llvm-readelf)
+        set(_rpath_tool "${PROVIZIO_DDS_READELF}")
+    endif()
+    set(_rpath_tool_kind readelf)
+    set(_rpath_origin "$ORIGIN")
+endif()
+if(_rpath_tool)
+    add_test(NAME fast_dds_install_rpath
+             COMMAND "${CMAKE_COMMAND}"
+                     "-DLIBRARY=${FAST_DDS_INSTALL_DIR}/lib/libfastdds${CMAKE_SHARED_LIBRARY_SUFFIX}"
+                     "-DTOOL=${_rpath_tool}" "-DTOOL_KIND=${_rpath_tool_kind}"
+                     "-DEXPECTED=${_rpath_origin}|${_rpath_origin}/../lib|${_rpath_origin}/${PROVIZIO_DDS_PRIVATE_LIB_DIR}"
+                     "-DBUILD_DIR=${CMAKE_BINARY_DIR}"
+                     -P "${CMAKE_CURRENT_LIST_DIR}/install_rpath_test.cmake")
+    # Seconds. One run of readelf or otool.
+    set_tests_properties(fast_dds_install_rpath PROPERTIES TIMEOUT 60)
+else()
+    message(STATUS "No ${_rpath_tool_kind} to read Fast-DDS's rpath with; skipping fast_dds_install_rpath")
 endif()
 
 add_executable(timer_unregister_test timer_unregister_test.cpp)
@@ -67,5 +153,21 @@ add_test(NAME fast_dds_patch_timer_unregister
          COMMAND "$<TARGET_FILE:timer_unregister_test>"
          WORKING_DIRECTORY "$<TARGET_FILE_DIR:timer_unregister_test>")
 set_tests_properties(fast_dds_patch_timer_unregister PROPERTIES TIMEOUT 60)
+
+# Guards local_reader_under_writer_mutex.cmake: forces the order in which an intraprocess
+# heartbeat that read its reader without the writer mutex delivers to a reader removed meanwhile.
+add_executable(local_reader_lock_test local_reader_lock_test.cpp)
+target_link_libraries(local_reader_lock_test PUBLIC provizio_dds provizio_dds_types Threads::Threads)
+# Fast-DDS' private sources, which is where the patched StatefulWriter lives. Deliberate -- see
+# the test's own header comment.
+target_include_directories(local_reader_lock_test SYSTEM PRIVATE "${FAST_DDS_SOURCE_DIR}/src/cpp")
+
+# Seconds. The case takes about a second, most of it the half second it lets the heartbeat reach
+# the writer mutex; the ceiling only has to outlast a loaded CI runner, and a heartbeat that never
+# returns fails the case explicitly rather than hanging out its whole budget.
+add_test(NAME fast_dds_patch_local_reader_lock
+         COMMAND "$<TARGET_FILE:local_reader_lock_test>"
+         WORKING_DIRECTORY "$<TARGET_FILE_DIR:local_reader_lock_test>")
+set_tests_properties(fast_dds_patch_local_reader_lock PROPERTIES TIMEOUT 60)
 
 provizio_dds_finalize_tests()

@@ -7,16 +7,15 @@
 # callbacks (they run on Fast-DDS-owned threads, so their stacks always contain Fast-DDS frames).
 # Never a namespace- or library-wide pattern.
 #
-# Fast-DDS 3.6.2: StatefulWriter::intraprocess_heartbeat (the ReaderProxy's initial heartbeat,
-# on the timer thread) reads ReaderLocator::local_reader_ without the writer mutex, while
-# ReaderLocator::stop() resets it under that mutex from matched_reader_remove on a receive
-# thread when the remote participant goes away -- the header documents the member as always
-# protected by the writer's mutex, and the heartbeat is the one path that does not hold it.
-# Intraprocess only (same-process publisher and subscriber), seen from
-# discovered_endpoints_reset_does_not_spin tearing participants down. No provizio_dds frame on
-# either stack. Fixed upstream by eProsima/Fast-DDS#6422 (milestone v3.6.3.0), which takes the
-# mutex around that read: drop this entry when FAST_DDS_VERSION moves past 3.6.2.
-race:eprosima::fastdds::rtps::StatefulWriter::intraprocess_heartbeat
+# None at present. There was one, for Fast-DDS 3.6.2's StatefulWriter::intraprocess_heartbeat
+# reading ReaderLocator::local_reader_ on the timer thread without the writer mutex while
+# ReaderLocator::stop() reset it under that mutex. It was taken for a harmless race, and it was
+# not: it is the SegFault network_recovery_concurrent_make_publisher_during_reset hit, a null
+# dereference when the reset lands between local_reader()'s test of the pointer and its re-read.
+# The Fast-DDS built here is patched instead (cmake/fast_dds/local_reader_under_writer_mutex.cmake,
+# upstream's eProsima/Fast-DDS#6422), so a report naming that function now means the patch is not
+# in effect. Before suppressing a Fast-DDS race, rule out that it can corrupt state: one that can
+# wants a patch, not an entry here.
 #
 # --- Lock-order inversions (potential deadlocks) ---
 # provizio_dds holds its participant lifecycle lock `reset_mutex` in SHARED (read) mode across calls

@@ -16,7 +16,7 @@
 
 # Use as:
 # install_dependencies.sh [PYTHON=OFF|ON] [STATIC_ANALYSIS=OFF|ON] [INSTALL_ROS=OFF|ON] [FAST_DDS_INSTALL=OFF|ON|install_path]
-# (Ubuntu 18.04+ or macOS X required)
+# (Ubuntu 20.04+ or macOS X required)
 
 set -e
 
@@ -72,6 +72,7 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
 
     # Make a virtual environment to avoid "error: externally-managed-environment"
     python3 -m venv /tmp/provizio_dds.venv
+    # shellcheck source=/dev/null
     source /tmp/provizio_dds.venv/bin/activate
     python3 -m pip install wheel setuptools "numpy>=1.16" "transforms3d>=0.4.1"
     deactivate
@@ -91,12 +92,28 @@ if [[ "${OSTYPE}" == "darwin"* ]]; then
     ln -s "$(brew --prefix llvm)/bin/clang-tidy" "/usr/local/bin/clang-tidy"
   fi
 else
-  # Linux (Ubuntu 18+ assumed)
+  # Linux (Ubuntu 20.04+ assumed)
 
   if [[ "${EUID}" != "0" ]]; then
     echo "Root permissions required"
     exit 1
   fi
+
+  # Ubuntu 18.04 is no longer supported. Said first, from /etc/os-release, ahead of any apt call:
+  # one failing on an archive no longer served would otherwise be all that is reported.
+  # shellcheck source=/dev/null
+  if [ -r /etc/os-release ] && [ "$(. /etc/os-release && echo "${ID:-}:${VERSION_ID:-}")" = "ubuntu:18.04" ]; then
+    echo "Ubuntu 18.04 is no longer supported by provizio_dds: Ubuntu 20.04 or newer is required." >&2
+    exit 1
+  fi
+
+  # Everything this script downloads and builds, as root, goes in here rather than under a fixed
+  # name in /tmp: any user of the machine can create /tmp/<name> first, as a file whose contents a
+  # build then runs (a GNUmakefile a make would read ahead of the Makefile) or as a link a download
+  # would write through, and on the self-hosted CI runners the machine outlives the job. mktemp's
+  # directory is the invoking user's own, 0700.
+  WORK_DIR="$(mktemp -d)"
+  trap 'rm -rf "${WORK_DIR}"' EXIT
 
   # apt on CI hosts fails transiently far more often than it fails meaningfully: a mirror
   # returning 5xx or closing a connection mid-download, a stale package list after a mirror
@@ -107,8 +124,7 @@ else
   #
   # Two layers of defence, because they cover different failures:
   #   - Acquire::Retries makes apt itself retry an individual failed download.
-  #   - DPkg::Lock::Timeout waits for the dpkg lock instead of failing instantly. Unknown to
-  #     apt < 1.9 (Ubuntu 18.04), which ignores unrecognised -o keys, so it is safe there.
+  #   - DPkg::Lock::Timeout waits for the dpkg lock instead of failing instantly.
   #   - The outer loop covers what neither does: a refreshed package list between attempts,
   #     with exponential backoff, for the "404 on a package version" case after a rotation.
   APT_MAX_ATTEMPTS=${APT_MAX_ATTEMPTS:-5}
@@ -150,8 +166,7 @@ else
   # wget does NOT retry HTTP 5xx by default, hence --retry-on-http-error; the outer loop covers
   # what its own retries do not (a stream that dies mid-transfer, a name-resolution failure).
   # Everything lands in a FILE first and is only then unpacked, so a truncated download can
-  # never be piped into tar as if it were complete. All options predate Ubuntu 18.04's wget
-  # 1.19 / curl 7.58, which the jetson-18.04 runners still use.
+  # never be piped into tar as if it were complete. All options predate Ubuntu 20.04's wget 1.20.
   DOWNLOAD_MAX_ATTEMPTS=${DOWNLOAD_MAX_ATTEMPTS:-5}
 
   # download <url> <output-path>
@@ -196,13 +211,6 @@ else
   # Install Eigen3 (optional provizio_dds dependency: accelerates point clouds accumulation linear algebra)
   apt_get install -y --no-install-recommends libeigen3-dev
 
-  # Check if running in Ubuntu 18
-  UBUNTU_18=false
-  if lsb_release -a | grep -q 18; then
-    echo "Running in Ubuntu 18 detected..."
-    UBUNTU_18=true
-  fi
-
   # Check if running in Ubuntu 20
   UBUNTU_20=false
   if lsb_release -a | grep -q 20; then
@@ -217,49 +225,23 @@ else
     UBUNTU_22=true
   fi
 
-  # Check if running in Ubuntu 24
-  UBUNTU_24=false
-  if lsb_release -a | grep -q 24; then
-    echo "Running in Ubuntu 24 detected..."
-    UBUNTU_24=true
-  fi
-
   # Install GCC/clang
   if [[ "${CC}" == "gcc" ]]; then
-    if [ "${UBUNTU_18}" = true ]; then
-      apt_get install -y software-properties-common
-      add-apt-repository -y ppa:ubuntu-toolchain-r/test
-      apt_get update
-      apt_get install -y --no-install-recommends gcc-9 g++-9
-      update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 100
-      update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 100
-    else
-      apt_get install -y --no-install-recommends gcc g++
-    fi
+    apt_get install -y --no-install-recommends gcc g++
   else
-    if [ "${UBUNTU_18}" = true ]; then
-      apt_get install -y --no-install-recommends clang-10
-      update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100
-      update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-10 100
-    else
-      apt_get install -y --no-install-recommends clang
-    fi
+    apt_get install -y --no-install-recommends clang
   fi
 
   # Install make
   apt_get install -y --no-install-recommends make ninja-build
 
   # Install CMake
-  if [ "${UBUNTU_18}" = true ] || [ "${UBUNTU_20}" = true ]; then
-      if [ "${UBUNTU_18}" = true ]; then
-          CMAKE_VERSION=3.25.2-0kitware1ubuntu18.04.1
-      else
-          CMAKE_VERSION=3.25.2-0kitware1ubuntu20.04.1
-      fi
+  if [ "${UBUNTU_20}" = true ]; then
+      CMAKE_VERSION=3.25.2-0kitware1ubuntu20.04.1
       apt_get install -y software-properties-common lsb-release wget
-      download https://apt.kitware.com/keys/kitware-archive-latest.asc /tmp/kitware-archive-latest.asc
-      gpg --dearmor - < /tmp/kitware-archive-latest.asc | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null
-      rm -f /tmp/kitware-archive-latest.asc
+      download https://apt.kitware.com/keys/kitware-archive-latest.asc "${WORK_DIR}/kitware-archive-latest.asc"
+      gpg --dearmor - < "${WORK_DIR}/kitware-archive-latest.asc" | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null
+      rm -f "${WORK_DIR}/kitware-archive-latest.asc"
       apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main"
       apt_get update
       apt_get install -y --no-install-recommends kitware-archive-keyring
@@ -268,11 +250,7 @@ else
       apt_get install -y --no-install-recommends cmake
   fi
 
-  # Install git 2.18+
-  if [ "${UBUNTU_18}" = true ]; then
-    apt-add-repository ppa:git-core/ppa
-    apt_get update
-  fi
+  # Install git
   apt_get install -y --no-install-recommends git
 
   # Install libssl-dev
@@ -280,16 +258,7 @@ else
 
   if [[ "${STATIC_ANALYSIS}" != "OFF" ]]; then
     # Install cppcheck, clang-format and clang-tidy (and clang for proper clang-tidy checks)
-    if [ "${UBUNTU_18}" = true ]; then
-      apt_get install -y --no-install-recommends clang-10 clang-format-10 clang-tidy-10
-
-      update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-10 100
-      update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100
-      update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-10 100
-      update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-10 100
-    else
-      apt_get install -y --no-install-recommends clang clang-format clang-tidy cppcheck
-    fi
+    apt_get install -y --no-install-recommends clang clang-format clang-tidy cppcheck
   fi
 
   if [[ "${FAST_DDS_INSTALL}" != "OFF" ]]; then
@@ -300,15 +269,14 @@ else
       fi
 
       apt_get install -y --no-install-recommends wget python3-pip libasio-dev libtinyxml2-dev
-      rm -rf /tmp/fastdds # In case of previous installation
-      mkdir /tmp/fastdds
+      mkdir "${WORK_DIR}/fastdds"
 
       # Foonathan memory
       # --depth 1 throughout this block: none of these builds reads its git history, and the
       # transfer is where a clone breaks — a stalled connection or a DNS failure partway
       # through a large pack fails the whole install. The refs below are tags, which is what
       # --branch needs; a raw SHA would need the depth dropped with it.
-      cd /tmp/fastdds
+      cd "${WORK_DIR}/fastdds"
       git clone --depth 1 --branch "${FOONATHAN_MEMORY_VENDOR_VERSION}" https://github.com/eProsima/foonathan_memory_vendor.git
       mkdir foonathan_memory_vendor/build
       cd foonathan_memory_vendor/build
@@ -316,7 +284,7 @@ else
       cmake --build . --target install
 
       # Fast CDR
-      cd /tmp/fastdds
+      cd "${WORK_DIR}/fastdds"
       git clone --depth 1 --branch "${FAST_CDR_VERSION}" https://github.com/eProsima/Fast-CDR.git
       cd Fast-CDR
       mkdir build
@@ -325,7 +293,7 @@ else
       cmake --build . --target install
 
       # Fast DDS
-      cd /tmp/fastdds
+      cd "${WORK_DIR}/fastdds"
       git clone --depth 1 --branch "${FAST_DDS_VERSION}" https://github.com/eProsima/Fast-DDS.git
       cd Fast-DDS
       mkdir build
@@ -339,9 +307,7 @@ else
     # Install ROS2 Dependencies and configure appropriately
 
     if [[ "${ROS2_VERSION:-}" == "" ]]; then
-      if [ "${UBUNTU_18}" = true ]; then
-        ROS2_VERSION="eloquent"
-      elif [ "${UBUNTU_20}" = true ]; then
+      if [ "${UBUNTU_20}" = true ]; then
         ROS2_VERSION="galactic"
       elif [ "${UBUNTU_22}" = true ]; then
         ROS2_VERSION="humble"
@@ -364,9 +330,10 @@ else
     curl -sSL --retry 5 --retry-delay 5 --retry-connrefused \
          https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
          -o /usr/share/keyrings/ros-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
+    # shellcheck source=/dev/null
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo "$UBUNTU_CODENAME") main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
     apt_get update
-    apt_get install -y --no-install-recommends ros-${ROS2_VERSION}-desktop
+    apt_get install -y --no-install-recommends "ros-${ROS2_VERSION}-desktop"
   fi
 
   if [[ "${PYTHON}" != "OFF" ]]; then
@@ -382,11 +349,11 @@ else
         set -eu
 
         apt_get install -y --no-install-recommends wget libpcre2-dev automake bison byacc
-        cd /tmp
-        download "https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz" "/tmp/swig-${SWIG_VERSION}.tar.gz"
-        tar -xzf "/tmp/swig-${SWIG_VERSION}.tar.gz"
-        rm -f "/tmp/swig-${SWIG_VERSION}.tar.gz"
-        cd swig-${SWIG_VERSION}
+        cd "${WORK_DIR}"
+        download "https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz" "swig-${SWIG_VERSION}.tar.gz"
+        tar --no-same-owner -xzf "swig-${SWIG_VERSION}.tar.gz"
+        rm -f "swig-${SWIG_VERSION}.tar.gz"
+        cd "swig-${SWIG_VERSION}"
         ./autogen.sh
         ./configure
         make -j8
@@ -405,18 +372,42 @@ else
     # Install Python runtime dependencies
     python3 -m pip install "numpy>=1.16" "transforms3d>=0.4.1" --break-system-packages || python3 -m pip install "numpy>=1.16" "transforms3d>=0.4.1"
   fi
-fi
 
-if [ "${UBUNTU_18}" = true ]; then
-    # Install patchelf v0.18 (v0.9 shipped in 18.04 breaks binaries on --replace-needed)
-    cd /tmp
-    PATCHELF_VERSION="0.18.0"
-    download "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}.tar.gz" "patchelf-${PATCHELF_VERSION}.tar.gz"
-    tar -xf patchelf-${PATCHELF_VERSION}.tar.gz
-    cd patchelf-${PATCHELF_VERSION}/
-    ./configure --prefix=/usr --docdir=/usr/share/doc/patchelf-${PATCHELF_VERSION} && make && make install
-    cd /tmp
-    rm -rf patchelf-${PATCHELF_VERSION}*
+  # patchelf 0.18, which the prebuilt binaries are rewritten with (the --replace-needed of
+  # fully_qualified_fastdds_libs.sh, the --set-rpath of build_cache.sh), where the distribution's is
+  # older: Ubuntu 20.04's 0.10 predates many fixes to how it rewrites a binary (0.9 broke binaries on
+  # --replace-needed), and the aarch64 binaries are built on 20.04. Skipped where 0.18 or newer is
+  # found already, as on the persistent self-hosted runners after their first job, which run this
+  # script at every job's start. Nothing else needs it, so a download that fails -- GitHub out of a
+  # firewalled network's reach, say -- only warns; build_cache.sh is where an old one is refused.
+  # The release asset is checked against its digest before anything of it runs, as root; GitHub
+  # states none for it, so this one was taken from two separate downloads that agreed. Unpacked as
+  # root's own rather than as the tarball's owner (uid 1000), and installed into /usr/local, ahead of
+  # /usr on PATH, rather than over the file the distribution's patchelf package owns.
+  PATCHELF_VERSION="0.18.0"
+  PATCHELF_SHA256="64de10e4c6b8b8379db7e87f58030f336ea747c0515f381132e810dbf84a86e7"
+  PATCHELF_FOUND="$(patchelf --version 2>/dev/null | awk '{print $2}')"
+  if [ "${UBUNTU_20}" = true ] && [ "$(printf '%s\n' "${PATCHELF_VERSION}" "${PATCHELF_FOUND:-0}" | sort -V | head -n1)" != "${PATCHELF_VERSION}" ]; then
+    if download "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}.tar.gz" "${WORK_DIR}/patchelf-${PATCHELF_VERSION}.tar.gz"; then
+      (
+        set -eu
+        cd "${WORK_DIR}"
+        echo "${PATCHELF_SHA256}  patchelf-${PATCHELF_VERSION}.tar.gz" | sha256sum -c -
+        tar --no-same-owner -xzf "patchelf-${PATCHELF_VERSION}.tar.gz"
+        cd "patchelf-${PATCHELF_VERSION}"
+        ./configure --prefix=/usr/local
+        make
+        make install
+      )
+      hash -r
+      if [ "$(patchelf --version 2>/dev/null)" != "patchelf ${PATCHELF_VERSION}" ]; then
+        echo "patchelf ${PATCHELF_VERSION} was installed into /usr/local/bin, but PATH finds $(command -v patchelf) first" >&2
+        exit 1
+      fi
+    else
+      echo "Warning: could not download patchelf ${PATCHELF_VERSION}; keeping patchelf ${PATCHELF_FOUND:-(none)}, older than that" >&2
+    fi
+  fi
 fi
 
 echo "Done installing provizio_dds build dependencies!"

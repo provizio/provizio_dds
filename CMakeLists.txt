@@ -19,6 +19,8 @@ include(FetchContent)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/imported_targets.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/extract.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/openssl_package.cmake")
 
 # Configuration
 set(PROVIZIO_DDS_IDLS_VERSION "2.1.1" CACHE STRING "provizio_dds_idls version")
@@ -44,6 +46,7 @@ set(ENABLE_PRIVILEGED_TESTS OFF CACHE BOOL
     "Register the tests that need root / passwordless sudo (they create network namespaces)")
 set(PYTHON_BINDINGS OFF CACHE BOOL "Defines whether Python bindings are to be generated")
 set(PYTHON_PACKAGES_INSTALL_DIR "" CACHE STRING "Defines an install directory for Python artifacts (or use default if empty)")
+set(PYTHON_PIP_PACKAGE OFF CACHE BOOL "Build a pip package, as setup.py does: bundles provizio_dds's own Fast-DDS with everything it loads, and refuses LOOK_FOR_FAST_DDS (needs PYTHON_BINDINGS and PYTHON_PACKAGES_INSTALL_DIR)")
 if(PYTHON_PACKAGES_INSTALL_DIR)
     # Normalize to forward slashes. An absolute destination is baked verbatim into
     # the generated cmake_install.cmake, so a native Windows path with backslashes
@@ -56,6 +59,63 @@ set(IGNORE_BIN_CACHE OFF CACHE BOOL "Enable to force build from sources instead 
 set(DONT_INSTALL_STDCPP_LIBS ON CACHE BOOL "When installing from prebuilt binaries, skip standard C++ libraries")
 set(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS OFF CACHE BOOL "Install and link to fully-qualified Fast-DDS libraries to avoid runtime incompatibilities across different .so.major.minor.patch versions, Linux only")
 set(DISABLE_EIGEN OFF CACHE BOOL "Force plain-CPU linear algebra in point clouds accumulation for this build even when Eigen3 is installed (consumers make their own choice at compile time -- the accumulation maths path is header-only)")
+
+# Where, under the lib/ of an install (Linux and macOS), the OpenSSL runtime Fast-DDS loads goes: a
+# directory of provizio_dds's own, which Fast-DDS's libraries find through an rpath entry of theirs,
+# rather than lib/ itself. An install prefix's lib/ is often on every program's library search path
+# -- /usr/local/lib is, on most Linux distributions -- and an OpenSSL of ours there would be loaded
+# in place of the system's by every program that has no rpath: curl, ssh, python's ssl module, with
+# our build's certificates and configuration; installed over the system's own if it lived there too.
+# build_cache.sh gives the prebuilt binaries the same rpath entry, so it names this directory as well.
+set(PROVIZIO_DDS_PRIVATE_LIB_DIR "provizio_dds")
+
+# What an install(DIRECTORY) of a directory holding that runtime into lib/ is given to leave it out,
+# and what installs it into lib/${PROVIZIO_DDS_PRIVATE_LIB_DIR} instead: the OpenSSL libraries in
+# <directory> as they are at install time -- whatever the openssl_runtime step placed there after this
+# configure, or whatever the prebuilt binaries carry -- rather than as a configure-time list of them.
+set(PROVIZIO_DDS_OPENSSL_RUNTIME_EXCLUDES PATTERN "libssl*" EXCLUDE PATTERN "libcrypto*" EXCLUDE)
+function(provizio_dds_install_openssl_runtime directory)
+    install(CODE "
+        file(GLOB _provizio_dds_openssl_runtime \"${directory}/libssl*\" \"${directory}/libcrypto*\")
+        if(_provizio_dds_openssl_runtime)
+            file(INSTALL \${_provizio_dds_openssl_runtime}
+                DESTINATION \"\${CMAKE_INSTALL_PREFIX}/lib/${PROVIZIO_DDS_PRIVATE_LIB_DIR}\")
+        endif()
+    ")
+endfunction()
+
+# A pip package (PYTHON_PIP_PACKAGE: what setup.py builds, and what the prebuilt Python binaries it
+# unpacks are built as) always uses provizio_dds's own Fast-DDS: the one built from source here,
+# with the fixes cmake/fast_dds/ patches into it, or the prebuilt binaries made from that. The
+# package bundles those libraries next to the bindings, which load them from there, so it runs on
+# whatever machine it is installed on. A system Fast-DDS would carry none of the fixes, and none of
+# it would be packaged: the wheel would depend on whichever Fast-DDS the machine it lands on happens
+# to have. So LOOK_FOR_FAST_DDS is refused for one -- here, ahead of project(), before anything is
+# configured or built -- and the Fast-DDS built for it takes no foonathan_memory from the system
+# either (see PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY below).
+#
+# The Python bindings installed as packages (PYTHON_PACKAGES_INSTALL_DIR) are not a pip package by
+# themselves: a distribution's recipe that supplies its own Fast-DDS installs them that way against
+# it, bundling nothing, and is left to.
+if(PYTHON_PIP_PACKAGE)
+    if(NOT PYTHON_BINDINGS OR NOT PYTHON_PACKAGES_INSTALL_DIR)
+        message(FATAL_ERROR
+            "PYTHON_PIP_PACKAGE needs PYTHON_BINDINGS=ON and a PYTHON_PACKAGES_INSTALL_DIR: a pip "
+            "package is the Python bindings installed as packages there.")
+    endif()
+    if(LOOK_FOR_FAST_DDS)
+        # Not remembered. The cache this configure leaves behind would otherwise hold it, and the
+        # next configure of the same tree -- the one following the advice below -- would be refused
+        # all over again: setup.py configures the one build directory from one install to the next.
+        unset(LOOK_FOR_FAST_DDS CACHE)
+        message(FATAL_ERROR
+            "LOOK_FOR_FAST_DDS cannot be used for a pip package (PYTHON_PIP_PACKAGE, which setup.py "
+            "sets): a pip package always bundles provizio_dds's own, patched Fast-DDS. Drop "
+            "LOOK_FOR_FAST_DDS (from CMAKE_ARGUMENTS, when installing with pip) and configure again. "
+            "To install the Python bindings against a Fast-DDS of the system's instead, configure "
+            "without PYTHON_PIP_PACKAGE.")
+    endif()
+endif()
 
 # Force Release CRT when building Python bindings in Debug mode on Windows.
 # Python interpreters (actions/setup-python, system installs) are Release-built
@@ -127,6 +187,14 @@ endif()
 set(HAS_BIN_CACHE FALSE)
 
 if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BIN_CACHE}" STREQUAL "FALSE"))
+    # These builds drop the cache further down whatever they find (see the three checks below the
+    # platform branches), so a missing archive is not why they compile from source and reporting
+    # one would only send a reader looking for a cache that would not have been used anyway.
+    set(BIN_CACHE_WOULD_BE_DISCARDED FALSE)
+    if(ENABLE_TESTS OR STATIC_ANALYSIS OR(PYTHON_BINDINGS AND NOT PYTHON_PACKAGES_INSTALL_DIR))
+        set(BIN_CACHE_WOULD_BE_DISCARDED TRUE)
+    endif(ENABLE_TESTS OR STATIC_ANALYSIS OR(PYTHON_BINDINGS AND NOT PYTHON_PACKAGES_INSTALL_DIR))
+
     if(UNIX AND NOT APPLE) # Linux
         # On Linux, 3.8-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
         if(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
@@ -137,7 +205,8 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
             endif(Python3_FOUND)
         endif(PYTHON_BINDINGS AND PYTHON_PACKAGES_INSTALL_DIR)
 
-        execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/bin_cache_config_name.sh" "${CMAKE_BUILD_TYPE}" "${PROVIZIO_DDS_IDLS_VERSION}" OUTPUT_VARIABLE BIN_CACHE_CONFIG_NAME)
+        execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/bin_cache_config_name.sh" "${CMAKE_BUILD_TYPE}" "${PROVIZIO_DDS_IDLS_VERSION}"
+            OUTPUT_VARIABLE BIN_CACHE_CONFIG_NAME RESULT_VARIABLE BIN_CACHE_CONFIG_RESULT)
         string(STRIP "${BIN_CACHE_CONFIG_NAME}" BIN_CACHE_CONFIG_NAME)
         set(BIN_CACHE_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cache/${BIN_CACHE_CONFIG_NAME}.zip")
         set(BIN_CACHE_PARENT_PATH "${CMAKE_CURRENT_BINARY_DIR}/cache")
@@ -156,15 +225,55 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
             set(CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO "${PYTHON_CACHE_PATH}/provizio_dds_python_types/_provizio_dds_python_types.so")
         endif(PYTHON_VERSION_TAG)
 
+        # A cache key that names no archive is indistinguishable from a configuration for which no
+        # cache was ever published, so say which key was looked for. Three things miss it by design:
+        # a build type other than Release, an architecture with no published cache, and any edit to a
+        # tracked file (the key covers their contents). Anything else is a bug in how the key is
+        # derived - which is exactly how a silently unpopulated architecture went unnoticed before.
+        if(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+            if(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+                # The key script resolves the IDLs revision by asking GitHub, so it exits non-zero
+                # with an empty stdout on any configure without egress; on a host it does not
+                # support it exits non-zero having printed its refusal to stdout, which would
+                # otherwise become the "key" and be reported as an archive missing under that name.
+                message(STATUS "Could not work out the prebuilt binaries key (bin_cache_config_name.sh "
+                    "exited with ${BIN_CACHE_CONFIG_RESULT}): everything will be built from source.")
+            elseif(BIN_CACHE_CONFIG_NAME STREQUAL "")
+                # Reported apart from the above, because saying a script that "exited with 0" is why
+                # no key could be worked out reads as a contradiction and sends the reader looking
+                # at the exit status rather than at the empty output that is the actual symptom.
+                message(STATUS "Could not work out the prebuilt binaries key (bin_cache_config_name.sh "
+                    "succeeded but named none): everything will be built from source.")
+            # Absent only when no earlier configure extracted it here either: the binaries of this key
+            # are those of this configuration, and are used from there -- which is how a checkout of
+            # the commit before CI's "Bin cache" one, whose key is the same, finds them.
+            elseif(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_SO}")
+                message(STATUS "No prebuilt binaries for this configuration (cache/${BIN_CACHE_CONFIG_NAME}.zip "
+                    "is absent): everything will be built from source. The cache is published for Release "
+                    "builds of unmodified checkouts on the supported architectures only.")
+            elseif(PYTHON_VERSION_TAG AND NOT EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                    AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
+                message(STATUS "No prebuilt Python binaries for this configuration "
+                    "(cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip is absent): everything will be built from source.")
+            endif(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+        endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+
         # Extract general cache if needed
+        set(BIN_CACHE_EXTRACTION_FAILURE "")
         if(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_SO}")
-            execute_process(COMMAND unzip -q "${BIN_CACHE_SOURCE_PATH}" -d "${BIN_CACHE_PARENT_PATH}")
+            provizio_dds_bin_cache_extract("${BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
+                COMMAND unzip -q "${BIN_CACHE_SOURCE_PATH}" -d "${BIN_CACHE_PARENT_PATH}")
+            set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${BIN_CACHE_CONFIG_NAME}.zip")
         endif(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_SO}")
 
         # Extract Python-versioned cache if needed
-        if(PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
-            execute_process(COMMAND unzip -q "${PYTHON_BIN_CACHE_SOURCE_PATH}" -d "${BIN_CACHE_PARENT_PATH}")
-        endif(PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
+        if(NOT BIN_CACHE_EXTRACTION_FAILURE AND PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
+            provizio_dds_bin_cache_extract("${PYTHON_BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
+                COMMAND unzip -q "${PYTHON_BIN_CACHE_SOURCE_PATH}" -d "${BIN_CACHE_PARENT_PATH}")
+            set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip")
+        endif(NOT BIN_CACHE_EXTRACTION_FAILURE AND PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+            AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
 
         if(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
             # Whether the prebuilt binaries can be used here is decided by the glibc / libstdc++ ABI
@@ -192,6 +301,25 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
             else(BIN_CACHE_ABI_COMPATIBLE)
                 message(STATUS "Prebuilt binaries located, but won't be used as ${BIN_CACHE_ABI_INCOMPATIBILITY_REASON}")
             endif(BIN_CACHE_ABI_COMPATIBLE)
+        else(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
+            # An archive was published under this key but does not hold what the build needs: a
+            # truncated or malformed publish, or Python binaries sought in the general archive
+            # because no interpreter was found to name their ABI group -- or could not be extracted
+            # at all, which is reported as that. The absent-archive cases are reported above and
+            # excluded here, so this is the last way a cache could be missed in silence.
+            if(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
+                message(STATUS "The prebuilt binaries published for this configuration could not be extracted "
+                    "from ${BIN_CACHE_EXTRACTION_ARCHIVE} (${BIN_CACHE_EXTRACTION_FAILURE}): everything will be "
+                    "built from source.")
+            elseif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
+                AND(NOT PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
+                set(BIN_CACHE_MISSING_FILE "lib/libprovizio_dds.so")
+                if(EXISTS "${CACHED_PROVIZIO_DDS_SO}")
+                    set(BIN_CACHE_MISSING_FILE "python/provizio_dds_python_types/_provizio_dds_python_types.so")
+                endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}")
+                message(STATUS "The prebuilt binaries published for this configuration do not provide "
+                    "${BIN_CACHE_MISSING_FILE}: everything will be built from source.")
+            endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
         endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
     elseif(WIN32)
         # Find PowerShell
@@ -232,24 +360,88 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                 endif(WIN_PYTHON_VERSION_TAG)
                 set(CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD "${PYTHON_CACHE_PATH}/provizio_dds_python_types/_provizio_dds_python_types.pyd")
 
+                # Name the key that was looked for - see the Linux branch above for why a miss must
+                # not be silent
+                if(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+                    # Absent only when no earlier configure extracted it either: see the Linux branch
+                    if(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
+                        message(STATUS "No prebuilt binaries for this configuration (cache/${BIN_CACHE_CONFIG_NAME}.zip "
+                            "is absent): everything will be built from source. The cache is published for Release "
+                            "builds of unmodified checkouts only.")
+                    elseif(WIN_PYTHON_VERSION_TAG AND NOT EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                            AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                        message(STATUS "No prebuilt Python binaries for this configuration "
+                            "(cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip is absent): everything will be built from source.")
+                    endif(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
+                endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+
+                # The paths reach PowerShell through its environment, never inside the command text: a
+                # quote in a checkout's path (C:\Users\O'Brien\...) would end a quoted string there early,
+                # and PowerShell would run the rest of the path as commands. The archive is named with
+                # -LiteralPath, as -Path reads the [ and ] a path may hold as wildcards. Expand-Archive
+                # has no such option for the destination, so a build directory whose path holds [ or ]
+                # can still fail to extract into: that is reported below, and everything is then built
+                # from source.
+                set(BIN_CACHE_EXPAND_ARCHIVE "Expand-Archive -LiteralPath $env:PROVIZIO_DDS_BIN_CACHE_ARCHIVE -DestinationPath $env:PROVIZIO_DDS_BIN_CACHE_DESTINATION -Force")
+                set(ENV{PROVIZIO_DDS_BIN_CACHE_DESTINATION} "${BIN_CACHE_PARENT_PATH}")
+
                 # Extract general cache if needed
+                set(BIN_CACHE_EXTRACTION_FAILURE "")
                 if(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
-                    execute_process(
-                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force"
-                    )
+                    set(ENV{PROVIZIO_DDS_BIN_CACHE_ARCHIVE} "${BIN_CACHE_SOURCE_PATH}")
+                    provizio_dds_bin_cache_extract("${BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
+                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "${BIN_CACHE_EXPAND_ARCHIVE}")
+                    set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${BIN_CACHE_CONFIG_NAME}.zip")
                 endif(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
 
                 # Extract Python-versioned cache if needed
-                if(WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
-                    execute_process(
-                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${PYTHON_BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force"
-                    )
-                endif(WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                if(NOT BIN_CACHE_EXTRACTION_FAILURE AND WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                        AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                    set(ENV{PROVIZIO_DDS_BIN_CACHE_ARCHIVE} "${PYTHON_BIN_CACHE_SOURCE_PATH}")
+                    provizio_dds_bin_cache_extract("${PYTHON_BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
+                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "${BIN_CACHE_EXPAND_ARCHIVE}")
+                    set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip")
+                endif(NOT BIN_CACHE_EXTRACTION_FAILURE AND WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
+                    AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                unset(ENV{PROVIZIO_DDS_BIN_CACHE_ARCHIVE})
+                unset(ENV{PROVIZIO_DDS_BIN_CACHE_DESTINATION})
 
                 if(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
                     set(HAS_BIN_CACHE TRUE)
+                else(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
+                    # See the Linux branch above: an archive published for this key that does not
+                    # hold what the build needs, or could not be extracted, is the last silent miss left.
+                    if(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
+                        message(STATUS "The prebuilt binaries published for this configuration could not be extracted "
+                            "from ${BIN_CACHE_EXTRACTION_ARCHIVE} (${BIN_CACHE_EXTRACTION_FAILURE}): everything will be "
+                            "built from source.")
+                    elseif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
+                        AND(NOT WIN_PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
+                        message(STATUS "The prebuilt binaries published for this configuration do not provide "
+                            "provizio_dds.dll, provizio_dds.lib or the Python extension module: everything will "
+                            "be built from source.")
+                    endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
                 endif(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
+            else(BIN_CACHE_CONFIG_RESULT EQUAL 0 AND NOT BIN_CACHE_CONFIG_NAME STREQUAL "")
+                # Gated like every other cache message, and split by cause for the same reasons as
+                # the Linux branch above: a build that would have dropped the cache anyway must not
+                # report a miss, and a script that "exited with 0" must not be given as the reason
+                # no key could be worked out.
+                if(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+                    if(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+                        message(STATUS "Could not work out the prebuilt binaries key (bin_cache_config_name.ps1 "
+                            "exited with ${BIN_CACHE_CONFIG_RESULT}): everything will be built from source.")
+                    else(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+                        message(STATUS "Could not work out the prebuilt binaries key (bin_cache_config_name.ps1 "
+                            "succeeded but named none): everything will be built from source.")
+                    endif(NOT BIN_CACHE_CONFIG_RESULT EQUAL 0)
+                endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
             endif(BIN_CACHE_CONFIG_RESULT EQUAL 0 AND NOT BIN_CACHE_CONFIG_NAME STREQUAL "")
+        else(POWERSHELL_EXECUTABLE)
+            if(NOT BIN_CACHE_WOULD_BE_DISCARDED)
+                message(STATUS "PowerShell not found, so the prebuilt binaries key cannot be worked out: "
+                    "everything will be built from source.")
+            endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
         endif(POWERSHELL_EXECUTABLE)
     endif(UNIX AND NOT APPLE)
 endif(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BIN_CACHE}" STREQUAL "FALSE"))
@@ -452,15 +644,22 @@ if(HAS_BIN_CACHE)
         install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
             PATTERN "cmake" EXCLUDE)
         install(DIRECTORY "${BIN_CACHE_PATH}/bin/" DESTINATION bin)
-    elseif(DONT_INSTALL_STDCPP_LIBS)
-        install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
-            PATTERN "libstdc++.so*" EXCLUDE
-            PATTERN "libgcc_s.so*" EXCLUDE
-            PATTERN "cmake" EXCLUDE
-        )
     else()
-        install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
-            PATTERN "cmake" EXCLUDE)
+        # The prebuilt binaries carry the OpenSSL their Fast-DDS was built against, next to it, and
+        # it goes where an install keeps that apart (see PROVIZIO_DDS_PRIVATE_LIB_DIR)
+        if(DONT_INSTALL_STDCPP_LIBS)
+            install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
+                PATTERN "libstdc++.so*" EXCLUDE
+                PATTERN "libgcc_s.so*" EXCLUDE
+                PATTERN "cmake" EXCLUDE
+                ${PROVIZIO_DDS_OPENSSL_RUNTIME_EXCLUDES}
+            )
+        else()
+            install(DIRECTORY "${BIN_CACHE_PATH}/lib/" DESTINATION lib
+                PATTERN "cmake" EXCLUDE
+                ${PROVIZIO_DDS_OPENSSL_RUNTIME_EXCLUDES})
+        endif()
+        provizio_dds_install_openssl_runtime("${BIN_CACHE_PATH}/lib")
     endif()
 
     if(PYTHON_BINDINGS)
@@ -482,6 +681,12 @@ if(HAS_BIN_CACHE)
         endforeach(entry ${PYTHON_DIRS})
     endif(PYTHON_BINDINGS)
 else(HAS_BIN_CACHE)
+    # Where the tree being installed goes, for the install steps of our own below that write or
+    # remove files by path: under the prefix of the install being run and the DESTDIR of a staged
+    # one, as file(INSTALL) places everything else (see cmake/install_root.cmake).
+    install(CODE "include([==[${PROJECT_SOURCE_DIR}/cmake/install_root.cmake]==])
+        provizio_dds_install_root(_provizio_dds_install_root)")
+
     # RPATH to look for libraries in expected locations
     if(NOT WIN32)
         # RPATH to look for shared libraries in expected locations
@@ -556,8 +761,147 @@ else(HAS_BIN_CACHE)
         # Let's build Fast-DDS
         message(STATUS "Fast-DDS will be built. Version ${FAST_DDS_VERSION} with foonathan_memory_vendor version ${FOONATHAN_MEMORY_VENDOR_VERSION}.")
 
-        # OpenSSL is used by Fast-DDS for its security plugin
+        # When forcing Release CRT for Python compatibility, build Fast-DDS in
+        # Release to ensure the entire DLL chain uses /MD consistently.
+        set(_FAST_DDS_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+        if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
+            set(_FAST_DDS_BUILD_TYPE "Release")
+        endif()
+
+        # OpenSSL is used by Fast-DDS for its TLS transport, and its security plugin when SECURITY is on
         find_package(OpenSSL REQUIRED)
+        # How Fast-DDS is to find this same OpenSSL (see FAST_DDS_CMAKE_ARGS)
+        list(GET OPENSSL_INCLUDE_DIR 0 _OPENSSL_INCLUDE_DIR)
+        # Without a trailing separator, which would make the include directory its own parent
+        file(TO_CMAKE_PATH "${_OPENSSL_INCLUDE_DIR}" _OPENSSL_INCLUDE_DIR)
+        string(REGEX REPLACE "/+$" "" _OPENSSL_INCLUDE_DIR "${_OPENSSL_INCLUDE_DIR}")
+        get_filename_component(_OPENSSL_ROOT "${_OPENSSL_INCLUDE_DIR}" DIRECTORY)
+        set(PROVIZIO_DDS_OPENSSL_ARGS)
+        if(DEFINED OPENSSL_USE_STATIC_LIBS)
+            # A choice made for this lookup holds for Fast-DDS's as well, whichever way it is made
+            list(APPEND PROVIZIO_DDS_OPENSSL_ARGS "-DOPENSSL_USE_STATIC_LIBS=${OPENSSL_USE_STATIC_LIBS}")
+        endif()
+        if(OpenSSL_CONFIG)
+            # Found as a package (Conan's, say), whose configuration names the libraries' dependencies
+            # as packages of their own — a static OpenSSL's zlib — which FindOpenSSL knows nothing
+            # of. Fast-DDS is given a FindOpenSSL loading that same configuration, in the configuration
+            # (build type) provizio_dds consumes it in.
+            string(TOUPPER "${CMAKE_BUILD_TYPE}" _OPENSSL_BUILD_TYPE_UPPER)
+            if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
+                # Fast-DDS builds as Release then, for the release CRT, which a Debug package's OpenSSL
+                # does not use: it takes the package's Release configuration. Where the package has none,
+                # Conan's, whose targets hold each configuration's settings as generator expressions,
+                # fails to build rather than mix the two CRTs, while a package naming its configurations
+                # plainly falls back to the one it has.
+                set(PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG)
+            elseif(CMAKE_MAP_IMPORTED_CONFIG_${_OPENSSL_BUILD_TYPE_UPPER})
+                set(PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG "${CMAKE_MAP_IMPORTED_CONFIG_${_OPENSSL_BUILD_TYPE_UPPER}}")
+            else()
+                set(PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG "${CMAKE_BUILD_TYPE}")
+            endif()
+            set(PROVIZIO_DDS_OPENSSL_MODULE_DIR "${CMAKE_CURRENT_BINARY_DIR}/fast_dds_openssl")
+            provizio_dds_write_openssl_find_module("${PROVIZIO_DDS_OPENSSL_MODULE_DIR}" "${PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG}")
+        else()
+            # Found by CMake's FindOpenSSL, which Fast-DDS runs too. Given a root, it searches that
+            # alone; given the files it found — the cache entries it keeps them in — it takes exactly
+            # those, where a search of the root would miss a multiarch directory such as
+            # /usr/lib/x86_64-linux-gnu, and with MSVC choose among the variants a root holds.
+            list(APPEND PROVIZIO_DDS_OPENSSL_ARGS "-DOPENSSL_ROOT_DIR=${_OPENSSL_ROOT}"
+                "-DOPENSSL_INCLUDE_DIR=${_OPENSSL_INCLUDE_DIR}")
+            if(MSVC)
+                foreach(_OPENSSL_VAR IN ITEMS LIB_EAY_RELEASE LIB_EAY_DEBUG SSL_EAY_RELEASE SSL_EAY_DEBUG)
+                    if(${_OPENSSL_VAR})
+                        list(APPEND PROVIZIO_DDS_OPENSSL_ARGS "-D${_OPENSSL_VAR}=${${_OPENSSL_VAR}}")
+                    endif()
+                endforeach()
+            elseif(EXISTS "${OPENSSL_CRYPTO_LIBRARY}" AND EXISTS "${OPENSSL_SSL_LIBRARY}")
+                list(APPEND PROVIZIO_DDS_OPENSSL_ARGS "-DOPENSSL_CRYPTO_LIBRARY=${OPENSSL_CRYPTO_LIBRARY}"
+                    "-DOPENSSL_SSL_LIBRARY=${OPENSSL_SSL_LIBRARY}")
+                get_filename_component(_OPENSSL_CRYPTO_EXT "${OPENSSL_CRYPTO_LIBRARY}" LAST_EXT)
+                # MinGW's import library of a DLL, libcrypto.dll.a, ends like a static one
+                if(NOT DEFINED OPENSSL_USE_STATIC_LIBS AND _OPENSSL_CRYPTO_EXT STREQUAL CMAKE_STATIC_LIBRARY_SUFFIX
+                        AND NOT OPENSSL_CRYPTO_LIBRARY MATCHES "\\.dll\\.a$")
+                    # A static library's own dependencies (threads, dl) FindOpenSSL adds only when told
+                    list(APPEND PROVIZIO_DDS_OPENSSL_ARGS "-DOPENSSL_USE_STATIC_LIBS=ON")
+                endif()
+            endif()
+        endif()
+        # Where that OpenSSL's shared libraries can be, for those Fast-DDS loads to be placed next to
+        # it (see the openssl_runtime step of libfast_dds), those of the configuration Fast-DDS takes
+        # the package in first, as a library of one name can be in both: the directories of the files
+        # found, as results (FindOpenSSL's, keyworded debug / optimized where it found both) or as
+        # imported targets' locations (not a package's interface targets, which name no file), with
+        # the bin directory next to each, where an import library's DLL is; then those of the root.
+        if(PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG)
+            # The configuration the FindOpenSSL given to Fast-DDS maps it onto
+            list(GET PROVIZIO_DDS_OPENSSL_PACKAGE_CONFIG 0 _OPENSSL_FOR_BUILD_TYPE)
+        else()
+            set(_OPENSSL_FOR_BUILD_TYPE "${_FAST_DDS_BUILD_TYPE}")
+        endif()
+        string(TOUPPER "${_OPENSSL_FOR_BUILD_TYPE}" _OPENSSL_FOR_BUILD_TYPE_UPPER)
+        set(_OPENSSL_LIBRARY_FILES_FIRST)
+        set(_OPENSSL_LIBRARY_FILES)
+        set(_OPENSSL_LIBRARY_KEYWORD)
+        foreach(_OPENSSL_ITEM IN LISTS OPENSSL_SSL_LIBRARY OPENSSL_CRYPTO_LIBRARY)
+            if(_OPENSSL_ITEM MATCHES "^(debug|optimized|general)$")
+                set(_OPENSSL_LIBRARY_KEYWORD "${_OPENSSL_ITEM}")
+                continue()
+            endif()
+            if(EXISTS "${_OPENSSL_ITEM}")
+                if((_OPENSSL_LIBRARY_KEYWORD STREQUAL "debug" AND _OPENSSL_FOR_BUILD_TYPE STREQUAL "Debug") OR
+                        (_OPENSSL_LIBRARY_KEYWORD STREQUAL "optimized" AND NOT _OPENSSL_FOR_BUILD_TYPE STREQUAL "Debug"))
+                    list(APPEND _OPENSSL_LIBRARY_FILES_FIRST "${_OPENSSL_ITEM}")
+                else()
+                    list(APPEND _OPENSSL_LIBRARY_FILES "${_OPENSSL_ITEM}")
+                endif()
+            endif()
+            set(_OPENSSL_LIBRARY_KEYWORD)
+        endforeach()
+        foreach(_OPENSSL_TARGET IN ITEMS OpenSSL::SSL OpenSSL::Crypto)
+            if(TARGET ${_OPENSSL_TARGET})
+                get_target_property(_OPENSSL_TARGET_TYPE ${_OPENSSL_TARGET} TYPE)
+                if(NOT _OPENSSL_TARGET_TYPE STREQUAL "INTERFACE_LIBRARY")
+                    # Read here only: before CMake 3.19 an interface library's other properties cannot be
+                    get_target_property(_OPENSSL_TARGET_CONFIGS ${_OPENSSL_TARGET} IMPORTED_CONFIGURATIONS)
+                    foreach(_OPENSSL_PROPERTY IN ITEMS IMPORTED_LOCATION IMPORTED_IMPLIB)
+                        if(_OPENSSL_TARGET_CONFIGS)
+                            foreach(_OPENSSL_CONFIG IN LISTS _OPENSSL_TARGET_CONFIGS)
+                                get_target_property(_OPENSSL_ITEM ${_OPENSSL_TARGET} ${_OPENSSL_PROPERTY}_${_OPENSSL_CONFIG})
+                                if(_OPENSSL_ITEM AND EXISTS "${_OPENSSL_ITEM}")
+                                    if(_OPENSSL_CONFIG STREQUAL _OPENSSL_FOR_BUILD_TYPE_UPPER)
+                                        list(APPEND _OPENSSL_LIBRARY_FILES_FIRST "${_OPENSSL_ITEM}")
+                                    else()
+                                        list(APPEND _OPENSSL_LIBRARY_FILES "${_OPENSSL_ITEM}")
+                                    endif()
+                                endif()
+                            endforeach()
+                        endif()
+                        get_target_property(_OPENSSL_ITEM ${_OPENSSL_TARGET} ${_OPENSSL_PROPERTY})
+                        if(_OPENSSL_ITEM AND EXISTS "${_OPENSSL_ITEM}")
+                            list(APPEND _OPENSSL_LIBRARY_FILES "${_OPENSSL_ITEM}")
+                        endif()
+                    endforeach()
+                endif()
+            endif()
+        endforeach()
+        set(PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS)
+        foreach(_OPENSSL_LIBRARY IN LISTS _OPENSSL_LIBRARY_FILES_FIRST _OPENSSL_LIBRARY_FILES)
+            get_filename_component(_OPENSSL_LIBRARY_DIR "${_OPENSSL_LIBRARY}" DIRECTORY)
+            get_filename_component(_OPENSSL_LIBRARY_BIN_DIR "${_OPENSSL_LIBRARY_DIR}/../bin" ABSOLUTE)
+            list(APPEND PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS "${_OPENSSL_LIBRARY_DIR}")
+            if(IS_DIRECTORY "${_OPENSSL_LIBRARY_BIN_DIR}")
+                list(APPEND PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS "${_OPENSSL_LIBRARY_BIN_DIR}")
+            endif()
+        endforeach()
+        # The root is the include directory's parent, where there is one
+        if(IS_DIRECTORY "${_OPENSSL_INCLUDE_DIR}")
+            foreach(_OPENSSL_SUBDIR IN ITEMS bin lib lib64)
+                if(IS_DIRECTORY "${_OPENSSL_ROOT}/${_OPENSSL_SUBDIR}")
+                    list(APPEND PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS "${_OPENSSL_ROOT}/${_OPENSSL_SUBDIR}")
+                endif()
+            endforeach()
+        endif()
+        list(REMOVE_DUPLICATES PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS)
 
         # foonathan_memory_vendor (Required for Fast-DDS)
         set(FOONATHAN_MEMORY_DIR "${CMAKE_CURRENT_BINARY_DIR}/foonathan_memory")
@@ -569,7 +913,20 @@ else(HAS_BIN_CACHE)
         if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
             set(_FOONATHAN_BUILD_TYPE "Release")
         endif()
-        set(_FOONATHAN_CMAKE_ARGS -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}" "-DCMAKE_BUILD_TYPE=${_FOONATHAN_BUILD_TYPE}")
+        # A pip package bundles everything its Fast-DDS loads, and nothing installs a foonathan_memory
+        # along with it: the static library of the vendored one, linked in, is the only kind it can
+        # carry. One found on the system first -- a ROS 2 distribution's, a preinstalled Fast-DDS's --
+        # is a shared library the wheel would depend on without containing: working on the machine
+        # that built it, and failing to import anywhere else, or there once ROS is no longer sourced.
+        # So a pip package takes it from the vendored build only, in both lookups: the one deciding
+        # whether to build it (cmake/foonathan_memory) and the one Fast-DDS links it by
+        # (cmake/modules/Findfoonathan_memory.cmake, given to its build too).
+        set(PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY OFF)
+        if(PYTHON_PIP_PACKAGE)
+            set(PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY ON)
+        endif()
+        set(_FOONATHAN_CMAKE_ARGS -G "${CMAKE_GENERATOR}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/foonathan_memory" "-DFOONATHAN_MEMORY_VENDOR_VERSION=${FOONATHAN_MEMORY_VENDOR_VERSION}" "-DCMAKE_BUILD_TYPE=${_FOONATHAN_BUILD_TYPE}"
+            "-DPROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY=${PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY}")
         if(PROVIZIO_DDS_SANITIZER_FLAGS)
             list(APPEND _FOONATHAN_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}" "-DCMAKE_C_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}")
         endif()
@@ -591,13 +948,14 @@ else(HAS_BIN_CACHE)
         set(FAST_DDS_PREFIX "${CMAKE_CURRENT_BINARY_DIR}")
         set(FAST_DDS_GITHUB_PROJECT "provizio/Fast-DDS")
         set(FAST_DDS_INSTALL_DIR "${FAST_DDS_BINARY_DIR}/install")
-        # When forcing Release CRT for Python compatibility, build Fast-DDS in
-        # Release to ensure the entire DLL chain uses /MD consistently.
-        set(_FAST_DDS_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
-        if(PROVIZIO_DDS_FORCE_RELEASE_CRT)
-            set(_FAST_DDS_BUILD_TYPE "Release")
+        set(_FAST_DDS_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules")
+        if(PROVIZIO_DDS_OPENSSL_MODULE_DIR)
+            list(PREPEND _FAST_DDS_MODULE_PATH "${PROVIZIO_DDS_OPENSSL_MODULE_DIR}")
         endif()
-        set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${PROJECT_SOURCE_DIR}/cmake/modules")
+        # A list, in the form LIST_SEPARATOR (see ExternalProject_Add below) passes as one argument
+        string(REPLACE ";" "|" _FAST_DDS_MODULE_PATH "${_FAST_DDS_MODULE_PATH}")
+        set(FAST_DDS_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${_FAST_DDS_BUILD_TYPE}" "-DCMAKE_INSTALL_PREFIX=${FAST_DDS_INSTALL_DIR}" "-DBUILD_TESTING=OFF" "-DTHIRDPARTY=FORCE" "-DCMAKE_MODULE_PATH=${_FAST_DDS_MODULE_PATH}"
+            "-DPROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY=${PROVIZIO_DDS_FOONATHAN_MEMORY_VENDORED_ONLY}")
         # Fast-DDS turns on CMAKE_COMPILE_WARNING_AS_ERROR (its own -Werror / MSVC /WX) for every build
         # except TSan. As a vendored third-party dependency, its internal warnings must never gate our
         # CI: newer toolchains warn on code we don't own (e.g. macos-latest's Apple clang flags a
@@ -613,13 +971,30 @@ else(HAS_BIN_CACHE)
             # every one of them, and $ORIGIN/../lib covers an executable installed beside them in
             # bin/. Naming it absolutely as well only bakes this build tree into libraries that
             # install(DIRECTORY) then ships verbatim -- a path that means nothing on any other
-            # machine, which is the same fault the rpath above was just cleared of.
-            list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}")
+            # machine, which is the same fault the rpath above was just cleared of. What is appended
+            # is PROVIZIO_DDS_PRIVATE_LIB_DIR next to them, where an install keeps the OpenSSL runtime
+            # placed next to Fast-DDS apart from the rest of lib/ (see the install rules below). On
+            # macOS Fast-DDS would replace the whole value with the absolute path above but for
+            # install_rpath_as_given.cmake. The rpath is a ;-list there, passed as one argument in the
+            # form LIST_SEPARATOR takes.
+            set(_FAST_DDS_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}${RPATH_DIV}${RPATH_ORIGIN}/${PROVIZIO_DDS_PRIVATE_LIB_DIR}")
+            string(REPLACE ";" "|" _FAST_DDS_INSTALL_RPATH "${_FAST_DDS_INSTALL_RPATH}")
+            list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_INSTALL_RPATH=${_FAST_DDS_INSTALL_RPATH}")
         endif()
         if(PROVIZIO_DDS_SANITIZER_FLAGS)
             list(APPEND FAST_DDS_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}" "-DCMAKE_C_FLAGS=${PROVIZIO_DDS_SANITIZER_FLAGS}")
         endif()
-        # OpenSSL is always available here (find_package REQUIRED above)
+        # Fast-DDS looks for OpenSSL itself, and takes it as optional. Left to that, it links whichever
+        # one it comes across, which need not be the OpenSSL found above, nor the one the rest of the
+        # product links (a Conan-provided one, say) — on Windows, one some installer put on the build
+        # machine, such as C:\Program Files\OpenSSL-Win64, whose DLLs no machine the binaries are
+        # deployed to has — or, coming across none, builds without TLS. So it is given the one found
+        # above: its package's FindOpenSSL (_FAST_DDS_MODULE_PATH), or FindOpenSSL's hints and
+        # results, and searches nowhere else; required, so that a hand-over that fails does not
+        # quietly build it without TLS. -U first: a build directory configured before still holds
+        # what was found there, which would otherwise be taken as found.
+        list(APPEND FAST_DDS_CMAKE_ARGS "-UOPENSSL_*" "-ULIB_EAY*" "-USSL_EAY*" "-UOpenSSL_DIR"
+            "-DCMAKE_REQUIRE_FIND_PACKAGE_OpenSSL=ON" ${PROVIZIO_DDS_OPENSSL_ARGS})
 
         # Parse Fast-DDS version once for byproducts and library naming below
         # Prefer FAST_DDS_NUMERIC_VERSION (for branch refs); fall back to parsing
@@ -648,6 +1023,81 @@ else(HAS_BIN_CACHE)
                 "${FAST_DDS_INSTALL_DIR}/lib/libfastdds${CMAKE_SHARED_LIBRARY_SUFFIX}"
             )
         endif()
+        # The patches applied to the Fast-DDS sources, each a script in cmake/fast_dds/ with the
+        # files it edits: the variable the script takes each one in, and that file's path in the
+        # sources. Named here and nowhere else. The PATCH_COMMAND below is made from this list, the
+        # patch step re-runs when any of these scripts changes, and test/fast_dds_patches puts every
+        # one of them through LF and CRLF sources (see cmake/fast_dds/patch_io.cmake) -- so a script
+        # listed here is applied, re-applied and covered, and nothing else has to be kept in step.
+        # Each is idempotent, and self-checking: it fails the build rather than guess when the
+        # sources are not what it expects.
+        set(PROVIZIO_DDS_FAST_DDS_PATCHES
+            # Decorate eprosima::SystemInfo::update_interfaces() with FASTDDS_EXPORTED_API so it is
+            # reachable in the Windows DLL export table (provizio_dds calls it to refresh Fast-DDS's
+            # interface cache on network-recovery resets -- APT-11792). A no-op on Linux / macOS
+            # (default visibility already exports it). See the script for why this targeted patch
+            # is used instead of CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS (which overflows the 65535-symbol
+            # Windows DLL export limit on a library this large).
+            "export_system_info.cmake|SYSTEMINFO_HPP=src/cpp/utils/SystemInfo.hpp"
+            # Give a process that creates its first participant before any interface has carrier a
+            # host id derived from the machine id, instead of the one fixed value Fast-DDS otherwise
+            # hands every such process on every host (APT-12250: two radars booted together took
+            # each other's shared-memory locators for their own and never heard each other, and a
+            # network-recovery rebuild cannot change the id). See the script for the full story.
+            "host_id_without_interfaces.cmake|HOST_HPP=src/cpp/utils/Host.hpp"
+            # Make ResourceEvent::unregister_timer wait only for the callback of the timer being
+            # unregistered, not for the whole timer thread to go idle. As shipped, a thread that holds
+            # an endpoint mutex and destroys or recreates a TimedEvent deadlocks with any timer
+            # callback that wants that mutex -- the participant-lease reaper does -- and the test
+            # process hangs until CTest kills it (eProsima/Fast-DDS#6502, open; caught with both
+            # stacks on macos-15-intel and reproduced on Linux). WriterProxy::stop() relied on the
+            # wide wait to fence both of its timers, so it is adjusted alongside. See the script for
+            # the analysis. Drop it once upstream fixes #6502.
+            "resource_event_per_timer_wait.cmake|RESOURCE_EVENT_H=src/cpp/rtps/resources/ResourceEvent.h|RESOURCE_EVENT_CPP=src/cpp/rtps/resources/ResourceEvent.cpp|WRITER_PROXY_CPP=src/cpp/rtps/reader/WriterProxy.cpp"
+            # Make the per-topic payload-pool registry lock() its weak_ptr before deciding the pool
+            # is alive. As shipped it tests expired() first, and an endpoint on another thread can
+            # release the last reference in between, so create_datareader gets a null pool and
+            # dereferences it -- the SegFault CI saw in
+            # network_recovery_concurrent_make_publisher_during_reset, reproduced deterministically
+            # (see the script).
+            "topic_payload_pool_registry_lock_first.cmake|REGISTRY_HPP=src/cpp/rtps/history/TopicPayloadPoolRegistry_impl/TopicPayloadPoolRegistry.hpp"
+            # Make a writer take its own mutex before it looks up a reader of the same process. As
+            # shipped, the intraprocess heartbeat reads the reader proxy's local-reader pointer on the
+            # timer thread without it, while deleting the reader or the writer resets that pointer
+            # under it, and a reset between the test and the dereference is a null dereference -- the
+            # SegFault in network_recovery_concurrent_make_publisher_during_reset, both stacks read
+            # from its core dump. Upstream's own fix, eProsima/Fast-DDS#6422 (merged for v3.6.3.0),
+            # applied verbatim; drop it once FAST_DDS_VERSION carries that.
+            "local_reader_under_writer_mutex.cmake|STATEFUL_WRITER_CPP=src/cpp/rtps/writer/StatefulWriter.cpp|STATELESS_WRITER_CPP=src/cpp/rtps/writer/StatelessWriter.cpp"
+            # Make libfastdds keep, on macOS as well, the relative install rpath it is built with
+            # (FAST_DDS_CMAKE_ARGS), which Fast-DDS replaces there with this build tree's absolute
+            # install directory: shipped as it is, that leaves libfastdds finding its @rpath
+            # dependencies -- the OpenSSL placed next to it among them -- in this build tree only. A
+            # no-op off Apple. See the script.
+            "install_rpath_as_given.cmake|FAST_DDS_CPP_CMAKELISTS=src/cpp/CMakeLists.txt"
+        )
+        set(PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS)
+        set(_FAST_DDS_PATCH_COMMAND)
+        foreach(_FAST_DDS_PATCH IN LISTS PROVIZIO_DDS_FAST_DDS_PATCHES)
+            string(REPLACE "|" ";" _FAST_DDS_PATCH_FIELDS "${_FAST_DDS_PATCH}")
+            list(GET _FAST_DDS_PATCH_FIELDS 0 _FAST_DDS_PATCH_SCRIPT)
+            list(REMOVE_AT _FAST_DDS_PATCH_FIELDS 0)
+            set(_FAST_DDS_PATCH_SCRIPT "${PROJECT_SOURCE_DIR}/cmake/fast_dds/${_FAST_DDS_PATCH_SCRIPT}")
+            list(APPEND PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS "${_FAST_DDS_PATCH_SCRIPT}")
+            # The first script is the PATCH_COMMAND, each one after it a COMMAND of it
+            if(_FAST_DDS_PATCH_COMMAND)
+                list(APPEND _FAST_DDS_PATCH_COMMAND COMMAND)
+            else()
+                list(APPEND _FAST_DDS_PATCH_COMMAND PATCH_COMMAND)
+            endif()
+            list(APPEND _FAST_DDS_PATCH_COMMAND "${CMAKE_COMMAND}")
+            foreach(_FAST_DDS_PATCH_FILE IN LISTS _FAST_DDS_PATCH_FIELDS)
+                string(REGEX REPLACE "^([A-Z_]+)=(.+)$" "-D\\1=<SOURCE_DIR>/\\2" _FAST_DDS_PATCH_FILE "${_FAST_DDS_PATCH_FILE}")
+                list(APPEND _FAST_DDS_PATCH_COMMAND "${_FAST_DDS_PATCH_FILE}")
+            endforeach()
+            list(APPEND _FAST_DDS_PATCH_COMMAND -P "${_FAST_DDS_PATCH_SCRIPT}")
+        endforeach()
+
         ExternalProject_Add(libfast_dds
             GIT_REPOSITORY "https://github.com/${FAST_DDS_GITHUB_PROJECT}.git"
             GIT_TAG "${FAST_DDS_VERSION}"
@@ -664,55 +1114,12 @@ else(HAS_BIN_CACHE)
             # dropping this with it.
             GIT_SHALLOW TRUE
             UPDATE_COMMAND ""
-            # Decorate eprosima::SystemInfo::update_interfaces() with
-            # FASTDDS_EXPORTED_API so it is reachable in the Windows DLL
-            # export table (provizio_dds calls it to refresh Fast-DDS's
-            # interface cache on network-recovery resets — APT-11792). The
-            # script is a no-op on Linux / macOS (default visibility already
-            # exports it) and idempotent. See export_system_info.cmake for
-            # why this targeted patch is used instead of
-            # CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS (the latter overflows the
-            # 65535-symbol Windows DLL export limit on a library this large).
-            PATCH_COMMAND ${CMAKE_COMMAND}
-                "-DSYSTEMINFO_HPP=<SOURCE_DIR>/src/cpp/utils/SystemInfo.hpp"
-                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
-            # Give a process that creates its first participant before any interface has
-            # carrier a host id derived from the machine id, instead of the one fixed value
-            # Fast-DDS otherwise hands every such process on every host (APT-12250: two
-            # radars booted together took each other's shared-memory locators for their
-            # own and never heard each other, and a network-recovery rebuild cannot change
-            # the id). Idempotent and self-checking like the script above; see
-            # host_id_without_interfaces.cmake for the full story.
-            COMMAND ${CMAKE_COMMAND}
-                "-DHOST_HPP=<SOURCE_DIR>/src/cpp/utils/Host.hpp"
-                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
-            # Make ResourceEvent::unregister_timer wait only for the callback of the timer being
-            # unregistered, not for the whole timer thread to go idle. As shipped, a thread that
-            # holds an endpoint mutex and destroys or recreates a TimedEvent deadlocks with any
-            # timer callback that wants that mutex -- the participant-lease reaper does -- and
-            # the test process hangs until CTest kills it (eProsima/Fast-DDS#6502, open; caught
-            # with both stacks on macos-15-intel and reproduced on Linux). WriterProxy::stop()
-            # relied on the wide wait to fence both of its timers, so it is adjusted alongside.
-            # Idempotent and self-checking like the two scripts above; see
-            # resource_event_per_timer_wait.cmake for the analysis. Drop it once upstream fixes
-            # #6502.
-            COMMAND ${CMAKE_COMMAND}
-                "-DRESOURCE_EVENT_H=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.h"
-                "-DRESOURCE_EVENT_CPP=<SOURCE_DIR>/src/cpp/rtps/resources/ResourceEvent.cpp"
-                "-DWRITER_PROXY_CPP=<SOURCE_DIR>/src/cpp/rtps/reader/WriterProxy.cpp"
-                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
-            # Make the per-topic payload-pool registry lock() its weak_ptr before deciding the pool
-            # is alive. As shipped it tests expired() first, and an endpoint on another thread can
-            # release the last reference in between, so create_datareader gets a null pool and
-            # dereferences it -- the SegFault CI saw in
-            # network_recovery_concurrent_make_publisher_during_reset, reproduced deterministically
-            # (see the script). Idempotent and self-checking like the three above.
-            COMMAND ${CMAKE_COMMAND}
-                "-DREGISTRY_HPP=<SOURCE_DIR>/src/cpp/rtps/history/TopicPayloadPoolRegistry_impl/TopicPayloadPoolRegistry.hpp"
-                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
+            # The patches listed above, in order
+            ${_FAST_DDS_PATCH_COMMAND}
             PREFIX "${FAST_DDS_PREFIX}"
             SOURCE_DIR "${FAST_DDS_SOURCE_DIR}"
             BINARY_DIR "${FAST_DDS_BINARY_DIR}"
+            LIST_SEPARATOR "|"
             CMAKE_ARGS ${FAST_DDS_CMAKE_ARGS}
             BUILD_BYPRODUCTS ${_FAST_DDS_BYPRODUCTS}
         )
@@ -726,15 +1133,115 @@ else(HAS_BIN_CACHE)
         #
         # Re-running is necessary but not sufficient, and only resource_event_per_timer_wait.cmake
         # is structurally covered for the rest: it carries a _revision / _revision_marker pair and
-        # migrates every file it writes, so a bump reaches an existing tree. The other three
-        # detect "patched" by a bare marker, which cannot tell one revision's text from another's
-        # -- fine while their text never changes, which is why each of them says at its marker
-        # what to add before changing it.
+        # migrates every file it writes, so a bump reaches an existing tree. The others detect
+        # "patched" by a bare marker, which cannot tell one revision's text from another's -- fine
+        # while their text never changes, which is why each of them says at its marker what to add
+        # before changing it. patch_io.cmake is no patch of its own, but every script reads and
+        # writes the sources through it.
         ExternalProject_Add_StepDependencies(libfast_dds patch
-            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/export_system_info.cmake"
-            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/host_id_without_interfaces.cmake"
-            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/resource_event_per_timer_wait.cmake"
-            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/topic_payload_pool_registry_lock_first.cmake"
+            ${PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS}
+            "${PROJECT_SOURCE_DIR}/cmake/fast_dds/patch_io.cmake"
+        )
+        if(PROVIZIO_DDS_OPENSSL_MODULE_DIR)
+            # The FindOpenSSL given to Fast-DDS is an input of its configure that its arguments do not
+            # show: when it changes (OpenSSL found as another package), an existing build has to
+            # configure again for Fast-DDS to link that one. configure_file() rewrites it only when
+            # its text changes, which includes a package location first cached after it was written
+            # (see openssl_package.cmake).
+            ExternalProject_Add_StepDependencies(libfast_dds configure
+                "${PROVIZIO_DDS_OPENSSL_MODULE_DIR}/FindOpenSSL.cmake")
+        endif()
+        # The shared OpenSSL libraries Fast-DDS loads go next to its own, where the loader looks for
+        # them ahead of the system's directories, so that it loads the OpenSSL Fast-DDS was built
+        # against rather than another of the same name: built against 3.6, say, and run on the
+        # distribution's 3.0. From there the Python package and a consumer's build tree take them
+        # along as they are, and the install below into lib/${PROVIZIO_DDS_PRIVATE_LIB_DIR}, out of
+        # the way of every other program (see PROVIZIO_DDS_PRIVATE_LIB_DIR). Which ones is read from
+        # Fast-DDS's installed libraries (see openssl_runtime.cmake), after the fact, so that it is
+        # what they do load: on Windows the OpenSSL DLLs they import, the DLL search starting in the
+        # executable's directory; on Linux those they look up by SONAME, through their $ORIGIN and
+        # $ORIGIN/${PROVIZIO_DDS_PRIVATE_LIB_DIR} RUNPATH (which LD_LIBRARY_PATH, or a library of the
+        # same SONAME loaded already, still comes before), unless found in the system's directories,
+        # where the loader looks anyway; on macOS those they name by an @rpath-relative install
+        # name, through the same entries of their rpath, which Fast-DDS keeps there only thanks to
+        # install_rpath_as_given.cmake, while one named by an absolute path (Homebrew's) is loaded
+        # from that path whatever lies next to Fast-DDS. A static OpenSSL is loaded as none. The step
+        # runs whatever it finds, to remove what an earlier configuration placed there.
+        set(_OPENSSL_SYSTEM_DIRS)
+        if(WIN32)
+            set(_OPENSSL_RUNTIME_DESTINATION "${FAST_DDS_INSTALL_DIR}/bin")
+            get_filename_component(_OPENSSL_MSVC_TOOLS_DIR "${CMAKE_LINKER}" DIRECTORY)
+            find_program(PROVIZIO_DDS_DUMPBIN dumpbin HINTS "${_OPENSSL_MSVC_TOOLS_DIR}")
+            set(_OPENSSL_RUNTIME_TOOL "${PROVIZIO_DDS_DUMPBIN}")
+            set(_OPENSSL_RUNTIME_TOOL_KIND dumpbin)
+        else()
+            set(_OPENSSL_RUNTIME_DESTINATION "${FAST_DDS_INSTALL_DIR}/lib")
+            if(APPLE)
+                set(_OPENSSL_RUNTIME_TOOL "${CMAKE_OTOOL}")
+                if(NOT _OPENSSL_RUNTIME_TOOL)
+                    find_program(PROVIZIO_DDS_OTOOL otool)
+                    set(_OPENSSL_RUNTIME_TOOL "${PROVIZIO_DDS_OTOOL}")
+                endif()
+                set(_OPENSSL_RUNTIME_TOOL_KIND otool)
+            else()
+                set(_OPENSSL_RUNTIME_TOOL "${CMAKE_READELF}")
+                if(NOT _OPENSSL_RUNTIME_TOOL)
+                    find_program(PROVIZIO_DDS_READELF NAMES readelf llvm-readelf)
+                    set(_OPENSSL_RUNTIME_TOOL "${PROVIZIO_DDS_READELF}")
+                endif()
+                set(_OPENSSL_RUNTIME_TOOL_KIND readelf)
+                set(_OPENSSL_SYSTEM_DIRS ${CMAKE_PLATFORM_IMPLICIT_LINK_DIRECTORIES} ${CMAKE_C_IMPLICIT_LINK_DIRECTORIES}
+                    ${CMAKE_CXX_IMPLICIT_LINK_DIRECTORIES})
+            endif(APPLE)
+        endif(WIN32)
+        if(NOT _OPENSSL_RUNTIME_TOOL)
+            message(WARNING "No ${_OPENSSL_RUNTIME_TOOL_KIND} was found to tell which OpenSSL libraries Fast-DDS loads, "
+                "so none is placed next to it: a shared OpenSSL must be where the loader finds it by itself")
+            set(_OPENSSL_RUNTIME_TOOL)
+        endif()
+        # Inputs of the step besides the script, which no reinstall of Fast-DDS would follow: the
+        # libraries it could place, but the system's, which it places none of. Only files that are
+        # there, since a missing input would fail the build (a dangling link). And globbed with
+        # CONFIGURE_DEPENDS, so that the build itself notices when that set changes -- an OpenSSL
+        # upgraded, moved or uninstalled since this configure -- and configures again, dropping the
+        # file gone from the inputs: an input that is no longer there fails every build with "missing
+        # and no known rule to make it", and nothing else would ever configure the tree again.
+        set(_OPENSSL_SYSTEM_DIRS_REAL)
+        foreach(_OPENSSL_SYSTEM_DIR IN LISTS _OPENSSL_SYSTEM_DIRS)
+            get_filename_component(_OPENSSL_SYSTEM_DIR "${_OPENSSL_SYSTEM_DIR}" REALPATH)
+            list(APPEND _OPENSSL_SYSTEM_DIRS_REAL "${_OPENSSL_SYSTEM_DIR}")
+        endforeach()
+        if(WIN32)
+            set(_OPENSSL_RUNTIME_PATTERNS "libssl*.dll" "libcrypto*.dll")
+        elseif(APPLE)
+            set(_OPENSSL_RUNTIME_PATTERNS "libssl.*dylib" "libcrypto.*dylib")
+        else()
+            set(_OPENSSL_RUNTIME_PATTERNS "libssl.so*" "libcrypto.so*")
+        endif()
+        set(_OPENSSL_RUNTIME_INPUTS)
+        foreach(_OPENSSL_RUNTIME_DIR IN LISTS PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS)
+            get_filename_component(_OPENSSL_RUNTIME_DIR_REAL "${_OPENSSL_RUNTIME_DIR}" REALPATH)
+            if(NOT _OPENSSL_RUNTIME_DIR_REAL IN_LIST _OPENSSL_SYSTEM_DIRS_REAL)
+                foreach(_OPENSSL_RUNTIME_PATTERN IN LISTS _OPENSSL_RUNTIME_PATTERNS)
+                    file(GLOB _OPENSSL_RUNTIME_DIR_FILES CONFIGURE_DEPENDS "${_OPENSSL_RUNTIME_DIR}/${_OPENSSL_RUNTIME_PATTERN}")
+                    foreach(_OPENSSL_RUNTIME_FILE IN LISTS _OPENSSL_RUNTIME_DIR_FILES)
+                        if(EXISTS "${_OPENSSL_RUNTIME_FILE}")
+                            list(APPEND _OPENSSL_RUNTIME_INPUTS "${_OPENSSL_RUNTIME_FILE}")
+                        endif()
+                    endforeach()
+                endforeach()
+            endif()
+        endforeach()
+        string(REPLACE ";" "|" _OPENSSL_RUNTIME_SEARCH_DIRS "${PROVIZIO_DDS_OPENSSL_RUNTIME_DIRS}")
+        string(REPLACE ";" "|" _OPENSSL_SYSTEM_DIRS "${_OPENSSL_SYSTEM_DIRS}")
+        ExternalProject_Add_Step(libfast_dds openssl_runtime
+            COMMENT "Placing the OpenSSL runtime Fast-DDS loads next to it"
+            COMMAND "${CMAKE_COMMAND}" "-DDESTINATION=${_OPENSSL_RUNTIME_DESTINATION}"
+                "-DSEARCH_DIRS=${_OPENSSL_RUNTIME_SEARCH_DIRS}" "-DSYSTEM_DIRS=${_OPENSSL_SYSTEM_DIRS}"
+                "-DTOOL=${_OPENSSL_RUNTIME_TOOL}" "-DTOOL_KIND=${_OPENSSL_RUNTIME_TOOL_KIND}"
+                -P "${PROJECT_SOURCE_DIR}/cmake/fast_dds/openssl_runtime.cmake"
+            DEPENDEES install
+            DEPENDS "${PROJECT_SOURCE_DIR}/cmake/fast_dds/openssl_runtime.cmake" ${_OPENSSL_RUNTIME_INPUTS}
         )
         link_directories("${FAST_DDS_INSTALL_DIR}/lib/")
 
@@ -951,11 +1458,11 @@ else(HAS_BIN_CACHE)
         list(LENGTH _provizio_dds_idl_hpp _provizio_dds_idl_count)
         message(STATUS
             "provizio_dds: generating ${_provizio_dds_idl_count} .h compat "
-            "shims for renamed IDL headers under ${CMAKE_INSTALL_PREFIX}/include")
+            "shims for renamed IDL headers under ${_provizio_dds_install_root}/include")
         foreach(_rel ${_provizio_dds_idl_hpp})
             string(REGEX REPLACE "\\.hpp$" ".h" _rel_h "${_rel}")
             get_filename_component(_hpp_basename "${_rel}" NAME)
-            set(_out "${CMAKE_INSTALL_PREFIX}/include/${_rel_h}")
+            set(_out "${_provizio_dds_install_root}/include/${_rel_h}")
             if(NOT EXISTS "${_out}")
                 file(WRITE "${_out}"
                     "// Auto-generated by provizio_dds install for backwards source\n"
@@ -979,8 +1486,12 @@ else(HAS_BIN_CACHE)
             install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/bin/" DESTINATION bin
                 FILES_MATCHING PATTERN "*.dll")
         else()
+            # The OpenSSL runtime the openssl_runtime step placed next to Fast-DDS goes where an
+            # install keeps it apart (see PROVIZIO_DDS_PRIVATE_LIB_DIR)
             install(DIRECTORY "${FAST_DDS_INSTALL_DIR}/lib/" DESTINATION lib
-                FILES_MATCHING PATTERN "*.so*" PATTERN "*.dylib*" PATTERN "cmake" EXCLUDE)
+                FILES_MATCHING PATTERN "*.so*" PATTERN "*.dylib*" PATTERN "cmake" EXCLUDE
+                ${PROVIZIO_DDS_OPENSSL_RUNTIME_EXCLUDES})
+            provizio_dds_install_openssl_runtime("${FAST_DDS_INSTALL_DIR}/lib")
         endif(WIN32)
     endif(FAST_DDS_INSTALL_DIR)
 
@@ -1504,21 +2015,15 @@ else(HAS_BIN_CACHE)
             ${PROVIZIO_DDS_PYTHON_LIBS}
         )
 
-        if(FAST_DDS_INSTALL_DIR)
-            file(GLOB FASTDDS_LIBS "${FAST_DDS_INSTALL_DIR}/lib/*${CMAKE_SHARED_LIBRARY_SUFFIX}*")
-            if(WIN32)
-                # On Windows, DLLs are in bin/, not lib/
-                file(GLOB FASTDDS_BIN_LIBS "${FAST_DDS_INSTALL_DIR}/bin/*.dll")
-                list(APPEND FASTDDS_LIBS ${FASTDDS_BIN_LIBS})
-            endif()
-            set(PROVIZIO_DDS_ALL_PYTHON_LIBS ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${FASTDDS_LIBS})
-        endif(FAST_DDS_INSTALL_DIR)
-
+        # The libraries of a Fast-DDS built here -- its own, and the OpenSSL runtime placed next to
+        # them -- are not listed here: test/python copies them at build time, as that build left
+        # them. A list made now would be empty on a first configure, before Fast-DDS is built, and on
+        # a later one would hold what an earlier build left there: an OpenSSL the openssl_runtime
+        # step then removes, say, whose copy would fail the build.
         if(WIN32)
             # On Windows, Python extension modules (.pyd) need the provizio_dds DLLs at runtime.
-            # These are added via generator expressions in test/python/CMakeLists.txt.
-            # Fast-DDS DLLs must also be copied because file(GLOB) above runs at configure
-            # time before ExternalProject builds them, so FASTDDS_LIBS is empty.
+            # These are added via generator expressions in test/python/CMakeLists.txt, and the
+            # Fast-DDS DLLs with them where Fast-DDS was found rather than built.
             set(PROVIZIO_DDS_PYTHON_EXTRA_DLLS provizio_dds provizio_dds_types)
             if(TARGET fastcdr AND TARGET fastdds)
                 list(APPEND PROVIZIO_DDS_PYTHON_EXTRA_DLLS fastcdr fastdds)
@@ -1598,7 +2103,7 @@ else(HAS_BIN_CACHE)
             endif(WIN32)
         endif(FAST_DDS_INSTALL_DIR)
 
-        # On Windows, Fast-DDS links against OpenSSL when SECURITY=ON.  Bundle the
+        # On Windows, Fast-DDS links against OpenSSL for its TLS transport.  Bundle the
         # correct MSVC-built OpenSSL DLLs so they are found before any ABI-incompatible
         # copies (MinGW, MySQL, PHP, etc.) that may exist elsewhere on the system.
         if(WIN32 AND OPENSSL_FOUND)
@@ -1628,8 +2133,15 @@ else(HAS_BIN_CACHE)
     endif(PYTHON_BINDINGS)
 
     if(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS AND NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
-        # Linux: link fastdds libraries by the fully-qualified name (.so.major.minor.patch) as they're incompatible between different .patch versions
-        install(CODE "execute_process(COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/fully_qualified_fastdds_libs.sh\" \"${CMAKE_INSTALL_PREFIX}/lib\")")
+        # Linux: link fastdds libraries by the fully-qualified name (.so.major.minor.patch) as they're incompatible between different .patch versions.
+        # In the tree being installed (see _provizio_dds_install_root).
+        install(CODE "
+            execute_process(COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/fully_qualified_fastdds_libs.sh\" \"\${_provizio_dds_install_root}/lib\"
+                RESULT_VARIABLE _provizio_dds_fully_qualified_result)
+            if(NOT _provizio_dds_fully_qualified_result STREQUAL \"0\")
+                message(FATAL_ERROR \"fully_qualified_fastdds_libs.sh failed (\${_provizio_dds_fully_qualified_result}): the installed libraries would still link Fast-DDS by a name another Fast-DDS can take.\")
+            endif()
+        ")
     endif(INSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS AND NOT LOOK_FOR_FAST_DDS AND UNIX AND NOT APPLE)
 
     # Remove cmake config dirs installed by third-party targets.
@@ -1641,12 +2153,14 @@ else(HAS_BIN_CACHE)
     # tree there — leaving it behind would let a later
     # `find_package(fastrtps)` pick up the obsolete config from the same
     # prefix.
+    # In the tree being installed (see _provizio_dds_install_root): named by the prefix alone, these
+    # removed the configuration directories of whatever Fast-DDS the machine staging it had installed.
     install(CODE "
-        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastrtps\")
-        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastdds\")
-        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastcdr\")
-        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/fastdds_python\")
-        file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/lib/cmake/foonathan_memory\")
+        file(REMOVE_RECURSE \"\${_provizio_dds_install_root}/lib/cmake/fastrtps\")
+        file(REMOVE_RECURSE \"\${_provizio_dds_install_root}/lib/cmake/fastdds\")
+        file(REMOVE_RECURSE \"\${_provizio_dds_install_root}/lib/cmake/fastcdr\")
+        file(REMOVE_RECURSE \"\${_provizio_dds_install_root}/lib/cmake/fastdds_python\")
+        file(REMOVE_RECURSE \"\${_provizio_dds_install_root}/lib/cmake/foonathan_memory\")
     ")
 
     if(ENABLE_TESTS)

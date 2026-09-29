@@ -23,7 +23,7 @@ need to touch — network auto-recovery, transports, discovery tuning, logging, 
 
 **C++ (Linux / macOS):**
 
-- CMake (>= 3.15)
+- CMake (>= 3.15; >= 3.22 wherever Fast-DDS is built from source, which needs it itself: that is, without prebuilt binaries)
 - Git
 - C++ 17 compiler (gcc, clang, or MSVC)
 - libssl-dev (OpenSSL development headers)
@@ -32,10 +32,10 @@ need to touch — network auto-recovery, transports, discovery tuning, logging, 
 **C++ (Windows):**
 
 - Visual Studio 2019+ (MSVC) with C++ 17 support
-- CMake (>= 3.15)
+- CMake (>= 3.15; >= 3.22 wherever Fast-DDS is built from source, which needs it itself: that is, without prebuilt binaries)
 - Git
 - Ninja build system
-- OpenSSL (install via `install_dependencies.ps1` or manually provide headers/libs)
+- OpenSSL (install via `install_dependencies.ps1` or manually provide headers/libs). The Fast-DDS that provizio_dds builds is handed the OpenSSL provizio_dds's own `find_package(OpenSSL)` finds, and links that one — set `OPENSSL_ROOT_DIR`, or use a toolchain that provides one, such as Conan's, to choose it
 - SWIG 4.0+ (SWIG 4.4+ required when using Python 3.14 or newer; only if building Python bindings)
 
 **Python (Linux / macOS):**
@@ -52,7 +52,7 @@ need to touch — network auto-recovery, transports, discovery tuning, logging, 
 - Pip 3
 - All C++ (Windows) dependencies above (pip install builds from source)
 
-When using non-binary-prebuilt configurations (i.e. any macOS, Linux Debug, non-x64/non-aarch64, non-default provizio_dds_idls) all the C++ dependencies will also be required.
+When using non-binary-prebuilt configurations (i.e. any macOS, Linux Debug, non-x64/non-aarch64, non-default provizio_dds_idls) all the C++ dependencies will also be required. The Linux prebuilt binaries are also used only on a host that provides the glibc and libstdc++ symbol versions they reference, which each archive records and the configure checks; anywhere else, everything is built from source. They are built on Ubuntu 22.04 (x86_64) and Ubuntu 20.04, JetPack 5 (aarch64). Ubuntu 18.04 is not supported.
 
 There is a convenience Bash script to install all dependencies in *apt*-featuring Linux and macOS. In Linux it's to be executed with root privileges, f.e. using `sudo`.
 
@@ -125,6 +125,8 @@ else()
     target_link_libraries(<YOUR_CMAKE_TARGET> PUBLIC provizio_dds provizio_dds_types fastdds fastcdr)
 endif()
 ```
+
+On Linux and macOS the install may also hold `lib/provizio_dds/`: the OpenSSL runtime the bundled Fast-DDS was built against goes there when the loader would not find that same OpenSSL by itself — on Linux, one outside the system's library directories; on macOS, one named by an `@rpath`-relative install name (not Homebrew's, which is named by its absolute path) — and always, for the Linux prebuilt binaries. Fast-DDS finds it there through its own rpath, and it is kept out of `lib/` itself so that no other program on the machine loads it in place of the system's. Anything that repackages or copies the install (a `.deb`, a container image) must take `lib/provizio_dds/` along with `lib/`. On Windows those DLLs go to `bin/`, next to the rest.
 
 `DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON` above is not only about skipping clang-tidy: provizio_dds's coding standards also enable **ASan, LSan and UBSan for any `Debug` build**. That is right for working on provizio_dds itself, but an instrumented `libprovizio_dds` linked into your own non-instrumented application warns `ASan runtime does not come first in initial library list` and makes ASan's own findings unreliable. Keep the flag on for a library you intend to consume; drop it only when you deliberately want the sanitizers.
 

@@ -176,6 +176,32 @@ def bin_cache_incompatibility(cache_dir):
 
     return None
 
+
+def resolve_bin_cache_name(command, **kwargs):
+    """Returns the bin cache name the key script prints, or "" when there is none to use.
+
+    None to use when the script cannot run or fails - it asks GitHub for the IDLs revision, so it
+    fails on any machine without egress, and it refuses a host it does not support - which costs a
+    Fast-DDS compile, where letting the error out of here would cost the whole install. None either
+    when what it printed is not a plausible name.
+    """
+    try:
+        name = subprocess.check_output(command, text=True, **kwargs).strip()
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"Warning: failed to resolve the bin cache name: {e}", flush=True)
+        return ""
+
+    # The name is interpolated into paths that are extracted into and later removed, so check its
+    # shape here rather than inheriting the guarantee from how the script builds it. Its parts are
+    # a platform and architecture, two hashes and a build type, and nothing else belongs in it; nor
+    # can it start with a dot, which is what keeps "." and ".." - a name that would make those paths
+    # build_dir itself, or its parent - from passing for one.
+    if name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._]*", name):
+        print(f"Warning: refusing an implausible bin cache name: {name!r}", flush=True)
+        return ""
+    return name
+
+
 # Build the CMake project and copy its artifacts to the destination directory
 source_dir = os.path.dirname(os.path.realpath(__file__))
 build_dir = source_dir + "/build/python_packaging"
@@ -199,45 +225,45 @@ else:
     if platform == "linux" and cmake_arguments == "":
         # On Linux, 3.8-3.13 share ABI (tag "3"), 3.14+ broke ABI (tag "3_14")
         python_abi_tag = "3_14" if sys.version_info >= (3, 14) else "3"
-        python_cache_config_name = subprocess.check_output(
-            [source_dir + "/bin_cache_config_name.sh", "", "", python_abi_tag],
-            text=True
-        ).strip()
-        python_cache_zip = source_dir + "/cache/" + python_cache_config_name + ".zip"
-        if os.path.isfile(python_cache_zip):
-            if subprocess.call(["unzip", "-q", python_cache_zip, "-d", build_dir]) != 0:
-                raise Exception("Failed to extract Python bin cache!")
+        python_cache_config_name = resolve_bin_cache_name(
+            [source_dir + "/bin_cache_config_name.sh", "", "", python_abi_tag]
+        )
 
-            incompatibility = bin_cache_incompatibility(f"{build_dir}/{python_cache_config_name}")
+        if python_cache_config_name:
+            python_cache_zip = source_dir + "/cache/" + python_cache_config_name + ".zip"
+            if os.path.isfile(python_cache_zip):
+                if subprocess.call(["unzip", "-q", python_cache_zip, "-d", build_dir]) != 0:
+                    raise Exception("Failed to extract Python bin cache!")
 
-            if incompatibility is None:
-                extracted_python = os.path.join(build_dir, python_cache_config_name, "python")
-                if os.path.isdir(target_dir):
-                    shutil.rmtree(target_dir)
-                shutil.move(extracted_python, target_dir)
-                version_txt = os.path.join(target_dir, "version.txt")
-                if os.path.isfile(version_txt):
-                    shutil.copy2(version_txt, build_dir)
-                print(f"Bin cache located and will be used: {python_cache_config_name}")
-                needs_building = False
+                incompatibility = bin_cache_incompatibility(f"{build_dir}/{python_cache_config_name}")
+
+                if incompatibility is None:
+                    extracted_python = os.path.join(build_dir, python_cache_config_name, "python")
+                    if os.path.isdir(target_dir):
+                        shutil.rmtree(target_dir)
+                    shutil.move(extracted_python, target_dir)
+                    version_txt = os.path.join(target_dir, "version.txt")
+                    if os.path.isfile(version_txt):
+                        shutil.copy2(version_txt, build_dir)
+                    print(f"Bin cache located and will be used: {python_cache_config_name}")
+                    needs_building = False
+                else:
+                    print(f"Bin cache located, but won't be used as {incompatibility}")
+                    shutil.rmtree(f"{build_dir}/{python_cache_config_name}")
             else:
-                print(f"Bin cache located, but won't be used as {incompatibility}")
-                shutil.rmtree(f"{build_dir}/{python_cache_config_name}")
-                needs_building = True
+                # Name the key that was looked for. A key naming no archive is otherwise
+                # indistinguishable from a configuration for which no cache was ever
+                # published, which is what let an architecture silently stop matching any.
+                print(f"No bin cache for {python_cache_config_name}: building from source")
 
     elif platform == "win32" and cmake_arguments == "":
         # On Windows, .pyd files link against specific pythonXY.dll, so each version needs its own cache
         python_ver_tag = f"{sys.version_info.major}{sys.version_info.minor}"
         ps_script = os.path.join(source_dir, "bin_cache_config_name.ps1")
-        try:
-            python_cache_config_name = subprocess.check_output(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_script,
-                 "-PythonVersionTag", python_ver_tag],
-                text=True, cwd=source_dir
-            ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"Warning: failed to resolve Windows cache name: {e}", flush=True)
-            python_cache_config_name = ""
+        python_cache_config_name = resolve_bin_cache_name(
+            ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_script, "-PythonVersionTag", python_ver_tag],
+            cwd=source_dir,
+        )
 
         if python_cache_config_name:
             python_cache_zip = os.path.join(source_dir, "cache", python_cache_config_name + ".zip")
@@ -259,7 +285,15 @@ else:
                     print(f"Bin cache located and will be used: {python_cache_config_name}")
                     needs_building = False
                 else:
+                    # The archive was published malformed or truncated: it extracted, but carries
+                    # no python/ directory. Removing it without a word would make a packaging bug
+                    # on the publishing side look exactly like no cache having been published.
+                    print(f"Bin cache {python_cache_config_name} carries no python directory: "
+                          "building from source", flush=True)
                     shutil.rmtree(os.path.join(build_dir, python_cache_config_name), ignore_errors=True)
+            else:
+                # See the Linux branch above for why a miss must name its key
+                print(f"No bin cache for {python_cache_config_name}: building from source")
 
     if needs_building:
         print("Building C++ libraries from source...", flush=True)
@@ -267,6 +301,12 @@ else:
             "cmake", "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
             "-DPYTHON_BINDINGS=ON",
+            "-DPYTHON_PIP_PACKAGE=ON",
+            # Given every time, and ahead of CMAKE_ARGUMENTS, whose value comes later and so wins:
+            # build_dir is configured again by the next install, and would otherwise keep a value
+            # an earlier one's CMAKE_ARGUMENTS gave it - LOOK_FOR_FAST_DDS, say, which a pip
+            # package refuses, and would go on refusing after CMAKE_ARGUMENTS no longer asks for it.
+            "-DLOOK_FOR_FAST_DDS=OFF",
             "-DENABLE_CHECK_FORMAT=OFF",
             "-DENABLE_TESTS=OFF",
             "-DDISABLE_PROVIZIO_CODING_STANDARDS_CHECKS=ON",

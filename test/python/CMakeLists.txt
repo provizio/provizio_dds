@@ -1,3 +1,17 @@
+# Copyright 2023 Provizio Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set(TEST_PATH "${CMAKE_CURRENT_BINARY_DIR}")
 
 # Install dependencies, copy tests and all dependencies to the same test directory.
@@ -20,6 +34,22 @@ foreach(FILE ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${TEST_SCRIPTS})
         COMMAND ${CMAKE_COMMAND} -E copy "${FILE}" "${TEST_PATH}"
     )
 endforeach()
+if(FAST_DDS_INSTALL_DIR)
+    # The Fast-DDS built here, and the OpenSSL runtime placed next to it, as the build left them:
+    # found when this runs rather than when the tree was configured (see copy_runtime.cmake)
+    set(_FAST_DDS_RUNTIME_GLOBS "${FAST_DDS_INSTALL_DIR}/lib/*${CMAKE_SHARED_LIBRARY_SUFFIX}*")
+    if(WIN32)
+        # On Windows, DLLs are in bin/, not lib/
+        list(APPEND _FAST_DDS_RUNTIME_GLOBS "${FAST_DDS_INSTALL_DIR}/bin/*.dll")
+    endif()
+    string(REPLACE ";" "|" _FAST_DDS_RUNTIME_GLOBS "${_FAST_DDS_RUNTIME_GLOBS}")
+    # VERBATIM, or the | reaches cmd.exe unquoted on Windows, which takes it for a pipe
+    add_custom_command(TARGET python_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} "-DDESTINATION=${TEST_PATH}" "-DGLOBS=${_FAST_DDS_RUNTIME_GLOBS}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/copy_runtime.cmake"
+        VERBATIM
+    )
+endif()
 if("${CMAKE_SHARED_LIBRARY_SUFFIX}" STREQUAL ".dylib")
     # Python expects .so and .so only in import
     add_custom_command(TARGET python_tests POST_BUILD

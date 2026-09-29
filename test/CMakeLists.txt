@@ -198,6 +198,25 @@ add_subdirectory(point_cloud2)
 add_subdirectory(accumulation)
 add_subdirectory(source_text)
 add_subdirectory(fast_dds_patches)
+# Whenever this tree builds Fast-DDS from source, and so applies the patches in cmake/fast_dds/, the
+# tests showing those patches are in effect must be among the ones CTest runs -- and only then: a
+# system Fast-DDS (LOOK_FOR_FAST_DDS) or the prebuilt binaries carry no patch of ours, and
+# FAST_DDS_SOURCE_DIR is unset for both. Checked here, outside the directory whose own guard decides
+# it, because that guard once asked for a file the sources have only after the build downloads
+# them, and so skipped every one of those tests on a fresh tree -- the only kind a CI job configures
+# -- without anything failing.
+if(FAST_DDS_SOURCE_DIR)
+    get_property(_fast_dds_patch_tests DIRECTORY fast_dds_patches PROPERTY TESTS)
+    if(NOT _fast_dds_patch_tests)
+        message(FATAL_ERROR
+            "Fast-DDS is built from source here, yet test/fast_dds_patches registered no test: nothing "
+            "would show that the Fast-DDS this tree builds carries provizio_dds's patches.")
+    endif()
+endif()
+add_subdirectory(bin_cache)
+add_subdirectory(pip_package)
+add_subdirectory(ci_scripts)
+add_subdirectory(install)
 
 # See the link_libraries() above: from here on, targets are not test executables.
 set_property(DIRECTORY PROPERTY LINK_LIBRARIES "")
