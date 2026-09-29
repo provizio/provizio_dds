@@ -23,16 +23,16 @@ need to touch — network auto-recovery, transports, discovery tuning, logging, 
 
 **C++ (Linux / macOS):**
 
-- CMake (>= 3.15)
+- CMake (>= 3.15; >= 3.22 wherever Fast-DDS is built from source, which needs it itself: that is, unless the prebuilt binaries or an installed Fast-DDS (`LOOK_FOR_FAST_DDS=TRUE`) are used)
 - Git
 - C++ 17 compiler (gcc, clang, or MSVC)
 - libssl-dev (OpenSSL development headers)
-- eProsima Fast-DDS 3.x (provizio_dds builds against the Fast-DDS 3.x API): when a Fast-DDS installation is present it will be used, otherwise it's downloaded and built automatically. Note that the `FASTRTPS_DEFAULT_PROFILES_FILE` environment variable was renamed to `FASTDDS_DEFAULT_PROFILES_FILE` in Fast-DDS 3.x (see [XML Profiles](DETAILS.md#xml-profiles)).
+- eProsima Fast-DDS 3.x (provizio_dds builds against the Fast-DDS 3.x API): it's downloaded and built automatically, with provizio_dds's fixes to it applied, or comes built so with the prebuilt binaries. `-DLOOK_FOR_FAST_DDS=TRUE` uses an installed one instead, when one is found, which carries none of those fixes. Note that the `FASTRTPS_DEFAULT_PROFILES_FILE` environment variable was renamed to `FASTDDS_DEFAULT_PROFILES_FILE` in Fast-DDS 3.x (see [XML Profiles](DETAILS.md#xml-profiles)).
 
 **C++ (Windows):**
 
 - Visual Studio 2019+ (MSVC) with C++ 17 support
-- CMake (>= 3.15)
+- CMake (>= 3.15; >= 3.22 wherever Fast-DDS is built from source, which needs it itself: that is, unless the prebuilt binaries or an installed Fast-DDS (`LOOK_FOR_FAST_DDS=TRUE`) are used)
 - Git
 - Ninja build system
 - OpenSSL (install via `install_dependencies.ps1` or manually provide headers/libs). The Fast-DDS that provizio_dds builds is handed the OpenSSL provizio_dds's own `find_package(OpenSSL)` finds, and links that one — set `OPENSSL_ROOT_DIR`, or use a toolchain that provides one, such as Conan's, to choose it
