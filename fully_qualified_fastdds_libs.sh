@@ -20,7 +20,8 @@
 set -eu
 set -o pipefail
 
-if [ "${OSTYPE}" != "linux-gnu" ]; then
+# linux-gnu, but also linux-gnueabihf, linux-musl and the like
+if [[ "${OSTYPE}" != linux* ]]; then
     echo "Only Linux is supported"
     exit 1
 fi
@@ -51,7 +52,13 @@ else
     for file in "${LIB_DIR_TO_PATCH}"/*; do
         # Skip if the file is a soft link or not an executable/shared object
         if [ ! -L "${file}" ] && [ -f "${file}" ] && { [[ -x "${file}" ]] || [[ "${file}" == *.so* ]]; }; then
-            LD_LIBRARY_PATH="${LIB_DIR_TO_PATCH}:${LD_LIBRARY_PATH:-}" ldd "${file}" | awk '/=>/ { print $(NF-1) }' | while read -r lib; do
+            # Nothing to patch in what ldd cannot read: a script or a static binary with the
+            # executable bit, as a lib/ shared with other software (/usr/local/lib) may hold. Under
+            # set -e it would otherwise end the script there, leaving the rest unpatched.
+            if ! dependencies="$(LD_LIBRARY_PATH="${LIB_DIR_TO_PATCH}:${LD_LIBRARY_PATH:-}" ldd "${file}" 2>/dev/null)"; then
+                continue
+            fi
+            printf '%s\n' "${dependencies}" | awk '/=>/ { print $(NF-1) }' | while read -r lib; do
                 lib_basename="$(basename "${lib}")"
                 if [[ "${lib_basename}" == libfast*.so* && -L "${lib}" ]]; then
                     lib_full_path="$(realpath "${lib}")"
