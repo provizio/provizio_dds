@@ -98,6 +98,14 @@ else
     exit 1
   fi
 
+  # Everything this script downloads and builds, as root, goes in here rather than under a fixed
+  # name in /tmp: any user of the machine can create /tmp/<name> first, as a file whose contents a
+  # build then runs (a GNUmakefile a make would read ahead of the Makefile) or as a link a download
+  # would write through, and on the self-hosted CI runners the machine outlives the job. mktemp's
+  # directory is the invoking user's own, 0700.
+  WORK_DIR="$(mktemp -d)"
+  trap 'rm -rf "${WORK_DIR}"' EXIT
+
   # apt on CI hosts fails transiently far more often than it fails meaningfully: a mirror
   # returning 5xx or closing a connection mid-download, a stale package list after a mirror
   # rotation, and — on GitHub-hosted runners — unattended-upgrades holding the dpkg lock for the
@@ -257,9 +265,9 @@ else
           CMAKE_VERSION=3.25.2-0kitware1ubuntu20.04.1
       fi
       apt_get install -y software-properties-common lsb-release wget
-      download https://apt.kitware.com/keys/kitware-archive-latest.asc /tmp/kitware-archive-latest.asc
-      gpg --dearmor - < /tmp/kitware-archive-latest.asc | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null
-      rm -f /tmp/kitware-archive-latest.asc
+      download https://apt.kitware.com/keys/kitware-archive-latest.asc "${WORK_DIR}/kitware-archive-latest.asc"
+      gpg --dearmor - < "${WORK_DIR}/kitware-archive-latest.asc" | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null
+      rm -f "${WORK_DIR}/kitware-archive-latest.asc"
       apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main"
       apt_get update
       apt_get install -y --no-install-recommends kitware-archive-keyring
@@ -300,15 +308,14 @@ else
       fi
 
       apt_get install -y --no-install-recommends wget python3-pip libasio-dev libtinyxml2-dev
-      rm -rf /tmp/fastdds # In case of previous installation
-      mkdir /tmp/fastdds
+      mkdir "${WORK_DIR}/fastdds"
 
       # Foonathan memory
       # --depth 1 throughout this block: none of these builds reads its git history, and the
       # transfer is where a clone breaks — a stalled connection or a DNS failure partway
       # through a large pack fails the whole install. The refs below are tags, which is what
       # --branch needs; a raw SHA would need the depth dropped with it.
-      cd /tmp/fastdds
+      cd "${WORK_DIR}/fastdds"
       git clone --depth 1 --branch "${FOONATHAN_MEMORY_VENDOR_VERSION}" https://github.com/eProsima/foonathan_memory_vendor.git
       mkdir foonathan_memory_vendor/build
       cd foonathan_memory_vendor/build
@@ -316,7 +323,7 @@ else
       cmake --build . --target install
 
       # Fast CDR
-      cd /tmp/fastdds
+      cd "${WORK_DIR}/fastdds"
       git clone --depth 1 --branch "${FAST_CDR_VERSION}" https://github.com/eProsima/Fast-CDR.git
       cd Fast-CDR
       mkdir build
@@ -325,7 +332,7 @@ else
       cmake --build . --target install
 
       # Fast DDS
-      cd /tmp/fastdds
+      cd "${WORK_DIR}/fastdds"
       git clone --depth 1 --branch "${FAST_DDS_VERSION}" https://github.com/eProsima/Fast-DDS.git
       cd Fast-DDS
       mkdir build
@@ -382,11 +389,11 @@ else
         set -eu
 
         apt_get install -y --no-install-recommends wget libpcre2-dev automake bison byacc
-        cd /tmp
-        download "https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz" "/tmp/swig-${SWIG_VERSION}.tar.gz"
-        tar -xzf "/tmp/swig-${SWIG_VERSION}.tar.gz"
-        rm -f "/tmp/swig-${SWIG_VERSION}.tar.gz"
-        cd swig-${SWIG_VERSION}
+        cd "${WORK_DIR}"
+        download "https://github.com/swig/swig/archive/refs/tags/v${SWIG_VERSION}.tar.gz" "swig-${SWIG_VERSION}.tar.gz"
+        tar --no-same-owner -xzf "swig-${SWIG_VERSION}.tar.gz"
+        rm -f "swig-${SWIG_VERSION}.tar.gz"
+        cd "swig-${SWIG_VERSION}"
         ./autogen.sh
         ./configure
         make -j8
@@ -408,15 +415,24 @@ else
 fi
 
 if [ "${UBUNTU_18}" = true ]; then
-    # Install patchelf v0.18 (v0.9 shipped in 18.04 breaks binaries on --replace-needed)
-    cd /tmp
-    PATCHELF_VERSION="0.18.0"
-    download "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}.tar.gz" "patchelf-${PATCHELF_VERSION}.tar.gz"
-    tar -xf patchelf-${PATCHELF_VERSION}.tar.gz
-    cd patchelf-${PATCHELF_VERSION}/
-    ./configure --prefix=/usr --docdir=/usr/share/doc/patchelf-${PATCHELF_VERSION} && make && make install
-    cd /tmp
-    rm -rf patchelf-${PATCHELF_VERSION}*
+    # Install patchelf v0.18 (v0.9 shipped in 18.04 breaks binaries on --replace-needed). The release
+    # asset is checked against its digest before anything of it runs, as root; GitHub states none for
+    # it, so this one was taken from two separate downloads that agreed. Unpacked as root's own rather
+    # than as the tarball's owner (uid 1000), and installed into /usr/local, ahead of /usr on PATH,
+    # rather than over the file the distribution's patchelf package owns.
+    (
+      set -eu
+      PATCHELF_VERSION="0.18.0"
+      PATCHELF_SHA256="64de10e4c6b8b8379db7e87f58030f336ea747c0515f381132e810dbf84a86e7"
+      cd "${WORK_DIR}"
+      download "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}.tar.gz" "patchelf-${PATCHELF_VERSION}.tar.gz"
+      echo "${PATCHELF_SHA256}  patchelf-${PATCHELF_VERSION}.tar.gz" | sha256sum -c -
+      tar --no-same-owner -xzf "patchelf-${PATCHELF_VERSION}.tar.gz"
+      cd "patchelf-${PATCHELF_VERSION}"
+      ./configure --prefix=/usr/local
+      make
+      make install
+    )
 fi
 
 echo "Done installing provizio_dds build dependencies!"
