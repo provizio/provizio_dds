@@ -12,6 +12,16 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Read-only unless a job says otherwise. The default GITHUB_TOKEN of this repository can write, and
+# every job here runs a pull request's own code -- the self-hosted jetson ones as root, on machines
+# that persist between runs -- so anything a job did not need to be able to change stays out of its
+# reach. commit-cache, which pushes the cache commit, is the one job that writes; the ROS 2 jobs add
+# packages: read for the GHCR mirror. For the same reason the third-party actions are pinned to a
+# commit rather than a tag that can be moved: git-auto-commit-action runs with that writing token,
+# and msvc-dev-cmd sets up the builds of the Windows prebuilt binaries the token then publishes.
+permissions:
+  contents: read
+
 jobs:
   build-cache:
     name: Build bin cache (C++ only)
@@ -135,7 +145,7 @@ jobs:
         fail-fast: true
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Build cache
         run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}"
       - name: Get cache artifact name
@@ -166,7 +176,7 @@ jobs:
         with:
           python-version: ${{matrix.python-version}}
           allow-prereleases: true
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython ON
       - name: Build cache
@@ -187,6 +197,9 @@ jobs:
     name: Commit bin cache
     needs: [build-cache, build-cache-windows, build-cache-python, build-cache-python-arm, build-cache-windows-python]
     runs-on: ubuntu-latest
+    # Pushes the cache commit to the pull request's branch
+    permissions:
+      contents: write
     outputs:
       cache_commit_sha: ${{steps.cache_commit_sha.outputs.cache_commit_sha}}
     steps:
@@ -196,7 +209,9 @@ jobs:
         with:
           merge-multiple: true
           path: cache/
-      - uses: stefanzweifel/git-auto-commit-action@v4
+      # Pinned to a commit (see permissions at the top): it runs with the one token here that can
+      # write to the repository.
+      - uses: stefanzweifel/git-auto-commit-action@3ea6ae190baf489ba007f7c92608f33ce20ef04a # v4.16.0
         with:
           # [skip ci] keeps this auto-pushed cache commit from triggering a
           # fresh pull_request run. The commit only adds prebuilt cache/*.zip
@@ -676,7 +691,7 @@ jobs:
         with_python: [OFF, ON]
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython "${{matrix.with_python}}"
       - name: Configure
@@ -694,7 +709,7 @@ jobs:
         with_python: [OFF, ON]
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython "${{matrix.with_python}}"
       - name: Configure
@@ -737,7 +752,7 @@ jobs:
         with:
           python-version: ${{matrix.python-version}}
           allow-prereleases: true
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython ON
       - name: Configure
@@ -813,7 +828,7 @@ jobs:
         with:
           python-version: ${{matrix.python-version}}
           allow-prereleases: true
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython ON
       - name: Create venv and install package
