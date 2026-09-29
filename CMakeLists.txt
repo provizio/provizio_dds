@@ -375,22 +375,36 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                     endif(NOT EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
                 endif(NOT BIN_CACHE_WOULD_BE_DISCARDED)
 
+                # The paths reach PowerShell through its environment, never inside the command text: a
+                # quote in a checkout's path (C:\Users\O'Brien\...) would end a quoted string there early,
+                # and PowerShell would run the rest of the path as commands. The archive is named with
+                # -LiteralPath, as -Path reads the [ and ] a path may hold as wildcards. Expand-Archive
+                # has no such option for the destination, so a build directory whose path holds [ or ]
+                # can still fail to extract into: that is reported below, and everything is then built
+                # from source.
+                set(BIN_CACHE_EXPAND_ARCHIVE "Expand-Archive -LiteralPath $env:PROVIZIO_DDS_BIN_CACHE_ARCHIVE -DestinationPath $env:PROVIZIO_DDS_BIN_CACHE_DESTINATION -Force")
+                set(ENV{PROVIZIO_DDS_BIN_CACHE_DESTINATION} "${BIN_CACHE_PARENT_PATH}")
+
                 # Extract general cache if needed
                 set(BIN_CACHE_EXTRACTION_FAILURE "")
                 if(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
+                    set(ENV{PROVIZIO_DDS_BIN_CACHE_ARCHIVE} "${BIN_CACHE_SOURCE_PATH}")
                     provizio_dds_bin_cache_extract("${BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
-                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force")
+                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "${BIN_CACHE_EXPAND_ARCHIVE}")
                     set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${BIN_CACHE_CONFIG_NAME}.zip")
                 endif(EXISTS "${BIN_CACHE_SOURCE_PATH}" AND NOT EXISTS "${CACHED_PROVIZIO_DDS_DLL}")
 
                 # Extract Python-versioned cache if needed
                 if(NOT BIN_CACHE_EXTRACTION_FAILURE AND WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
                         AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                    set(ENV{PROVIZIO_DDS_BIN_CACHE_ARCHIVE} "${PYTHON_BIN_CACHE_SOURCE_PATH}")
                     provizio_dds_bin_cache_extract("${PYTHON_BIN_CACHE_PATH}" BIN_CACHE_EXTRACTION_FAILURE
-                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "Expand-Archive -Path '${PYTHON_BIN_CACHE_SOURCE_PATH}' -DestinationPath '${BIN_CACHE_PARENT_PATH}' -Force")
+                        COMMAND "${POWERSHELL_EXECUTABLE}" -Command "${BIN_CACHE_EXPAND_ARCHIVE}")
                     set(BIN_CACHE_EXTRACTION_ARCHIVE "cache/${PYTHON_BIN_CACHE_CONFIG_NAME}.zip")
                 endif(NOT BIN_CACHE_EXTRACTION_FAILURE AND WIN_PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
                     AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
+                unset(ENV{PROVIZIO_DDS_BIN_CACHE_ARCHIVE})
+                unset(ENV{PROVIZIO_DDS_BIN_CACHE_DESTINATION})
 
                 if(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
                     set(HAS_BIN_CACHE TRUE)
