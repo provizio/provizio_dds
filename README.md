@@ -23,7 +23,7 @@ need to touch — network auto-recovery, transports, discovery tuning, logging, 
 
 **C++ (Linux / macOS):**
 
-- CMake (>= 3.15)
+- CMake (>= 3.15; >= 3.22 wherever Fast-DDS is built from source, which needs it itself: that is, without prebuilt binaries)
 - Git
 - C++ 17 compiler (gcc, clang, or MSVC)
 - libssl-dev (OpenSSL development headers)
@@ -32,7 +32,7 @@ need to touch — network auto-recovery, transports, discovery tuning, logging, 
 **C++ (Windows):**
 
 - Visual Studio 2019+ (MSVC) with C++ 17 support
-- CMake (>= 3.15)
+- CMake (>= 3.15; >= 3.22 wherever Fast-DDS is built from source, which needs it itself: that is, without prebuilt binaries)
 - Git
 - Ninja build system
 - OpenSSL (install via `install_dependencies.ps1` or manually provide headers/libs). The Fast-DDS that provizio_dds builds is handed the OpenSSL provizio_dds's own `find_package(OpenSSL)` finds, and links that one — set `OPENSSL_ROOT_DIR`, or use a toolchain that provides one, such as Conan's, to choose it
