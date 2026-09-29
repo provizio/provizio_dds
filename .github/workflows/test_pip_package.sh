@@ -22,6 +22,7 @@ cd "$(cd "$(dirname "$0")" && pwd -P)"
 VENV=/tmp/provizio_dds_test_pip_package.venv
 rm -rf ${VENV}
 python3 -m venv ${VENV}
+# shellcheck source=/dev/null
 source ${VENV}/bin/activate
 
 # Manually install some dependencies in older versions of Python to avoid known incompatibilities in numpy and Cython
@@ -98,8 +99,10 @@ holding ${TMPDIR:-/tmp}; pip copies the whole source tree there before building 
 stale job workspaces and pip temporaries on this runner."
 fi
 
-# Build and install the package, capturing output to verify binary cache usage
-PIP_LOG=/tmp/pip_install_provizio_dds.log
+# Build and install the package, capturing output to verify binary cache usage. A name of its own
+# rather than a fixed one in /tmp, which another job on a shared self-hosted runner would write too.
+PIP_LOG="$(mktemp)"
+trap 'rm -f "${PIP_LOG}"' EXIT
 python3 -m pip install -v . 2>&1 | tee "${PIP_LOG}"
 
 # Verify the package was built the way this job is here to test. PIP_PACKAGE_BUILD=source is the
