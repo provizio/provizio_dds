@@ -123,8 +123,10 @@ provizio_dds_check_pip_package()
 # DLL chain is CRT-compatible with the Release Python interpreter.
 set(PROVIZIO_DDS_FORCE_RELEASE_CRT OFF)
 # Note: CMAKE_BUILD_TYPE check works because the project uses Ninja (single-config).
-# Multi-config generators (Visual Studio) would need generator expressions instead.
-if(WIN32 AND PYTHON_BINDINGS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+# Multi-config generators (Visual Studio) would need generator expressions instead. The build type is
+# taken whatever its case, as CMake takes a configuration's name.
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _PROVIZIO_DDS_BUILD_TYPE_UPPER)
+if(WIN32 AND PYTHON_BINDINGS AND _PROVIZIO_DDS_BUILD_TYPE_UPPER STREQUAL "DEBUG")
     if(POLICY CMP0091)
         cmake_policy(SET CMP0091 NEW)
     endif()
@@ -948,7 +950,10 @@ else(HAS_BIN_CACHE)
         if(NOT FAST_DDS_MAJOR_MINOR AND FAST_DDS_NUMERIC_VERSION)
             string(REGEX MATCH "^[0-9]+\\.[0-9]+" FAST_DDS_MAJOR_MINOR "${FAST_DDS_NUMERIC_VERSION}")
         endif()
-        if(_FAST_DDS_BUILD_TYPE STREQUAL "Debug")
+        # Whatever the build type's case, as Fast-DDS's debug postfix applies to the configuration
+        # CMake takes it for
+        string(TOUPPER "${_FAST_DDS_BUILD_TYPE}" _FAST_DDS_BUILD_TYPE_UPPER)
+        if(_FAST_DDS_BUILD_TYPE_UPPER STREQUAL "DEBUG")
             set(FAST_DDS_DEBUG_SUFFIX "d")
         else()
             set(FAST_DDS_DEBUG_SUFFIX "")
