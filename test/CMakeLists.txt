@@ -215,6 +215,7 @@ if(FAST_DDS_SOURCE_DIR)
 endif()
 add_subdirectory(bin_cache)
 add_subdirectory(pip_package)
+add_subdirectory(swig_lookup)
 add_subdirectory(ci_scripts)
 add_subdirectory(install)
 

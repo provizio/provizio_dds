@@ -344,7 +344,6 @@ else
     CURRENT_SWIG_VERSION=$(swig -version 2>/dev/null | grep -oP 'SWIG Version \K[0-9.]+' || echo "0.0.0")
     if [ "$(printf '%s\n' "4.4.0" "${CURRENT_SWIG_VERSION}" | sort -V | head -n1)" != "4.4.0" ]; then
       echo "Installing SWIG v${SWIG_VERSION} from source (current: ${CURRENT_SWIG_VERSION})..."
-      apt_get_optional remove -y swig 2>/dev/null || true
       (
         set -eu
 
@@ -359,6 +358,14 @@ else
         make -j8
         make install
       )
+      # The distribution's SWIG goes once this one is in place, not before, so that a failed build
+      # leaves the machine the SWIG it had. On Ubuntu up to 22.04 the swig package holds little but
+      # links to swig<N>.0, which holds the program and stays when swig alone is removed, where
+      # CMake's own SWIG lookup could come across it first. Each on its own, as apt removes nothing
+      # when one of several names is no package it knows (24.04 has no swig4.0).
+      for SWIG_PACKAGE in swig swig4.0 swig3.0; do
+        apt_get_optional remove -y "${SWIG_PACKAGE}" 2>/dev/null || true
+      done
     else
       echo "SWIG ${CURRENT_SWIG_VERSION} already installed, skipping..."
     fi

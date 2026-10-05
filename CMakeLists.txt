@@ -21,6 +21,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/extract.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/openssl_package.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_lookup.cmake")
 
 # Configuration
 set(PROVIZIO_DDS_IDLS_VERSION "2.1.1" CACHE STRING "provizio_dds_idls version")
@@ -1479,18 +1480,21 @@ else(HAS_BIN_CACHE)
             cmake_policy(SET CMP0086 NEW)
         endif()
 
-        # SWIG
-        find_package(SWIG REQUIRED COMPONENTS python)
+        # SWIG: the first on the search path, whatever it is named, and the library of the one found
+        # (see cmake/python_bindings/swig_lookup.cmake)
+        provizio_dds_find_swig()
         include(${SWIG_USE_FILE})
         set(CMAKE_SWIG_FLAGS "")
 
         if("${SWIG_VERSION}" VERSION_LESS "4.0")
-            message(FATAL_ERROR "SWIG 4.0 or newer is required, but ${SWIG_VERSION} found!")
+            message(FATAL_ERROR "SWIG 4.0 or newer is required, but ${SWIG_VERSION} found (${SWIG_EXECUTABLE})! "
+                "Install a newer one, and point SWIG_EXECUTABLE at it if another comes first.")
         endif("${SWIG_VERSION}" VERSION_LESS "4.0")
 
         # Python 3.14 changed PyHeapTypeObject layout (ht_token slot); SWIG 4.4+ is required
         if("${Python3_VERSION}" VERSION_GREATER_EQUAL "3.14" AND "${SWIG_VERSION}" VERSION_LESS "4.4")
-            message(FATAL_ERROR "SWIG 4.4 or newer is required for Python ${Python3_VERSION}, but ${SWIG_VERSION} found!")
+            message(FATAL_ERROR "SWIG 4.4 or newer is required for Python ${Python3_VERSION}, but ${SWIG_VERSION} found "
+                "(${SWIG_EXECUTABLE})! Install a newer one, and point SWIG_EXECUTABLE at it if another comes first.")
         endif()
 
         include_directories(SYSTEM ${FAST_DDS_INCLUDE_DIRS})
