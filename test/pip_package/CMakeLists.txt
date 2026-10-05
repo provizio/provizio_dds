@@ -40,6 +40,18 @@ add_test(NAME pip_package_vendored_foonathan_memory
 # Seconds. Two configures of a project that enables no language.
 set_tests_properties(pip_package_vendored_foonathan_memory PROPERTIES TIMEOUT 60)
 
+# What setup.py's extraction of a bin cache archive leaves in its build directory
+add_test(NAME pip_package_extract_bin_cache
+    COMMAND "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/extract_bin_cache_test.py" "${PROJECT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/extract_bin_cache")
+set_tests_properties(pip_package_extract_bin_cache PROPERTIES TIMEOUT 60)
+
+# Which packages left in setup.py's packages directory it packages as they are
+add_test(NAME pip_package_built_packages_reusable
+    COMMAND "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/built_packages_reusable_test.py" "${PROJECT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/built_packages_reusable")
+set_tests_properties(pip_package_built_packages_reusable PROPERTIES TIMEOUT 60)
+
 # Scale this directory's test timeouts under a sanitizer, and let a stuck test report
 # itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
 provizio_dds_finalize_tests()
