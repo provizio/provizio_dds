@@ -56,11 +56,14 @@ try
 
         auto future_response = client->request(request);
 
-        // Expected value 0 means "fire but don't validate" — don't wait on those responses (a
-        // non-responding service would otherwise block the test for the full timeout).
+        // Every response is waited for, even one whose value is not checked (an expected value of 0),
+        // as this client's Python mirror and request_response_client do: the service counts the
+        // requests it gets, and the last one, sent as the client exits, could otherwise go down with
+        // the client's participant before it is delivered, which failed the service on a slow runner.
+        const auto status = future_response.wait_for(timeout);
         if (request_response_pair.second != 0)
         {
-            if (future_response.wait_for(timeout) != std::future_status::ready)
+            if (status != std::future_status::ready)
             {
                 std::cerr << log_prefix << "Timeout waiting when " << request_response_pair.second << " was expected!"
                           << '\n';
