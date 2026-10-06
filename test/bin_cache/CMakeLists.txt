@@ -20,6 +20,14 @@ add_test(NAME bin_cache_extract
             -P "${CMAKE_CURRENT_SOURCE_DIR}/extract_test.cmake")
 set_tests_properties(bin_cache_extract PROPERTIES TIMEOUT 60)
 
+# Which file of those a build hands on the extracted binaries lack (cmake/bin_cache/missing_file.cmake),
+# on every platform that takes them: CMake in script mode
+add_test(NAME bin_cache_missing_file
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+            "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/missing_file"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/missing_file_test.cmake")
+set_tests_properties(bin_cache_missing_file PROPERTIES TIMEOUT 60)
+
 # The binary cache key is derived by bin_cache_config_name.sh, which only Linux uses and runs
 # (the Windows key comes from bin_cache_config_name.ps1, which reads the architecture from the
 # environment and is not exposed to any of this). Registering it elsewhere would only ever

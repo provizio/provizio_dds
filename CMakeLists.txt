@@ -21,6 +21,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_main_i.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/glob_escape.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/extract.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/missing_file.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/openssl_package.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_lookup.cmake")
 
@@ -285,7 +286,20 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
         endif(NOT BIN_CACHE_EXTRACTION_FAILURE AND PYTHON_VERSION_TAG AND EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"
             AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
 
-        if(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
+        # What the build hands on of the prebuilt binaries: the two libraries its imported targets name,
+        # the Fast-DDS stack they load, bundled under its versioned names, and with the Python bindings,
+        # their extension module
+        provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${BIN_CACHE_PATH}"
+            lib/libprovizio_dds.so lib/libprovizio_dds_types.so "lib/libfastdds.so.*" "lib/libfastcdr.so.*")
+        if(NOT BIN_CACHE_MISSING_FILE AND PYTHON_BINDINGS)
+            provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${PYTHON_CACHE_PATH}"
+                provizio_dds_python_types/_provizio_dds_python_types.so)
+            if(BIN_CACHE_MISSING_FILE)
+                set(BIN_CACHE_MISSING_FILE "python/${BIN_CACHE_MISSING_FILE}")
+            endif(BIN_CACHE_MISSING_FILE)
+        endif(NOT BIN_CACHE_MISSING_FILE AND PYTHON_BINDINGS)
+
+        if(NOT BIN_CACHE_MISSING_FILE)
             # Whether the prebuilt binaries can be used here is decided by the glibc / libstdc++ ABI
             # level they require of the host, which every cache records in its abi_requirements file
             # (see cmake/bin_cache/host_abi_compatibility.cmake for why that, and not the kernel
@@ -311,7 +325,7 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
             else(BIN_CACHE_ABI_COMPATIBLE)
                 message(STATUS "Prebuilt binaries located, but won't be used as ${BIN_CACHE_ABI_INCOMPATIBILITY_REASON}")
             endif(BIN_CACHE_ABI_COMPATIBLE)
-        else(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
+        else(NOT BIN_CACHE_MISSING_FILE)
             # An archive was published under this key but does not hold what the build needs: a
             # truncated or malformed publish, or Python binaries sought in the general archive
             # because no interpreter was found to name their ABI group -- or could not be extracted
@@ -323,14 +337,10 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                     "built from source.")
             elseif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
                 AND(NOT PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
-                set(BIN_CACHE_MISSING_FILE "lib/libprovizio_dds.so")
-                if(EXISTS "${CACHED_PROVIZIO_DDS_SO}")
-                    set(BIN_CACHE_MISSING_FILE "python/provizio_dds_python_types/_provizio_dds_python_types.so")
-                endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}")
                 message(STATUS "The prebuilt binaries published for this configuration do not provide "
                     "${BIN_CACHE_MISSING_FILE}: everything will be built from source.")
             endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
-        endif(EXISTS "${CACHED_PROVIZIO_DDS_SO}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}"))
+        endif(NOT BIN_CACHE_MISSING_FILE)
     elseif(WIN32)
         # Find PowerShell
         find_program(POWERSHELL_EXECUTABLE NAMES pwsh powershell)
@@ -415,9 +425,22 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                     AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}")
                 unset(ENV{PROVIZIO_DDS_BIN_CACHE_ARCHIVE})
 
-                if(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
+                # What the build hands on - see the Linux branch above: here the two libraries with the
+                # import libraries a consumer links, and Fast-DDS's likewise
+                provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${BIN_CACHE_PATH}"
+                    bin/provizio_dds.dll lib/provizio_dds.lib bin/provizio_dds_types.dll lib/provizio_dds_types.lib
+                    "bin/fastdds*.dll" "lib/fastdds*.lib" "bin/fastcdr*.dll" "lib/fastcdr*.lib")
+                if(NOT BIN_CACHE_MISSING_FILE AND PYTHON_BINDINGS)
+                    provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${PYTHON_CACHE_PATH}"
+                        provizio_dds_python_types/_provizio_dds_python_types.pyd)
+                    if(BIN_CACHE_MISSING_FILE)
+                        set(BIN_CACHE_MISSING_FILE "python/${BIN_CACHE_MISSING_FILE}")
+                    endif(BIN_CACHE_MISSING_FILE)
+                endif(NOT BIN_CACHE_MISSING_FILE AND PYTHON_BINDINGS)
+
+                if(NOT BIN_CACHE_MISSING_FILE)
                     set(HAS_BIN_CACHE TRUE)
-                else(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
+                else(NOT BIN_CACHE_MISSING_FILE)
                     # See the Linux branch above: an archive published for this key that does not
                     # hold what the build needs, or could not be extracted, is the last silent miss left.
                     if(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
@@ -427,10 +450,9 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                     elseif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND EXISTS "${BIN_CACHE_SOURCE_PATH}"
                         AND(NOT WIN_PYTHON_VERSION_TAG OR EXISTS "${PYTHON_BIN_CACHE_SOURCE_PATH}"))
                         message(STATUS "The prebuilt binaries published for this configuration do not provide "
-                            "provizio_dds.dll, provizio_dds.lib or the Python extension module: everything will "
-                            "be built from source.")
+                            "${BIN_CACHE_MISSING_FILE}: everything will be built from source.")
                     endif(NOT BIN_CACHE_WOULD_BE_DISCARDED AND BIN_CACHE_EXTRACTION_FAILURE)
-                endif(EXISTS "${CACHED_PROVIZIO_DDS_DLL}" AND EXISTS "${CACHED_PROVIZIO_DDS_LIB}" AND(NOT PYTHON_BINDINGS OR EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_PYD}"))
+                endif(NOT BIN_CACHE_MISSING_FILE)
             else(BIN_CACHE_CONFIG_RESULT EQUAL 0 AND NOT BIN_CACHE_CONFIG_NAME STREQUAL "")
                 # Gated like every other cache message, and split by cause for the same reasons as
                 # the Linux branch above: a build that would have dropped the cache anyway must not
