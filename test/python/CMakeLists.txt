@@ -35,8 +35,7 @@ add_custom_target(python_tests ALL
 # the same name as one of theirs is the one beside Fast-DDS (see copy_runtime.cmake).
 set(_FAST_DDS_RUNTIME_GLOBS)
 if(FAST_DDS_INSTALL_DIR)
-    # The directory as it is: a [, * or ? in it is no pattern
-    string(REGEX REPLACE "([[*?])" "[\\1]" _FAST_DDS_INSTALL_PATTERN "${FAST_DDS_INSTALL_DIR}")
+    provizio_dds_glob_escape(_FAST_DDS_INSTALL_PATTERN "${FAST_DDS_INSTALL_DIR}")
     set(_FAST_DDS_RUNTIME_GLOBS "${_FAST_DDS_INSTALL_PATTERN}/lib/*${CMAKE_SHARED_LIBRARY_SUFFIX}*")
     if(WIN32)
         # On Windows, DLLs are in bin/, not lib/
@@ -50,7 +49,8 @@ add_custom_command(TARGET python_tests POST_BUILD
             -P "${CMAKE_CURRENT_SOURCE_DIR}/copy_runtime.cmake"
     VERBATIM
 )
-file(GLOB TEST_SCRIPTS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
+provizio_dds_glob_escape(_TEST_SCRIPTS_PATTERN "${CMAKE_CURRENT_SOURCE_DIR}")
+file(GLOB TEST_SCRIPTS "${_TEST_SCRIPTS_PATTERN}/*.py")
 foreach(FILE ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${TEST_SCRIPTS})
     add_custom_command(TARGET python_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy "${FILE}" "${TEST_PATH}"

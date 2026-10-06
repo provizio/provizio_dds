@@ -508,7 +508,8 @@ def _load_provizio_dds_lib() -> Optional[ctypes.CDLL]:
         # SONAME-versioned file without the unversioned dev symlink.
         import glob
 
-        candidates.extend(sorted(glob.glob(os.path.join(here, "libprovizio_dds.so.*"))))
+        # The directory as it is: a [, * or ? an install path can hold is no pattern
+        candidates.extend(sorted(glob.glob(os.path.join(glob.escape(here), "libprovizio_dds.so.*"))))
         fallback_name = "libprovizio_dds.so"
 
     for path in candidates:

@@ -218,6 +218,7 @@ add_subdirectory(pip_package)
 add_subdirectory(swig_lookup)
 add_subdirectory(ci_scripts)
 add_subdirectory(install)
+add_subdirectory(glob_escape)
 
 # See the link_libraries() above: from here on, targets are not test executables.
 set_property(DIRECTORY PROPERTY LINK_LIBRARIES "")

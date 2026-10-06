@@ -29,6 +29,9 @@ endforeach()
 file(REMOVE_RECURSE "${WORK_DIR}")
 set(_built "${WORK_DIR}/fast_dds/lib")
 set(_tests "${WORK_DIR}/tests")
+# The directories as they are in the globs below: a [, * or ? in them is no pattern
+string(REGEX REPLACE "([[*?])" "[\\1]" _built_pattern "${_built}")
+string(REGEX REPLACE "([[*?])" "[\\1]" _work_pattern "${WORK_DIR}")
 file(MAKE_DIRECTORY "${_built}" "${_tests}")
 file(WRITE "${_built}/libfastdds.so.3.6.2" "fastdds")
 file(WRITE "${_built}/libssl.so.3" "ssl")
@@ -61,7 +64,9 @@ endfunction()
 
 # Checks that the tests' directory holds <names> and nothing else, but the record of what was copied
 function(_expect case)
-    file(GLOB _held LIST_DIRECTORIES false RELATIVE "${_tests}" "${_tests}/*")
+    # The directory as it is: a [, * or ? in it is no pattern
+    string(REGEX REPLACE "([[*?])" "[\\1]" _pattern "${_tests}")
+    file(GLOB _held LIST_DIRECTORIES false RELATIVE "${_tests}" "${_pattern}/*")
     list(REMOVE_ITEM _held provizio_dds_runtime_copied.txt)
     list(SORT _held)
     set(_expected ${ARGN})
@@ -77,7 +82,7 @@ if(CMAKE_HOST_UNIX)
 endif()
 
 # A Fast-DDS built here, with the OpenSSL runtime next to it: all of it copied, a link as a link
-_copy("${_built}/*.so*")
+_copy("${_built_pattern}/*.so*")
 _expect(first python_publisher.py libfastdds.so.3.6.2 libssl.so.3 libcrypto.so.3 ${_linked})
 if(CMAKE_HOST_UNIX AND NOT IS_SYMLINK "${_tests}/libfastdds.so.3.6")
     message(FATAL_ERROR "copy_runtime_test (first): the link was not copied as a link")
@@ -85,15 +90,15 @@ endif()
 
 # The same Fast-DDS with the system's OpenSSL now: the OpenSSL copied before goes
 file(REMOVE "${_built}/libssl.so.3" "${_built}/libcrypto.so.3")
-_copy("${_built}/*.so*")
+_copy("${_built_pattern}/*.so*")
 _expect(openssl_gone python_publisher.py libfastdds.so.3.6.2 ${_linked})
 
 # Another glob as well, matching nothing: as before
-_copy("${_built}/*.so*|${WORK_DIR}/nowhere/*.dll")
+_copy("${_built_pattern}/*.so*|${_work_pattern}/nowhere/*.dll")
 _expect(nothing_more python_publisher.py libfastdds.so.3.6.2 ${_linked})
 
 # Another step copying a file of a name copied too: the copy beside Fast-DDS is the one left
-_copy("${_built}/*.so*" "libfastdds.so.3.6.2=another step's")
+_copy("${_built_pattern}/*.so*" "libfastdds.so.3.6.2=another step's")
 _expect(clash python_publisher.py libfastdds.so.3.6.2 ${_linked})
 file(READ "${_tests}/libfastdds.so.3.6.2" _content)
 if(NOT _content STREQUAL "fastdds")

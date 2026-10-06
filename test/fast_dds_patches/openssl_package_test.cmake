@@ -526,7 +526,8 @@ set(_FAST_DDS_OPTIONS -DPROVIZIO_TEST_FAIL_LOOKUP=OFF "-DProvizioTestBar_MARKER:
     -DREPORT_BEFORE=ProvizioTestBar_ROOT|ProvizioTestBar_CHECKED|ProvizioTestBar_MARKER)
 _check(interrupted TRUE "ProvizioTestBar::ProvizioTestBar=under_root" ${_options})
 unset(_FAST_DDS_OPTIONS)
-if(NOT _output MATCHES "openssl_package_fast_dds: before the lookup: \\[ProvizioTestBar_ROOT=;ProvizioTestBar_CHECKED=;ProvizioTestBar_MARKER=([^]]*)\\]"
+# To the last ] of its line, as the path holds whatever the build directory's does
+if(NOT _output MATCHES "openssl_package_fast_dds: before the lookup: \\[ProvizioTestBar_ROOT=;ProvizioTestBar_CHECKED=;ProvizioTestBar_MARKER=([^\n]*)\\]"
         OR NOT CMAKE_MATCH_1 STREQUAL _given_anew)
     message(FATAL_ERROR "Case interrupted: Fast-DDS's own code found the cache as the stopped lookup left it:\n${_output}")
 endif()

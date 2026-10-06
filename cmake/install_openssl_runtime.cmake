@@ -34,11 +34,12 @@
 if(CMAKE_SCRIPT_MODE_FILE AND DEFINED PROVIZIO_DDS_OPENSSL_RUNTIME_FROM)
     # At install time, which runs in script mode, as no configure does
     include("${CMAKE_CURRENT_LIST_DIR}/install_root.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/glob_escape.cmake")
 
     function(_provizio_dds_install_openssl_runtime from to)
         # The directories as they are: a [, * or ? in either is no pattern of the globs below, which
         # would otherwise match, and remove, the files of other directories
-        string(REGEX REPLACE "([[*?])" "[\\1]" _from_pattern "${from}")
+        provizio_dds_glob_escape(_from_pattern "${from}")
         file(GLOB _runtime LIST_DIRECTORIES false "${_from_pattern}/libssl*" "${_from_pattern}/libcrypto*")
         set(_names)
         foreach(_file IN LISTS _runtime)
@@ -51,7 +52,7 @@ if(CMAKE_SCRIPT_MODE_FILE AND DEFINED PROVIZIO_DDS_OPENSSL_RUNTIME_FROM)
         endif()
 
         provizio_dds_install_root(_root)
-        string(REGEX REPLACE "([[*?])" "[\\1]" _to_pattern "${_root}/${to}")
+        provizio_dds_glob_escape(_to_pattern "${_root}/${to}")
         file(GLOB _installed LIST_DIRECTORIES false "${_to_pattern}/libssl*" "${_to_pattern}/libcrypto*")
         foreach(_file IN LISTS _installed)
             get_filename_component(_name "${_file}" NAME)

@@ -233,8 +233,9 @@ if platform != "win32":
         # qualified `.so.MAJOR.MINOR.PATCH` filename. Pick whichever
         # versioned file is present; dlopen by SONAME still resolves to
         # this object once it is in the process address space.
+        # The directory as it is: a [, * or ? an install path can hold is no pattern
         versioned = glob.glob(
-            os.path.join(module_dir, libname + "." + extension + ".*")
+            os.path.join(glob.escape(module_dir), libname + "." + extension + ".*")
         )
         if versioned:
             # Sort by numeric version components, not lexicographic — so

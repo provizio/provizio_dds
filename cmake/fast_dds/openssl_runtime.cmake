@@ -54,7 +54,8 @@ endforeach()
 
 # DESTINATION as it is in the globs below: a [, * or ? in it is no pattern, which would otherwise
 # match, and remove, the files of other directories
-string(REGEX REPLACE "([[*?])" "[\\1]" _destination_pattern "${DESTINATION}")
+include("${CMAKE_CURRENT_LIST_DIR}/../glob_escape.cmake")
+provizio_dds_glob_escape(_destination_pattern "${DESTINATION}")
 
 # Fast-DDS installs no OpenSSL of its own, so any here is one this script placed
 file(GLOB _stale "${_destination_pattern}/libssl*" "${_destination_pattern}/libcrypto*")
