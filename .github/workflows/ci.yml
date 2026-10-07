@@ -12,14 +12,29 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Read-only unless a job says otherwise. The default GITHUB_TOKEN of this repository can write, and
+# every job here runs a pull request's own code -- the self-hosted jetson ones as root, on machines
+# that persist between runs -- so anything a job did not need to be able to change stays out of its
+# reach. commit-cache, which pushes the cache commit, is the one job that writes; the ROS 2 jobs add
+# packages: read for the GHCR mirror. For the same reason the third-party actions are pinned to a
+# commit rather than a tag that can be moved: git-auto-commit-action runs with that writing token,
+# and msvc-dev-cmd sets up the builds of the Windows prebuilt binaries the token then publishes.
+permissions:
+  contents: read
+
 jobs:
   build-cache:
     name: Build bin cache (C++ only)
     runs-on: ${{matrix.runner}}
     strategy:
         matrix:
-            runner: [ubuntu-22.04, jetson-18.04]
+            runner: [ubuntu-22.04, jetson-20.04]
             build_type: [Release]
+        # The one deliberate exception to the fail-fast: false the rest of this file states. All
+        # five build-cache matrices feed the single commit-cache job, and it needs every one of
+        # them: once any combination has failed, the cache cannot be committed at all, so the
+        # combinations still running would spend runner time on artifacts that are then thrown
+        # away. Here, unlike in a test matrix, there is nothing left to learn from them.
         fail-fast: true
     env:
       CC: gcc
@@ -27,6 +42,12 @@ jobs:
       WITH_PYTHON: OFF
     steps:
       - uses: actions/checkout@v4
+      - name: Build against the OpenSSL 3 installed on the runner
+        # The aarch64 binaries ship their OpenSSL, so it is not the system's 1.1.1 of Ubuntu 20.04 but
+        # the 3.x that install_runner_openssl.sh puts into /opt/openssl-3 of each such runner.
+        # build_cache.sh refuses to build without it.
+        if: runner.arch == 'ARM64'
+        run: echo "OPENSSL_ROOT_DIR=/opt/openssl-3" >> "${GITHUB_ENV}"
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${WITH_PYTHON}" "${STATIC_ANALYSIS}"
       - run: .github/workflows/build_cache.sh "${{matrix.build_type}}" "${WITH_PYTHON}" "${STATIC_ANALYSIS}"
       - run: echo "cache_artifact_name=$(./bin_cache_config_name.sh "${{matrix.build_type}}")" >> $GITHUB_ENV
@@ -47,6 +68,7 @@ jobs:
             runner: [ubuntu-22.04]
             build_type: [Release]
             python-version: ['3.8', '3.14']
+        # Deliberately kept: see the note on the build-cache matrix.
         fail-fast: true
     env:
       CC: gcc
@@ -72,20 +94,28 @@ jobs:
 
   build-cache-python-arm:
     # ARM Python caches (actions/setup-python doesn't work on self-hosted ARM).
-    # Uses jetson-18.04 (same as build-cache) so libstdc++ 6.0.28 check passes.
+    # Uses jetson-20.04, as build-cache does, whose libstdc++ 6.0.28 build_cache.sh requires.
     # Requires python3.8 and python3.14 pre-installed with -dev and -venv on the runner.
+    # Also requires the OpenSSL 3 of install_runner_openssl.sh in /opt/openssl-3.
     name: Build Python bin cache (ARM, Python ${{matrix.python-version}})
-    runs-on: jetson-18.04
+    runs-on: jetson-20.04
     strategy:
         matrix:
             build_type: [Release]
             python-version: ['3.8', '3.14']
+        # Deliberately kept: see the note on the build-cache matrix.
         fail-fast: true
     env:
       CC: gcc
       STATIC_ANALYSIS: OFF
     steps:
       - uses: actions/checkout@v4
+      - name: Build against the OpenSSL 3 installed on the runner
+        # The aarch64 binaries ship their OpenSSL, so it is not the system's 1.1.1 of Ubuntu 20.04 but
+        # the 3.x that install_runner_openssl.sh puts into /opt/openssl-3 of each such runner.
+        # build_cache.sh refuses to build without it.
+        if: runner.arch == 'ARM64'
+        run: echo "OPENSSL_ROOT_DIR=/opt/openssl-3" >> "${GITHUB_ENV}"
       - name: Verify Python ${{matrix.python-version}} is available
         run: |
           PY=python${{matrix.python-version}}
@@ -124,10 +154,11 @@ jobs:
     strategy:
         matrix:
             build_type: [Release]
+        # Deliberately kept: see the note on the build-cache matrix.
         fail-fast: true
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Build cache
         run: .github/workflows/build_cache_windows.ps1 "${{matrix.build_type}}"
       - name: Get cache artifact name
@@ -150,6 +181,7 @@ jobs:
         matrix:
             build_type: [Release]
             python-version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+        # Deliberately kept: see the note on the build-cache matrix.
         fail-fast: true
     steps:
       - uses: actions/checkout@v4
@@ -157,7 +189,7 @@ jobs:
         with:
           python-version: ${{matrix.python-version}}
           allow-prereleases: true
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython ON
       - name: Build cache
@@ -178,6 +210,9 @@ jobs:
     name: Commit bin cache
     needs: [build-cache, build-cache-windows, build-cache-python, build-cache-python-arm, build-cache-windows-python]
     runs-on: ubuntu-latest
+    # Pushes the cache commit to the pull request's branch
+    permissions:
+      contents: write
     outputs:
       cache_commit_sha: ${{steps.cache_commit_sha.outputs.cache_commit_sha}}
     steps:
@@ -187,7 +222,9 @@ jobs:
         with:
           merge-multiple: true
           path: cache/
-      - uses: stefanzweifel/git-auto-commit-action@v4
+      # Pinned to a commit (see permissions at the top): it runs with the one token here that can
+      # write to the repository.
+      - uses: stefanzweifel/git-auto-commit-action@3ea6ae190baf489ba007f7c92608f33ce20ef04a # v4.16.0
         with:
           # [skip ci] keeps this auto-pushed cache commit from triggering a
           # fresh pull_request run. The commit only adds prebuilt cache/*.zip
@@ -211,6 +248,8 @@ jobs:
     name: Build with Static Analysis
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04, macos-latest]
         build_type: [Debug, Release]
@@ -229,6 +268,11 @@ jobs:
     name: Test
     runs-on: ${{matrix.runner}}
     strategy:
+      # One combination's failure must not cancel the others. These are independent verification
+      # runs, and the whole point of the matrix is knowing which of them pass: a single flake
+      # taking the rest down with it hides every other result and reports several red jobs for
+      # one fault. Stated explicitly because the default is the opposite.
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04, jetson-20.04, macos-15-intel]
         build_type: [Debug, Release]
@@ -288,6 +332,8 @@ jobs:
     name: Test (ThreadSanitizer)
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest]
         cc: [clang]
@@ -348,6 +394,8 @@ jobs:
     needs: commit-cache
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04, jetson-20.04]
         cc: [gcc, clang]
@@ -417,10 +465,46 @@ jobs:
         if: always()
         run: rm -rf /tmp/provizio_dds.venv
 
+  # A C++ consumer's install from the prebuilt binaries -- the plain Release configure of an unmodified
+  # checkout, the commonest way provizio_dds is consumed -- which no other job makes: the pip jobs take
+  # the prebuilt binaries through setup.py, and every other C++ job builds from source. Checks that the
+  # install keeps the OpenSSL runtime the binaries carry out of lib/, where every other program on the
+  # machine would load it, and that the installed Fast-DDS still loads it from where it went.
+  test-nix-bin-cache-install:
+    name: Test installing the prebuilt binaries
+    needs: commit-cache
+    runs-on: ${{matrix.runner}}
+    strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
+      matrix:
+        # jetson-20.04 for the aarch64 binaries, which carry an OpenSSL 3 that Ubuntu 20.04 (1.1.1) does not provide
+        runner: [ubuntu-latest, ubuntu-22.04, jetson-20.04]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "OFF" "OFF"
+      - run: .github/workflows/test_bin_cache_install.sh
+
+  # provizio_dds built against a Fast-DDS already installed on the system (LOOK_FOR_FAST_DDS=TRUE), the
+  # way a consumer who ships their own Fast-DDS builds it, instead of against the one provizio_dds
+  # builds from source. install_dependencies.sh puts stock upstream Fast-DDS in /usr.
+  #
+  # That Fast-DDS carries none of the fixes cmake/fast_dds/ patches into the one built from source --
+  # among them the timer deadlock that hung tests for their whole TIMEOUT, and the null payload pool
+  # and intraprocess-heartbeat races that crashed them -- and cannot: a preinstalled library is not
+  # ours to patch. The full suite would keep running into those known defects, so this job runs a
+  # smoke test only (PROVIZIO_DDS_CTEST_INCLUDE below): the build, the link and basic communication
+  # against the preinstalled Fast-DDS. Everything else is tested against the patched Fast-DDS by the
+  # other jobs; the fast_dds_patch_* tests are not even registered here, there being nothing of ours
+  # for them to check.
   test-preinstalled-fastdds:
     name: Test with Fast-DDS preinstalled
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04]
         build_type: [Debug, Release]
@@ -431,48 +515,147 @@ jobs:
       STATIC_ANALYSIS: OFF
       ENABLE_ROS_TESTS: OFF
       IGNORE_BIN_CACHE: TRUE
-      # Skip the reliability request/response stress tests in Debug (coding_standards auto-enables ASan
-      # there): under ASan they run several times slower and intermittently trip Fast-DDS's known
-      # asymmetric-matching "Timeout waiting for request/response" flake on slower runners, without adding
-      # coverage the non-stress request_response tests (still run under ASan) and the Release reliability
-      # runs don't. See the test-nix job for the full rationale.
-      PROVIZIO_DDS_CTEST_EXCLUDE: ${{ matrix.build_type == 'Debug' && 'reliability' || '' }}
+      # The smoke test: one C++ publisher / subscriber pair in two processes, and its Python twin where
+      # the bindings are built (the with_python ON half of the matrix; elsewhere it is not registered
+      # and only the C++ one runs). test.sh fails the job should the selection match no test.
+      PROVIZIO_DDS_CTEST_INCLUDE: '^(simplest_pub_sub|python_pub_python_sub)$'
     steps:
       - uses: actions/checkout@v4
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" "${ENABLE_ROS_TESTS}" /usr/
-      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS="${ENABLE_ROS_TESTS}"
+      - run: .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${{matrix.build_type}}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${{matrix.with_python}}" -DENABLE_TESTS=ON -DENABLE_ROS_TESTS="${ENABLE_ROS_TESTS}" -DLOOK_FOR_FAST_DDS=TRUE
+      # LOOK_FOR_FAST_DDS falls back to building Fast-DDS from source when it finds none, and says so only
+      # in a configure line nobody reads -- which would make this one more from-source job, testing
+      # nothing it is here for, as it did for as long as it passed no LOOK_FOR_FAST_DDS at all. So check
+      # that the configure took the Fast-DDS in /usr: that it found it there, and that it built none of
+      # its own -- a Fast-DDS package found but not usable (its configuration setting itself not found)
+      # leaves fastdds_DIR pointing at it all the same, while the fallback is what creates the build
+      # directory checked for.
+      - name: Check the preinstalled Fast-DDS was used
+        run: |
+          if ! grep -E '^fastdds_DIR:PATH=/usr/' build/CMakeCache.txt || [ -d build/fast_dds_build ]; then
+            echo "::error::provizio_dds did not build against the Fast-DDS preinstalled in /usr ($(grep '^fastdds_DIR' build/CMakeCache.txt); build/fast_dds_build $([ -d build/fast_dds_build ] && echo exists || echo 'does not exist'))"
+            exit 1
+          fi
       - run: .github/workflows/test.sh
 
-  test-nix-pip-package-preinstalled-fastdds:
-    name: Test pip package with Fast-DDS preinstalled
+  # The pip package built from source on Linux: what a user's pip install falls back to whenever no
+  # prebuilt binaries fit their host or configuration, and the only way it goes when CMAKE_ARGUMENTS
+  # is set -- which is how this job forces it, as prebuilt binaries would otherwise be taken wherever
+  # they exist. Every other Linux pip job checks out the commit CI publishes them in, and fails
+  # unless they were used, so this is the one covering setup.py's own configure and build of a pip
+  # package (PYTHON_PIP_PACKAGE), with the Fast-DDS it bundles, on Linux. (macOS pip jobs always
+  # build from source, there being no prebuilt binaries for it.)
+  #
+  # There is no job for a pip package against a preinstalled Fast-DDS, deliberately: a pip package
+  # always bundles provizio_dds's own, patched Fast-DDS -- the configure refuses LOOK_FOR_FAST_DDS
+  # for one -- and takes nothing of the Fast-DDS stack from the system, not even foonathan_memory
+  # (pip_package_vendored_foonathan_memory covers that part).
+  test-nix-pip-package-from-source:
+    name: Test pip package built from source
     runs-on: ${{matrix.runner}}
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-22.04]
         cc: [gcc, clang]
     env:
       CC: ${{matrix.cc}}
       STATIC_ANALYSIS: OFF
-      IGNORE_BIN_CACHE: TRUE
+      # setup.py looks for no prebuilt binaries with CMAKE_ARGUMENTS set, and this one keeps the
+      # configure from taking the ones CMake would find by itself
+      CMAKE_ARGUMENTS: -DIGNORE_BIN_CACHE=ON
+      # And test_pip_package.sh checks it did build from source
+      PIP_PACKAGE_BUILD: source
     steps:
       - uses: actions/checkout@v4
-      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}" OFF /usr/
+      - run: .github/workflows/sudo.sh ./install_dependencies.sh "ON" "${STATIC_ANALYSIS}"
       - run: .github/workflows/test_pip_package.sh
+
+  resolve-ros-base-image:
+    name: Resolve the ROS base image
+    runs-on: ubuntu-latest
+    # packages: read is what lets GITHUB_TOKEN see this organisation's GHCR mirror, which is a
+    # private package. Whether a given run's token can actually read it depends on the package's
+    # own access settings rather than on where the pull request came from, so the script treats
+    # being unable to as an ordinary outcome: it resolves to the fallback and warns.
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      distros: ${{steps.resolve.outputs.distros}}
+      images: ${{steps.resolve.outputs.images}}
+    env:
+      # The single source of truth for which ROS 2 distros are covered: the compatibility matrix
+      # below is built from this job's output rather than repeating the list.
+      ROS_DISTROS: humble iron jazzy kilted lyrical
+      # This organisation's mirror of the ros:* images, kept current by the "Mirror ROS base
+      # images" workflow of provizio_radar_api_ros2. Preferred because Docker Hub rate-limits
+      # UNAUTHENTICATED pulls per source IP over a window hours long and answers anything past
+      # the limit with an immediate HTTP 429 that retrying cannot wait out -- and this matrix,
+      # one image pull per job from hosted runners whose egress IP is shared with every other
+      # customer, is the biggest Docker Hub surface in this workflow.
+      #
+      # Setting the CONTAINER_REGISTRY_PREFIX repository/organisation variable takes the images
+      # from somewhere else, and takes them from there ONLY: it also clears the fallback below,
+      # so a distro that registry cannot serve fails its own jobs -- which pull its tag from there
+      # unpinned -- instead of quietly redirecting the matrix at Docker Hub, and without keeping
+      # any other distro's jobs from running. An air-gapped or policy-restricted setup sets that variable
+      # precisely so that no such redirect can happen. Note that whoever can set repository or
+      # organisation variables thereby chooses which images this workflow executes, and that write
+      # access to the mirror package is now a CI-integrity control in its own right: its contents
+      # are the code twenty jobs of this workflow run. The digest pinned below makes a run
+      # self-consistent; it is resolved per run, so it is not a pin against the mirror itself.
+      MIRROR_REPO: ${{vars.CONTAINER_REGISTRY_PREFIX || format('ghcr.io/{0}', github.repository_owner)}}/ros
+      # Used for any distro the mirror above cannot serve. Google's public pull-through cache of
+      # Docker Hub serves byte-identical content and needs no credentials, so it is the Docker
+      # Hub route that still works anonymously -- but it is still Docker Hub content and still
+      # rate-limited, which is why falling back to it raises a warning rather than passing
+      # quietly.
+      FALLBACK_REPO: mirror.gcr.io/library/ros
+      # Handed to the resolver so that IT can clear FALLBACK_REPO above, because an expression
+      # here cannot: GitHub's "a && b || c" ternary idiom returns c whenever b is falsy, and the
+      # empty string is falsy, so "prefix && '' || 'mirror...'" resolves to the fallback in both
+      # cases alike. Written that way, the promise of the paragraph above would be silently
+      # untrue for the one setup that depends on it.
+      CONTAINER_REGISTRY_PREFIX: ${{vars.CONTAINER_REGISTRY_PREFIX}}
+      # The compatibility matrix runs on ubuntu-latest, so an image the mirror holds for some
+      # other architecture is of no use to it and must not be resolved to.
+      REQUIRED_PLATFORM: linux/amd64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes, and the step after this one runs a script from the repository:
+          # no reason to leave a credential in .git/config for it to find.
+          persist-credentials: false
+      - id: resolve
+        # Scoped to this step rather than the job, so the token is not also in the environment of
+        # the checkout above. Passed through the environment rather than interpolated into the
+        # script, so nothing from the event context is ever parsed as shell.
+        env:
+          GHCR_USER: ${{github.actor}}
+          GHCR_TOKEN: ${{secrets.GITHUB_TOKEN}}
+        run: .github/workflows/resolve_ros_base_image.sh
 
   test-ros2-compatibility:
     name: Test compatibility with ROS2
     runs-on: ubuntu-latest
+    # The container is pulled by the runner before any step of this job runs, so which registry
+    # it comes from cannot be decided here -- resolve-ros-base-image decides it, per distro.
+    needs: resolve-ros-base-image
+    # packages: read lets the runner pull the GHCR mirror. No credentials: block is needed with
+    # it: the runner fills the credentials in from github.actor / GITHUB_TOKEN by itself when the
+    # image is on ghcr.io and none were given (actions/runner, ContainerOperationProvider's
+    # UpdateRegistryAuthForGitHubToken, which runs before the registry login), and supplies
+    # nothing for the fallback - which is exactly right for both. A static credentials: block
+    # would instead try those credentials against the fallback's registry and fail there.
+    permissions:
+      contents: read
+      packages: read
     container:
-      # Pulled through Google's public mirror of Docker Hub rather than Docker Hub itself.
-      # Docker Hub rate-limits UNAUTHENTICATED pulls per source IP over an hourly window and
-      # answers a request past the limit with an immediate HTTP 429 ("toomanyrequests"), which
-      # no amount of retrying can wait out. This matrix alone pulls a ros:* image per distro per
-      # job, so it is the biggest Docker Hub surface in this workflow. mirror.gcr.io is a
-      # pull-through cache serving byte-identical content, is not subject to those limits, and
-      # needs no credentials. Set the CONTAINER_REGISTRY_PREFIX repository/organisation variable
-      # to redirect this at a registry the runners authenticate against (or back at Docker Hub,
-      # with prefix "library", if that is ever preferable).
-      image: ${{ vars.CONTAINER_REGISTRY_PREFIX || 'mirror.gcr.io/library' }}/ros:${{matrix.ros}}
+      # Pinned to the digest the resolver read, so every job of this matrix runs the identical
+      # image even if the mirror's tag is re-pushed mid-run, and so the log records what ran.
+      image: ${{fromJSON(needs.resolve-ros-base-image.outputs.images)[matrix.ros]}}
       # The reliability request/response tests run a service + client (multiple Fast-DDS
       # participants) concurrently, and provizio's large-sample QoS sizes each participant's
       # shared-memory segment at ~34 MB. Docker's default 64 MB /dev/shm can't hold more than
@@ -486,7 +669,7 @@ jobs:
       # results of every remaining distro/compiler/build-type pairing.
       fail-fast: false
       matrix:
-        ros: [humble, iron, jazzy, kilted, lyrical]
+        ros: ${{fromJSON(needs.resolve-ros-base-image.outputs.distros)}}
         build_type: [Release, Debug]
         cc: [gcc, clang]
     env:
@@ -498,7 +681,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${PYTHON_BINDINGS}" "${STATIC_ANALYSIS}"
-      - run: .github/workflows/sudo.sh apt install -y ros-${{matrix.ros}}-demo-nodes-cpp
+      # With the image's own ROS packages upgraded alongside, so that all of them come from one sync
+      - run: .github/workflows/sudo.sh .github/workflows/install_ros_demo_nodes.sh ${{matrix.ros}}
       # Coding-standards checks are disabled here (incl. the ASan that StandardConfig auto-enables in
       # Debug): the ros:* container toolchains ship clang/gcc WITHOUT the compiler-rt sanitizer runtime
       # (libclang_rt.asan*), so an instrumented Debug build fails at the CMake compiler check. This job
@@ -513,12 +697,14 @@ jobs:
     name: Build (Windows)
     runs-on: windows-latest
     strategy:
+      # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
+      fail-fast: false
       matrix:
         build_type: [Debug, Release]
         with_python: [OFF, ON]
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython "${{matrix.with_python}}"
       - name: Configure
@@ -536,7 +722,7 @@ jobs:
         with_python: [OFF, ON]
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython "${{matrix.with_python}}"
       - name: Configure
@@ -579,7 +765,7 @@ jobs:
         with:
           python-version: ${{matrix.python-version}}
           allow-prereleases: true
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython ON
       - name: Configure
@@ -655,7 +841,7 @@ jobs:
         with:
           python-version: ${{matrix.python-version}}
           allow-prereleases: true
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Install dependencies
         run: .\install_dependencies.ps1 -WithPython ON
       - name: Create venv and install package
@@ -664,7 +850,7 @@ jobs:
           . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
           python -m pip install -v . 2>&1 | Tee-Object -FilePath "$env:TEMP\pip_install.log"
           if (-not (Select-String -Path "$env:TEMP\pip_install.log" -Pattern "Bin cache located and will be used" -Quiet)) {
-            Write-Error "Binary cache was NOT used during pip install — check cache artifacts and CMake config"
+            Write-Error "Binary cache was NOT used during pip install - check cache artifacts and CMake config"
             exit 1
           }
           Write-Host "Verified: binary cache was used"

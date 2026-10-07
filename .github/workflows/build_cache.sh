@@ -26,9 +26,36 @@ STATIC_ANALYSIS=${3:-"OFF"}
 
 cd "$(cd "$(dirname "$0")" && pwd -P)"
 
-# In aarch64, make sure libstdc++.so.6.0.28 is used, to be compatible with both Orin and TX2
-if [[ "$(uname -i)" == "aarch64" && "$(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6)" != "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28" ]]; then
+# In aarch64, make sure libstdc++.so.6.0.28 is used: Ubuntu 20.04's own (JetPack 5), the oldest the
+# aarch64 binaries support, so that a newer toolchain on the machine building them cannot raise the
+# libstdc++ they require past what such a host provides.
+# The architecture comes from the POSIX "machine" option for the reason spelled out in
+# bin_cache_config_name.sh: the non-portable alternatives answer "unknown" on a uutils-coreutils
+# host, which would leave this guard silently never matching on the very hosts it protects.
+if [[ "$(uname -m)" == "aarch64" && "$(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6)" != "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28" ]]; then
   echo "/usr/lib/aarch64-linux-gnu/libstdc++.so.6 is $(realpath /usr/lib/aarch64-linux-gnu/libstdc++.so.6) while /usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.28 is required for compatibility!"
+  exit 1
+fi
+
+# In aarch64, make sure the OpenSSL 3 of install_runner_openssl.sh is what the binaries are built
+# against and ship: Ubuntu 20.04's own is 1.1.1, which nothing newer supports. The version is read
+# from the header, as the private OpenSSL's libraries carry no RUNPATH for its own binary to run by.
+if [[ "$(uname -m)" == "aarch64" ]] &&
+  ! grep -qE '^# *define +OPENSSL_VERSION_MAJOR +3$' "${OPENSSL_ROOT_DIR:-/nonexistent}/include/openssl/opensslv.h" 2>/dev/null; then
+  echo "OPENSSL_ROOT_DIR=\"${OPENSSL_ROOT_DIR:-}\" does not hold an OpenSSL 3, which the aarch64 binaries are required to be built against (install_runner_openssl.sh installs one into /opt/openssl-3)!"
+  exit 1
+fi
+
+# patchelf rewrites every binary published from here: their RUNPATH below, and at install the names
+# they link Fast-DDS by (fully_qualified_fastdds_libs.sh). 0.14 is the oldest the published binaries
+# are rewritten with, the one of the Ubuntu 22.04 host building the x86_64 ones; an older one, such
+# as Ubuntu 20.04's 0.10, is refused here rather than left to rewrite them. install_dependencies.sh
+# builds 0.18 on 20.04, but only warns when it cannot download it.
+PATCHELF_MINIMUM="0.14"
+# || true: without patchelf the pipeline fails, and pipefail would end the script before it said why
+PATCHELF_FOUND="$(patchelf --version 2>/dev/null | awk '{print $2}' || true)"
+if [ "$(printf '%s\n' "${PATCHELF_MINIMUM}" "${PATCHELF_FOUND:-0}" | sort -V | head -n1)" != "${PATCHELF_MINIMUM}" ]; then
+  echo "patchelf ${PATCHELF_FOUND:-(none)} is older than ${PATCHELF_MINIMUM}, the oldest the prebuilt binaries are rewritten with"
   exit 1
 fi
 
@@ -54,7 +81,6 @@ if [ -n "${PYTHON_VERSION_TAG}" ]; then
 fi
 
 PROVIZIO_DDS_CHECK_FILE="${TARGET_PATH}/lib/libprovizio_dds.so"
-CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO="${PYTHON_TARGET_PATH}/provizio_dds_python_types/_provizio_dds_python_types.so"
 
 # Check if it's already built
 ALREADY_BUILT="FALSE"
@@ -108,7 +134,12 @@ else
         rm -rf "${BIN_CACHE_PATH:?}"/${WILDCARD_PYTHON_NAME} "${BIN_CACHE_PATH:?}"/${WILDCARD_PYTHON_NAME}.zip
     fi
 
-    IGNORE_BIN_CACHE=TRUE .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${PYTHON}" -DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS="ON" -DENABLE_TESTS="OFF" -DENABLE_CHECK_FORMAT="OFF" -DCMAKE_INSTALL_PREFIX="${TARGET_PATH}" -DPYTHON_PACKAGES_INSTALL_DIR="${PYTHON_TARGET_PATH}"
+    # The Python binaries cached here are what setup.py packages, so they are built as a pip package
+    PIP_PACKAGE_ARGS=()
+    if [ "${PYTHON}" == "ON" ]; then
+        PIP_PACKAGE_ARGS=(-DPYTHON_PIP_PACKAGE=ON)
+    fi
+    IGNORE_BIN_CACHE=TRUE .github/workflows/build.sh -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" -DSTATIC_ANALYSIS="${STATIC_ANALYSIS}" -DPYTHON_BINDINGS="${PYTHON}" -DINSTALL_ONLY_FULLY_QUALIFIED_FAST_DDS_LIBS="ON" -DENABLE_TESTS="OFF" -DENABLE_CHECK_FORMAT="OFF" -DCMAKE_INSTALL_PREFIX="${TARGET_PATH}" -DPYTHON_PACKAGES_INSTALL_DIR="${PYTHON_TARGET_PATH}" ${PIP_PACKAGE_ARGS[@]+"${PIP_PACKAGE_ARGS[@]}"}
     cd ./build
     cmake --install .
 
@@ -122,7 +153,11 @@ else
         local lib_basename
         local lib_realpath
 
-        # Update RUNPATH to make it look for its dependencies in the same directory or ../lib/.
+        # Update RUNPATH to make it look for its dependencies in the same directory or ../lib/,
+        # and in provizio_dds/ next to it: an install of these binaries puts the OpenSSL they
+        # carry there, apart from the rest of lib/, as PROVIZIO_DDS_PRIVATE_LIB_DIR in the
+        # CMakeLists says why (the name must match it) -- first, as there: a lib/ shared with
+        # other software can hold another OpenSSL of the same name.
         # Applied to EVERY binary, provizio's own included. They used to be exempted as already
         # having the right RUNPATH, which was untrue for years: CMake was handing them a leading
         # empty element (the loader reads that as the current working directory) followed by the
@@ -131,7 +166,7 @@ else
         # the belt to that braces -- and the one place a future regression would be caught
         # whatever the generator did.
         # shellcheck disable=SC2016
-        patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib' "${binary}"
+        patchelf --set-rpath '$ORIGIN/provizio_dds:$ORIGIN:$ORIGIN/../lib' "${binary}"
 
         # Use ldd to find shared libraries the binary depends on
         ldd "${binary}" | awk '/=>/ { print $(NF-1) }' | while read -r lib; do
@@ -171,6 +206,12 @@ else
         collect_all_libs "${TARGET_PATH}/python/fastdds"
         collect_all_libs "${TARGET_PATH}/python/provizio_dds"
         collect_all_libs "${TARGET_PATH}/python/provizio_dds_python_types"
+    fi
+
+    # Whatever OpenSSL the build found, the 1.1 series must not be what ships on aarch64
+    if [[ "$(uname -m)" == "aarch64" ]] && [ -n "$(find "${TARGET_PATH}" -name 'libssl.so.1*' -o -name 'libcrypto.so.1*')" ]; then
+      echo "The binaries in ${TARGET_PATH} carry OpenSSL 1.1, not the OpenSSL 3 they are required to be built against!"
+      exit 1
     fi
 
     # Store the build machine's kernel version in the cache, as build provenance (it says nothing

@@ -1,3 +1,17 @@
+# Copyright 2026 Provizio Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Make TopicPayloadPoolRegistry hand out a pool it actually holds.
 #
 # Fast-DDS shares one payload pool per topic name (and memory policy) among every DataWriter
@@ -43,7 +57,10 @@ if(NOT EXISTS "${REGISTRY_HPP}")
     message(FATAL_ERROR "topic_payload_pool_registry_lock_first.cmake: file not found: ${REGISTRY_HPP}")
 endif()
 
-file(READ "${REGISTRY_HPP}" _contents)
+# Sources are read and written through patch_io.cmake, which keeps the line endings of the
+# checkout and of the host from mattering (see there).
+include("${CMAKE_CURRENT_LIST_DIR}/patch_io.cmake")
+provizio_dds_patch_read("${REGISTRY_HPP}" _contents)
 
 # NO REVISION MARKER HERE, deliberately, and there is a rule attached to that. A tree
 # carries no record of WHICH revision of a patch script wrote it, so a bare "already patched"
@@ -101,5 +118,5 @@ if(_pos EQUAL -1)
 endif()
 string(REPLACE "${_anchor}" "${_patched}" _contents "${_contents}")
 
-file(WRITE "${REGISTRY_HPP}" "${_contents}")
+provizio_dds_patch_write("${REGISTRY_HPP}" "${_contents}")
 message(STATUS "topic_payload_pool_registry_lock_first: patched TopicPayloadPoolRegistry.hpp")

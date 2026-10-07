@@ -63,10 +63,11 @@ if os.name == "nt":
     # silently no-op the preload.
     import ctypes as _ctypes
     import glob as _glob
-    _module_dir = os.path.dirname(os.path.abspath(__file__))
-    for _dll in sorted(_glob.glob(os.path.join(_module_dir, "fastcdr*-*.dll"))):
+    # The directory as it is: a [, * or ? an install path can hold is no pattern
+    _module_pattern = _glob.escape(os.path.dirname(os.path.abspath(__file__)))
+    for _dll in sorted(_glob.glob(os.path.join(_module_pattern, "fastcdr*-*.dll"))):
         _ctypes.WinDLL(_dll)
-    for _dll in sorted(_glob.glob(os.path.join(_module_dir, "fastdds*-*.dll"))):
+    for _dll in sorted(_glob.glob(os.path.join(_module_pattern, "fastdds*-*.dll"))):
         _ctypes.WinDLL(_dll)
 
 # Import fastdds first: on Windows, _provizio_dds_python_types.pyd has a DLL-level
