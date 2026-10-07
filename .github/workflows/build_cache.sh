@@ -37,6 +37,15 @@ if [[ "$(uname -m)" == "aarch64" && "$(realpath /usr/lib/aarch64-linux-gnu/libst
   exit 1
 fi
 
+# In aarch64, make sure the OpenSSL 3 of install_runner_openssl.sh is what the binaries are built
+# against and ship: Ubuntu 20.04's own is 1.1.1, which nothing newer supports. The version is read
+# from the header, as the private OpenSSL's libraries carry no RUNPATH for its own binary to run by.
+if [[ "$(uname -m)" == "aarch64" ]] &&
+  ! grep -qE '^# *define +OPENSSL_VERSION_MAJOR +3$' "${OPENSSL_ROOT_DIR:-/nonexistent}/include/openssl/opensslv.h" 2>/dev/null; then
+  echo "OPENSSL_ROOT_DIR=\"${OPENSSL_ROOT_DIR:-}\" does not hold an OpenSSL 3, which the aarch64 binaries are required to be built against (install_runner_openssl.sh installs one into /opt/openssl-3)!"
+  exit 1
+fi
+
 # patchelf rewrites every binary published from here: their RUNPATH below, and at install the names
 # they link Fast-DDS by (fully_qualified_fastdds_libs.sh). 0.14 is the oldest the published binaries
 # are rewritten with, the one of the Ubuntu 22.04 host building the x86_64 ones; an older one, such
@@ -197,6 +206,12 @@ else
         collect_all_libs "${TARGET_PATH}/python/fastdds"
         collect_all_libs "${TARGET_PATH}/python/provizio_dds"
         collect_all_libs "${TARGET_PATH}/python/provizio_dds_python_types"
+    fi
+
+    # Whatever OpenSSL the build found, the 1.1 series must not be what ships on aarch64
+    if [[ "$(uname -m)" == "aarch64" ]] && [ -n "$(find "${TARGET_PATH}" -name 'libssl.so.1*' -o -name 'libcrypto.so.1*')" ]; then
+      echo "The binaries in ${TARGET_PATH} carry OpenSSL 1.1, not the OpenSSL 3 they are required to be built against!"
+      exit 1
     fi
 
     # Store the build machine's kernel version in the cache, as build provenance (it says nothing

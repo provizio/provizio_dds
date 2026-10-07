@@ -42,6 +42,12 @@ jobs:
       WITH_PYTHON: OFF
     steps:
       - uses: actions/checkout@v4
+      - name: Build against the OpenSSL 3 installed on the runner
+        # The aarch64 binaries ship their OpenSSL, so it is not the system's 1.1.1 of Ubuntu 20.04 but
+        # the 3.x that install_runner_openssl.sh puts into /opt/openssl-3 of each such runner.
+        # build_cache.sh refuses to build without it.
+        if: runner.arch == 'ARM64'
+        run: echo "OPENSSL_ROOT_DIR=/opt/openssl-3" >> "${GITHUB_ENV}"
       - run: .github/workflows/sudo.sh ./install_dependencies.sh "${WITH_PYTHON}" "${STATIC_ANALYSIS}"
       - run: .github/workflows/build_cache.sh "${{matrix.build_type}}" "${WITH_PYTHON}" "${STATIC_ANALYSIS}"
       - run: echo "cache_artifact_name=$(./bin_cache_config_name.sh "${{matrix.build_type}}")" >> $GITHUB_ENV
@@ -90,6 +96,7 @@ jobs:
     # ARM Python caches (actions/setup-python doesn't work on self-hosted ARM).
     # Uses jetson-20.04, as build-cache does, whose libstdc++ 6.0.28 build_cache.sh requires.
     # Requires python3.8 and python3.14 pre-installed with -dev and -venv on the runner.
+    # Also requires the OpenSSL 3 of install_runner_openssl.sh in /opt/openssl-3.
     name: Build Python bin cache (ARM, Python ${{matrix.python-version}})
     runs-on: jetson-20.04
     strategy:
@@ -103,6 +110,12 @@ jobs:
       STATIC_ANALYSIS: OFF
     steps:
       - uses: actions/checkout@v4
+      - name: Build against the OpenSSL 3 installed on the runner
+        # The aarch64 binaries ship their OpenSSL, so it is not the system's 1.1.1 of Ubuntu 20.04 but
+        # the 3.x that install_runner_openssl.sh puts into /opt/openssl-3 of each such runner.
+        # build_cache.sh refuses to build without it.
+        if: runner.arch == 'ARM64'
+        run: echo "OPENSSL_ROOT_DIR=/opt/openssl-3" >> "${GITHUB_ENV}"
       - name: Verify Python ${{matrix.python-version}} is available
         run: |
           PY=python${{matrix.python-version}}
@@ -465,7 +478,7 @@ jobs:
       # Independent combinations: one failing must not cancel the rest (see the note on test-nix).
       fail-fast: false
       matrix:
-        # jetson-20.04 for the aarch64 binaries, whose OpenSSL (1.1) a newer host does not have at all
+        # jetson-20.04 for the aarch64 binaries, which carry an OpenSSL 3 that Ubuntu 20.04 (1.1.1) does not provide
         runner: [ubuntu-latest, ubuntu-22.04, jetson-20.04]
     steps:
       - uses: actions/checkout@v4
