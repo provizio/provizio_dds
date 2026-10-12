@@ -466,9 +466,13 @@ def _resolve_env_once() -> bool:
 # ---------------------------------------------------------------------------
 #
 # Fast-DDS keeps a process-wide static cache of network interfaces in its
-# `eprosima::SystemInfo` class, populated exactly once at first participant
-# creation and never automatically refreshed afterwards. When the Python
-# `_DomainParticipant._reset_hook_locked` recreates a participant via
+# `eprosima::SystemInfo` class, populated once at first participant creation
+# and not refreshed for a participant creation afterwards (the Fast-DDS this
+# package bundles refreshes it when a peer of this host announces an address it
+# lacks, or an initial peer is not in it -- the latter only once the new
+# participant's transports are built from it; see
+# cmake/fast_dds/local_address_by_current_interfaces.cmake).
+# When the Python `_DomainParticipant._reset_hook_locked` recreates a participant via
 # `factory.create_participant(...)`, the new participant transparently picks
 # up the stale cache and ends up bound to whatever interfaces were present
 # at first-participant time. That is the auto-recovery bug fixed in

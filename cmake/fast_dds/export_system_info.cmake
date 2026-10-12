@@ -18,10 +18,11 @@
 # Why provizio_dds needs it: the network-auto-recovery feature (APT-11792)
 # calls SystemInfo::update_interfaces() before recreating a participant on a
 # network change, to refresh Fast-DDS's process-wide interface cache (which is
-# otherwise populated once and never refreshed — so a rebuilt participant
-# would bind to stale interfaces). SystemInfo is a Fast-DDS-internal class with
-# zero FASTDDS_EXPORTED_API decoration, so on Windows the symbol isn't in the
-# DLL export table and provizio_dds can't link against it.
+# otherwise populated once, and refreshed by nothing a rebuild does — so a
+# rebuilt participant would bind to stale interfaces). SystemInfo is a
+# Fast-DDS-internal class with zero FASTDDS_EXPORTED_API decoration, so on
+# Windows the symbol isn't in the DLL export table and provizio_dds can't link
+# against it.
 #
 # Why this targeted patch rather than CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS: Fast-DDS
 # is large enough that auto-exporting every symbol overflows the Windows

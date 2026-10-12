@@ -41,6 +41,7 @@
 #include "provizio/dds/publisher.h"
 #include "provizio/dds/subscriber.h"
 
+#include <fastdds/rtps/transport/SocketTransportDescriptor.hpp>
 #include <fastdds/utils/IPFinder.hpp>
 
 #include <std_msgs/msg/StringPubSubTypes.hpp>
@@ -2123,9 +2124,10 @@ namespace
                   << subscriber->get_num_matched_publishers(no_wait, no_wait) << " matched publisher(s))" << '\n';
         return 1;
     }
-    // One of the two peers same_host_filter_test.sh drives, both on ONE host (one network
-    // namespace, one machine id) in transport_mode::localhost_only, which has the discovery
-    // layer refuse every participant it takes for another host (FILTER_DIFFERENT_HOST).
+    // One of the two peers same_host_filter_test.sh drives in each of its cases, both on ONE host
+    // (one network namespace, one machine id), the first in transport_mode::localhost_only, which
+    // has the discovery layer refuse every participant it takes for another host
+    // (FILTER_DIFFERENT_HOST), and the second in that mode too or in the ordinary one.
     // The script starts the first peer while no interface has carrier and the second after
     // one has, so the two derive different Fast-DDS host ids -- the id is computed once per
     // process from the interfaces that have carrier at that moment. Fast-DDS used to judge
@@ -2134,13 +2136,22 @@ namespace
     // They must, whenever each was started. The host id is printed for the script, which
     // asserts the two differ -- without that the exchange would prove nothing.
     //
-    // usage: same_host_peer <pub|sub> <topic> <timeout_sec>
+    // The transport is localhost_only unless "automatic" is given, which the script gives the peer
+    // started after the network came up to stand for an ordinary participant of the host on a
+    // Fast-DDS that announces the machine id (3.2 or later -- a recorder built on this library's,
+    // say): it announces only the addresses of the interface that came up, no loopback one, and a
+    // localhost_only peer started before that interface had carrier must still recognise those
+    // addresses as its own host's to reach it over loopback.
+    //
+    // usage: same_host_peer <pub|sub> <topic> <timeout_sec> [localhost_only|automatic]
     int test_same_host_peer(const std::vector<std::string_view> &args)
     {
         constexpr std::size_t expected_arg_count = 5;
+        constexpr std::size_t transport_arg_index = 5;
         if (args.size() < expected_arg_count)
         {
-            std::cerr << "usage: " << args[0] << " same_host_peer <pub|sub> <topic> <timeout_sec>" << '\n';
+            std::cerr << "usage: " << args[0]
+                      << " same_host_peer <pub|sub> <topic> <timeout_sec> [localhost_only|automatic]" << '\n';
             return 2;
         }
         const std::string role{args[2]};
@@ -2160,13 +2171,22 @@ namespace
             std::cerr << "same_host_peer: role must be pub|sub" << '\n';
             return 2;
         }
+        const std::string transport_name{args.size() > transport_arg_index ? args[transport_arg_index]
+                                                                           : std::string_view{"localhost_only"}};
+        if (transport_name != "localhost_only" && transport_name != "automatic")
+        {
+            std::cerr << "same_host_peer: transport must be localhost_only|automatic" << '\n';
+            return 2;
+        }
+        const auto transport = transport_name == "automatic" ? provizio::dds::transport_mode::automatic
+                                                             : provizio::dds::transport_mode::localhost_only;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{timeout_sec};
 
         // Recovery off: a rebuild would not change the host id, and the point is that the
-        // two peers differ in it from their first participant on.
-        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off,
-                                                                        {}, provizio::dds::endpoint_kind::data_writer,
-                                                                        provizio::dds::transport_mode::localhost_only);
+        // two peers differ in it from their first participant on. (localhost_only takes no part
+        // in recovery anyway; an automatic peer would, and a rebuild would announce anew.)
+        const auto participant = provizio::dds::make_domain_participant(
+            0, provizio::dds::network_recovery_mode::off, {}, provizio::dds::endpoint_kind::data_writer, transport);
 
         {
             const auto fdds = participant->fastdds_participant();
@@ -2178,10 +2198,42 @@ namespace
             // Bytes 2 and 3 of the GUID prefix hold the 16-bit host id, little-endian.
             const auto &prefix = fdds->guid().guidPrefix;
             constexpr int hex_width = 2;
+            // What the participant was actually built with, read back rather than echoed from the
+            // argument: the transport mode the request resolved to, and the interfaces its socket
+            // transports are confined to. The script requires 127.0.0.1 alone of a localhost_only peer
+            // and nothing of an automatic one -- otherwise a case could pass through a locator the first
+            // peer accepts as it is, and prove nothing about the patch under test.
+            std::string allowlist;
+            for (const auto &descriptor : fdds->get_qos().transport().user_transports)
+            {
+                const auto socket =
+                    std::dynamic_pointer_cast<eprosima::fastdds::rtps::SocketTransportDescriptor>(descriptor);
+                if (!socket)
+                {
+                    continue;
+                }
+                for (const auto &allowed : socket->interface_allowlist)
+                {
+                    allowlist += (allowlist.empty() ? "" : ",") + allowed.name;
+                }
+            }
+            const char *resolved_name = "automatic";
+            switch (provizio::dds::resolve_transport_mode(transport))
+            {
+            case provizio::dds::transport_mode::localhost_only:
+                resolved_name = "localhost_only";
+                break;
+            case provizio::dds::transport_mode::udp_only:
+                resolved_name = "udp_only";
+                break;
+            case provizio::dds::transport_mode::automatic:
+                break;
+            }
             std::cout << "same_host_peer: host id " << std::hex << std::setw(hex_width) << std::setfill('0')
                       << static_cast<int>(prefix.value[2]) << std::setw(hex_width) << std::setfill('0')
                       << static_cast<int>(prefix.value[3]) << std::dec << '\n'
-                      << "same_host_peer: armed (" << role << ", "
+                      << "same_host_peer: socket allowlist " << (allowlist.empty() ? "none" : allowlist) << '\n'
+                      << "same_host_peer: armed (" << role << ", " << resolved_name << ", "
                       << provizio::dds::detail::capture_address_snapshot().size() << " interface address(es) visible)"
                       << '\n'
                       << std::flush;

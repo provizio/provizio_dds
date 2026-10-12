@@ -118,6 +118,23 @@ created_ns=1
 # Everything below runs inside the namespace. The test binary too — so the
 # interfaces it enumerates are only the ones this script creates.
 nsx() { $SUDO ip netns exec "$NS" "$@"; }
+# nsx_with <NAME=VALUE>... -- <command> [<argument>]...: <command> in the namespace with those
+# variables set. Not through env(1), which takes ANY argument holding a "=" for an assignment, so a
+# binary path holding one would be swallowed and the argument after it run in its place.
+nsx_with() {
+    local -a assignments=()
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+        assignments+=("$1")
+        shift
+    done
+    if [ "${1-}" != "--" ]; then
+        echo "nsx_with: no -- between the assignments and the command" >&2
+        return 2
+    fi
+    shift
+    nsx bash -c 'count="$1"; shift; for ((i = 0; i < count; i++)); do export "$1"; shift; done; exec "$@"' \
+        _ "${#assignments[@]}" "${assignments[@]}" "$@"
+}
 
 # Disabling IPv6 on a test interface is LOAD-BEARING, not cosmetic. With IPv6 live, the very
 # transition under test (a link coming up in phase 1, carrier arriving in phase 2) also makes the
@@ -180,7 +197,7 @@ nsx ip addr add "${ADDR_LINK}/24" dev "$IFACE_LINK"
 
 # Address assigned while the link is down: not operationally up, so not in the
 # snapshot and not bound by Fast-DDS.
-before="$(nsx env PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES="$IFACE_LINK" \
+before="$(nsx_with PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES="$IFACE_LINK" -- \
     "$TEST_BINARY" print_snapshot)"
 echo "snapshot while down: [${before//$'\n'/, }]"
 if echo "$before" | grep -q "$IFACE_LINK"; then
@@ -190,9 +207,9 @@ fi
 
 # Arm the participant, then bring the link up underneath it.
 out_file="$(mktemp)"
-nsx env PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES="$IFACE_LINK" \
+nsx_with PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES="$IFACE_LINK" \
     PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0 \
-    FASTDDS_BUILTIN_TRANSPORTS=UDPv4 \
+    FASTDDS_BUILTIN_TRANSPORTS=UDPv4 -- \
     "$TEST_BINARY" await_reset "$AWAIT_TIMEOUT" > "$out_file" 2>&1 &
 await_pid=$!
 
@@ -215,7 +232,7 @@ if [ "$await_status" -ne 0 ]; then
     failures=$((failures + 1))
 fi
 
-after="$(nsx env PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES="$IFACE_LINK" \
+after="$(nsx_with PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES="$IFACE_LINK" -- \
     "$TEST_BINARY" print_snapshot)"
 echo "snapshot while up: [${after//$'\n'/, }]"
 if ! echo "$after" | grep -q "${IFACE_LINK} ${ADDR_LINK}/24"; then
@@ -273,7 +290,7 @@ else
     fi
 
     out_file="$(mktemp)"
-    nsx env PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0 FASTDDS_BUILTIN_TRANSPORTS=UDPv4 \
+    nsx_with PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0 FASTDDS_BUILTIN_TRANSPORTS=UDPv4 -- \
         "$TEST_BINARY" await_reset "$AWAIT_TIMEOUT" > "$out_file" 2>&1 &
     await_pid=$!
     for _ in $(seq 1 100); do

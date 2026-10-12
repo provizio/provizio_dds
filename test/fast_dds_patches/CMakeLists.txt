@@ -85,7 +85,7 @@ add_test(NAME fast_dds_patch_line_endings
                  "-DPATCHES_FILE=${_fast_dds_patches_file}"
                  "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/line_endings"
                  -P "${CMAKE_CURRENT_LIST_DIR}/line_endings_test.cmake")
-# Seconds. It renders eighteen small files with git and runs CMake in script mode forty-eight times.
+# Seconds. It renders twenty-four small files with git and runs CMake in script mode sixty-four times.
 set_tests_properties(fast_dds_patch_line_endings PROPERTIES TIMEOUT 120)
 
 # Not on Windows, where these tests CANNOT be linked. ResourceEvent and TimedEventImpl, like
@@ -101,6 +101,12 @@ set_tests_properties(fast_dds_patch_line_endings PROPERTIES TIMEOUT 120)
 # The patched code itself is platform-independent, and the sanitizers that turn its regression
 # into a hard failure rather than silent corruption only run on Linux, so this costs no real
 # coverage.
+#
+# fast_dds_patch_local_address below cannot run there either, for a reason of the same kind: it
+# empties SystemInfo's cached interface list, and fastdds.dll exports none of SystemInfo's data
+# members (only update_interfaces, through export_system_info.cmake). That one does cost coverage:
+# on Windows the behaviour local_address_by_current_interfaces.cmake patches in is exercised by
+# nothing, and the script itself only by the build and fast_dds_patch_line_endings.
 if(WIN32)
     message(STATUS "Fast-DDS patch tests need its unexported internals; skipping on Windows")
     # The script-mode tests above are registered on Windows too, and need what the call at the end
@@ -176,5 +182,21 @@ add_test(NAME fast_dds_patch_local_reader_lock
          COMMAND "$<TARGET_FILE:local_reader_lock_test>"
          WORKING_DIRECTORY "$<TARGET_FILE_DIR:local_reader_lock_test>")
 set_tests_properties(fast_dds_patch_local_reader_lock PROPERTIES TIMEOUT 60)
+
+# Guards local_address_by_current_interfaces.cmake: with Fast-DDS's interface list emptied -- the
+# state of a process whose last participant was created before the network came up -- a transport
+# confined to loopback must turn the host's own address into 127.0.0.1, leave other and multicast
+# addresses alone, and refresh the list no more often than the patch's rate limit allows.
+# Unprivileged, unlike the network-namespace test of the same patch (network_recovery_same_host_filter).
+# Public Fast-DDS headers only; SystemInfo's members are declared in the test, as
+# network_recovery_test.cpp declares them.
+add_executable(local_address_test local_address_test.cpp)
+target_link_libraries(local_address_test PUBLIC provizio_dds)
+add_test(NAME fast_dds_patch_local_address
+         COMMAND "$<TARGET_FILE:local_address_test>"
+         WORKING_DIRECTORY "$<TARGET_FILE_DIR:local_address_test>")
+# Seconds. A few hundred address checks and a 600 ms wait for the rate limit to refill; it reports
+# SKIP on a host with no IPv4 interface but loopback.
+set_tests_properties(fast_dds_patch_local_address PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
 
 provizio_dds_finalize_tests()

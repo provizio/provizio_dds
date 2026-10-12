@@ -54,6 +54,12 @@
 #     whose samples loopback-only transports keep from arriving. Give such hosts their own
 #     ids (systemd-machine-id-setup).
 #
+# Accepting such a peer is half of what a confined participant needs; the other half is reaching it.
+# A warm peer in the ordinary transport announces only the addresses that had come up when it
+# started, and those a cold process takes for another host's -- which, confined to loopback, it can
+# send nothing to -- unless local_address_by_current_interfaces.cmake has it look at the interfaces
+# as they are now.
+#
 # Limits, neither of them new: a cold and a warm process still do not share SHM (the SHM locator
 # embeds the GUID host id; they fall back to UDP over loopback), and a peer built with stock
 # Fast-DDS still compares GUID bytes on its own side wherever IT applies FILTER_DIFFERENT_HOST

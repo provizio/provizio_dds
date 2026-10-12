@@ -2116,7 +2116,10 @@ namespace provizio::dds
 
         // Refresh Fast-DDS's process-wide interface cache FIRST, because everything below
         // is matched against it. Fast-DDS populates that cache once, inside the first
-        // create_participant, and refreshes it on no later one; UDPv4Transport's constructor
+        // create_participant, and refreshes it for no later one (the Fast-DDS this library
+        // builds also refreshes it when a peer of this host announces an address it lacks, or
+        // an initial peer is not in it -- the latter only after this creation has built its
+        // transports from it, so no help here); UDPv4Transport's constructor
         // then intersects our interface_allowlist with the CACHED list
         // (get_ipv4s(force_lookup=false)), so an address that has changed since -- a DHCP
         // renewal, a wifi reconnect -- is in our live list and not in theirs. The
@@ -2132,7 +2135,9 @@ namespace provizio::dds
         //
         // Safe under the reset's locks (this runs from the constructor and from
         // trigger_network_recovery_reset with both lifecycle locks held): it is noexcept, logs
-        // nothing, and takes only SystemInfo's own internal mutex.
+        // nothing, and takes only SystemInfo's own internal mutexes -- in the Fast-DDS this library
+        // builds, one held across the enumeration as well as the one guarding the list, neither of
+        // which anything holds while taking a lock of ours.
         refresh_fastdds_interface_cache();
 
         // Re-evaluated per creation, so a rebuild after a network change blocks the

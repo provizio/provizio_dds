@@ -136,6 +136,20 @@ namespace provizio::dds
         /// when it announces this machine's id (@c /etc/machine-id, the Windows @c MachineGuid,
         /// the macOS platform UUID) or carries this host's id in its GUID, so machine ids must
         /// be unique per host: a host cloned with an id left in place is taken for this one.
+        /// Such a peer is reached over loopback whichever of this host's addresses it announces
+        /// (if it accepts localhost), judged from the interfaces with carrier when its announcement
+        /// first arrives -- so a participant created before the network came up (or before the
+        /// host's address changed) still reaches one started after that which announces no
+        /// loopback address, such as a recorder in its ordinary transport. The interface list is
+        /// refreshed for that at a rate limited process-wide; while announcements naming addresses
+        /// this host lacks keep that limit spent, an address that came up within the last 50 ms is
+        /// missed, and a peer misjudged on its first announcement stays unreachable until it
+        /// announces itself anew (a restart). That takes the Fast-DDS this library builds (a
+        /// stock one judges by the interface list as it was when this process last created a
+        /// participant), and a peer announcing the machine id, which eProsima Fast-DDS does from
+        /// 3.2 on: a peer on an older one (a ROS 2 Humble, Iron or Jazzy node, provizio_dds 1.x)
+        /// started under another network state than this participant carries another GUID host id
+        /// and no machine id, so it is taken for another host's and refused.
         /// A peer that announces no loopback locator and does not announce that it accepts
         /// localhost (a Fast-DDS before 2.12 left on its default transports, such as a ROS 2
         /// Iron node) cannot be reached at all: a transport confined to 127.0.0.1 may send to

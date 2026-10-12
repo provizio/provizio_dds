@@ -1061,6 +1061,15 @@ else(HAS_BIN_CACHE)
             # processes of one machine started before and after the network came up refused each
             # other as "another host". OR-ed with the old test; see the script for the effects.
             "same_host_by_machine_id.cmake|PDP_SIMPLE_CPP=src/cpp/rtps/builtin/discovery/participant/PDPSimple.cpp"
+            # Make the transformation of a same-host participant's address to loopback judge whether the
+            # address is this host's from the interfaces as they are now -- refreshing Fast-DDS's interface
+            # list, rate-limited, when it lacks the address -- instead of from the list as it was last
+            # refreshed, and make those refreshes run one at a time. A process whose last participant was
+            # created before the network came up (or before the host's address changed) otherwise took
+            # every address a peer started after that announced for another host's, and under
+            # transport_mode::localhost_only, confined to loopback, had no way left to reach such a peer: a
+            # recorder in the ordinary transport never got a sample. See the script.
+            "local_address_by_current_interfaces.cmake|UDP_TRANSPORT_INTERFACE_CPP=src/cpp/rtps/transport/UDPTransportInterface.cpp|SYSTEM_INFO_CPP=src/cpp/utils/SystemInfo.cpp"
         )
         set(PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS)
         set(_FAST_DDS_PATCH_COMMAND)
