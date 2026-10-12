@@ -34,6 +34,9 @@ set_tests_properties(bin_cache_missing_file PROPERTIES TIMEOUT 60)
 # report the script's own "Only Linux is currently supported for bin cache".
 if(NOT UNIX OR APPLE)
     message(STATUS "The bin cache key is a Linux concern; skipping its tests here")
+    # The two tests above are registered here too, and need what the call at the end of this file
+    # gives every test.
+    provizio_dds_finalize_tests()
     return()
 endif()
 

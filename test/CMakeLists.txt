@@ -98,6 +98,8 @@ function(provizio_dds_finalize_tests)
             endif()
         endif()
         set_property(TEST "${_provizio_dds_test}" PROPERTY ENVIRONMENT "${_provizio_dds_env}")
+        # For the check at the end of this file that no test went without this.
+        set_property(GLOBAL APPEND PROPERTY PROVIZIO_DDS_FINALIZED_TESTS "${_provizio_dds_test}")
     endforeach()
 endfunction()
 
@@ -227,3 +229,25 @@ if(PYTHON_BINDINGS)
     message(STATUS "PYTHON_BINDINGS is ON: Python tests will be built and enabled.")
     add_subdirectory(python)
 endif(PYTHON_BINDINGS)
+
+# Every test must have been through provizio_dds_finalize_tests(): nothing else gives it its scaled
+# TIMEOUT, its deadline or unbuffered output. A directory that returns early on a platform the rest of
+# it does not apply to, after registering tests that do, skips that call there without anything
+# failing -- Windows once ran four Fast-DDS patch tests that way, and Windows and macOS two bin cache
+# tests -- and so does a test registered after the call. Checked on whichever platform configures.
+function(provizio_dds_check_tests_finalized directory)
+    get_property(_finalized GLOBAL PROPERTY PROVIZIO_DDS_FINALIZED_TESTS)
+    get_property(_tests DIRECTORY "${directory}" PROPERTY TESTS)
+    foreach(_test ${_tests})
+        if(NOT _test IN_LIST _finalized)
+            message(FATAL_ERROR
+                "Test ${_test} (${directory}) did not go through provizio_dds_finalize_tests(): register it "
+                "before that call, and call it before any return() that follows a registration.")
+        endif()
+    endforeach()
+    get_property(_subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(_subdirectory ${_subdirectories})
+        provizio_dds_check_tests_finalized("${_subdirectory}")
+    endforeach()
+endfunction()
+provizio_dds_check_tests_finalized("${CMAKE_CURRENT_SOURCE_DIR}")

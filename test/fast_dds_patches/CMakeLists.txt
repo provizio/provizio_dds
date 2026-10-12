@@ -103,6 +103,9 @@ set_tests_properties(fast_dds_patch_line_endings PROPERTIES TIMEOUT 120)
 # coverage.
 if(WIN32)
     message(STATUS "Fast-DDS patch tests need its unexported internals; skipping on Windows")
+    # The script-mode tests above are registered on Windows too, and need what the call at the end
+    # of this file gives every test.
+    provizio_dds_finalize_tests()
     return()
 endif()
 
