@@ -108,17 +108,40 @@ foreach(_how IN ITEMS command_line environment)
     _check(damaged_${_how} "${WORK_DIR}/damaged.zip" ${_how} "exited with")
 endforeach()
 
-# An archive holding its directory as a link to one elsewhere, on a host that has links: refused
-if(CMAKE_HOST_UNIX)
-    file(WRITE "${WORK_DIR}/outside/lib/libprovizio_dds.so" "outside")
-    file(MAKE_DIRECTORY "${WORK_DIR}/content/directory_link")
-    file(CREATE_LINK "${WORK_DIR}/outside" "${WORK_DIR}/content/directory_link/cache_key" SYMBOLIC)
+# An archive holding its directory as a link to one elsewhere: refused. Any archive can hold one, so
+# the case runs wherever this test can make one to archive: everywhere but on a Windows host without
+# the privilege of creating symbolic links (an elevated shell, or Developer Mode), where it is skipped
+# and says so -- as it is if the archive made there holds what the link leads to rather than the link
+file(WRITE "${WORK_DIR}/outside/lib/libprovizio_dds.so" "outside")
+file(MAKE_DIRECTORY "${WORK_DIR}/content/directory_link")
+file(CREATE_LINK "${WORK_DIR}/outside" "${WORK_DIR}/content/directory_link/cache_key" RESULT _linked SYMBOLIC)
+set(_skipped "")
+if(NOT _linked EQUAL 0)
+    set(_skipped "no symbolic link can be made here (${_linked})")
+else()
     execute_process(COMMAND "${CMAKE_COMMAND}" -E tar cf "${WORK_DIR}/directory_link.zip" --format=zip cache_key
         WORKING_DIRECTORY "${WORK_DIR}/content/directory_link" RESULT_VARIABLE _result)
     if(NOT _result EQUAL 0)
         message(FATAL_ERROR "extract_test.cmake: could not make ${WORK_DIR}/directory_link.zip")
     endif()
-    _check(directory_link "${WORK_DIR}/directory_link.zip" command_line "holds no cache_key directory")
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E tar tvf "${WORK_DIR}/directory_link.zip"
+        OUTPUT_VARIABLE _listing RESULT_VARIABLE _result)
+    if(NOT _result EQUAL 0 OR NOT _listing MATCHES "cache_key -> ")
+        set(_skipped "the archive made of the link holds no link: [${_listing}]")
+    endif()
+endif()
+if(_skipped AND CMAKE_HOST_UNIX)
+    message(FATAL_ERROR "extract_test (directory_link): ${_skipped}")
+elseif(_skipped)
+    message(STATUS "extract_test: skipping directory_link, as ${_skipped}")
+else()
+    # Refused as a directory that is a link -- or, on Windows, possibly by the extraction itself, where
+    # CMake's tar may fail to make the link the archive holds: either way nothing is taken from it
+    set(_refusal "holds no cache_key directory")
+    if(CMAKE_HOST_WIN32)
+        set(_refusal "holds no cache_key directory|exited with")
+    endif()
+    _check(directory_link "${WORK_DIR}/directory_link.zip" command_line "${_refusal}")
     string(REGEX REPLACE "([[*?])" "[\\1]" _outside_pattern "${WORK_DIR}/outside")
     file(GLOB_RECURSE _held LIST_DIRECTORIES false RELATIVE "${WORK_DIR}/outside" "${_outside_pattern}/*")
     if(NOT _held STREQUAL "lib/libprovizio_dds.so")

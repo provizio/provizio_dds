@@ -62,9 +62,10 @@ _expect(no_fast_cdr "lib/libfastcdr.so.*")
 # Any versioned name answers to it
 file(WRITE "${_cache}/lib/libfastcdr.so.2.3.6" "")
 _expect(other_fast_cdr_version "")
-# Where links can be made: a link to nothing is no library, nor is one beyond the cache that a link
-# in it leads to, but one the cache holds stands for it, as the versioned names the install links do
-if(NOT WIN32)
+# A link to nothing is no library, nor is one beyond the cache that a link in it leads to, but one
+# the cache holds stands for it, as the versioned names the install links do. Not on Windows, whose
+# prebuilt binaries hold no link: a DLL is there under the one name it is loaded by.
+if(NOT CMAKE_HOST_WIN32)
     file(REMOVE "${_cache}/lib/libprovizio_dds.so")
     file(CREATE_LINK "${_cache}/nowhere" "${_cache}/lib/libprovizio_dds.so" SYMBOLIC)
     _expect(dangling_link lib/libprovizio_dds.so)

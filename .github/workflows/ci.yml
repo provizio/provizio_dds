@@ -544,7 +544,8 @@ jobs:
   # they exist. Every other Linux pip job checks out the commit CI publishes them in, and fails
   # unless they were used, so this is the one covering setup.py's own configure and build of a pip
   # package (PYTHON_PIP_PACKAGE), with the Fast-DDS it bundles, on Linux. (macOS pip jobs always
-  # build from source, there being no prebuilt binaries for it.)
+  # build from source, there being no prebuilt binaries for it; test-windows-pip-package-from-source
+  # is the Windows counterpart of this one.)
   #
   # There is no job for a pip package against a preinstalled Fast-DDS, deliberately: a pip package
   # always bundles provizio_dds's own, patched Fast-DDS -- the configure refuses LOOK_FOR_FAST_DDS
@@ -859,6 +860,66 @@ jobs:
           . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
           python test\run_parallel.py "python test\python\python_publisher.py" "python test\python\python_subscriber.py"
           python test\python\point_cloud2_test.py
+
+  # The pip package built from source on Windows, for the reason test-nix-pip-package-from-source
+  # builds it on Linux: every other Windows pip job checks out the commit CI publishes the prebuilt
+  # binaries in, and fails unless they were used, so none of them runs setup.py's own configure and
+  # build of a pip package -- which a user's pip install on Windows falls back to whenever no prebuilt
+  # binaries fit their interpreter or configuration. One Python version, as that path is the same for
+  # every one; the extension modules of each are what test-windows-python-versions builds.
+  test-windows-pip-package-from-source:
+    name: Test pip package built from source (Windows)
+    runs-on: windows-latest
+    env:
+      # setup.py looks for no prebuilt binaries with CMAKE_ARGUMENTS set, and this one keeps the
+      # configure from taking the ones CMake would find by itself
+      CMAKE_ARGUMENTS: -DIGNORE_BIN_CACHE=ON
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - name: Install dependencies
+        run: .\install_dependencies.ps1 -WithPython ON
+      - name: Create venv and install package
+        run: |
+          python -m venv "$env:TEMP\provizio_dds_test_pip.venv"
+          . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
+          python -m pip install -v . 2>&1 | Tee-Object -FilePath "$env:TEMP\pip_install.log"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "pip install failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+          if (-not (Select-String -Path "$env:TEMP\pip_install.log" -Pattern "Building C++ libraries from source" -SimpleMatch -Quiet)) {
+            Write-Error "The pip install did NOT build from source, which is what this job is here to test"
+            exit 1
+          }
+          Write-Host "Verified: built from source"
+      - name: Test pip package
+        run: |
+          . "$env:TEMP\provizio_dds_test_pip.venv\Scripts\Activate.ps1"
+          python test\run_parallel.py "python test\python\python_publisher.py" "python test\python\python_subscriber.py"
+          python test\python\point_cloud2_test.py
+
+  # A C++ consumer's install of the Windows prebuilt binaries, as test-nix-bin-cache-install checks
+  # the Linux ones. There the question is where the OpenSSL runtime goes and what the installed
+  # Fast-DDS finds through its RUNPATH. Windows has no RUNPATH: a program looks for the DLLs it loads
+  # beside itself first, so a consumer's program is given bin/ whole, and the question is whether
+  # everything the installed DLLs import -- the OpenSSL and the C++ runtime they carry among it -- is
+  # in bin/, and is what they load from there (see test_bin_cache_install_windows.ps1).
+  test-windows-bin-cache-install:
+    name: Test installing the prebuilt binaries (Windows)
+    needs: commit-cache
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{needs.commit-cache.outputs.cache_commit_sha}}
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - name: Install dependencies
+        run: .\install_dependencies.ps1
+      - run: .\.github\workflows\test_bin_cache_install_windows.ps1
 
   test-congested-networks-simple-discovery:
     name: Test working in congested networks (Simple Discovery)

@@ -37,6 +37,8 @@ file(WRITE "${_built}/libfastdds.so.3.6.2" "fastdds")
 file(WRITE "${_built}/libssl.so.3" "ssl")
 file(WRITE "${_built}/libcrypto.so.3" "crypto")
 file(WRITE "${_tests}/python_publisher.py" "a test's own")
+# The link a Fast-DDS built on a POSIX host has to its versioned name. One built on Windows has none
+# (its DLL is there under the one name it is loaded by), so neither has the stand-in there.
 if(CMAKE_HOST_UNIX)
     file(CREATE_LINK "libfastdds.so.3.6.2" "${_built}/libfastdds.so.3.6" SYMBOLIC)
 endif()

@@ -51,6 +51,7 @@ endfunction()
 file(WRITE "${WORK_DIR}/br [x]/own.txt" "")
 file(WRITE "${WORK_DIR}/br x/other.txt" "")
 _expect(brackets "${WORK_DIR}/br [x]" own.txt)
+# Not on Windows, where no file name can hold a ? or a *
 if(NOT CMAKE_HOST_WIN32)
     file(WRITE "${WORK_DIR}/q?/own.txt" "")
     file(WRITE "${WORK_DIR}/qy/other.txt" "")
@@ -64,7 +65,9 @@ file(MAKE_DIRECTORY "${WORK_DIR}/br [x]/sub")
 _expect(dot_dot "${WORK_DIR}/br [x]/sub/../." own.txt)
 _expect(dots_between "${WORK_DIR}/br [x]/./sub/./../sub/.." own.txt)
 # A .. after a link: the parent of where the link leads, as the system has it, not the directory
-# holding the link
+# holding the link. Not on Windows, which resolves a .. as text, link or not, and so does the function
+# there (the two cases above): the parent of a link's target is no Windows path's meaning, and the root
+# below is a drive's.
 if(NOT CMAKE_HOST_WIN32)
     file(WRITE "${WORK_DIR}/real [r]/up.txt" "")
     file(MAKE_DIRECTORY "${WORK_DIR}/real [r]/deep")
