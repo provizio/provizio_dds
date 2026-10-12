@@ -37,6 +37,7 @@
 #include <cstdlib>
 #include <future>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -49,6 +50,11 @@ namespace
     // Far enough out that the rearmed timer never fires on its own: the point is that it is
     // QUEUED when it should not be, not that it runs.
     constexpr unsigned int k_far_future_ms = 3600000;
+    // How often the timers are armed to fire: soon enough that a test waiting for one never waits long.
+    constexpr auto k_timer_interval = std::chrono::microseconds{1000};
+    // How long the unregistering thread is given to reach its wait inside unregister_timer() before the
+    // callback is released.
+    constexpr auto k_unregister_head_start = std::chrono::milliseconds{100};
 }  // namespace
 
 int main()
@@ -56,15 +62,18 @@ int main()
     using eprosima::fastdds::rtps::ResourceEvent;
     using eprosima::fastdds::rtps::TimedEventImpl;
 
-    ResourceEvent service;
-    service.init_thread();
-
+    // Everything the callback below touches is declared ahead of the service, so that wherever the function
+    // returns the service's thread is stopped before any of it is freed: a late callback must never reach a
+    // destroyed promise, future or timer. (The failure paths that cannot return safely terminate instead.)
     std::promise<void> callback_entered;
     std::promise<void> release_callback;
     auto released = release_callback.get_future();
+    std::unique_ptr<TimedEventImpl> rearming;
 
-    TimedEventImpl *rearming = nullptr;
-    rearming = new TimedEventImpl(
+    ResourceEvent service;
+    service.init_thread();
+
+    rearming = std::make_unique<TimedEventImpl>(
         [&]() {
             callback_entered.set_value();
             released.wait();
@@ -73,25 +82,28 @@ int main()
             // has already taken it out.
             rearming->update_interval_millisec(k_far_future_ms);
             rearming->go_ready();
-            service.notify(rearming);
+            service.notify(rearming.get());
             return false;
         },
-        std::chrono::microseconds{1000});
+        k_timer_interval);
 
-    service.register_timer(rearming);
+    service.register_timer(rearming.get());
     rearming->go_ready();
-    service.notify(rearming);
+    service.notify(rearming.get());
 
     if (callback_entered.get_future().wait_for(k_wait) != std::future_status::ready)
     {
         std::cout << "timer_unregister: FAIL (the callback never ran)" << '\n';
-        return 1;
+        // Not a return: the worker may be entering the callback right now, where it blocks until release_callback
+        // is set -- which nothing will do on this path -- and destroying the service would then wait for it
+        // forever. Terminating, like the deadlock case below, ends the binary whatever the worker is doing.
+        std::abort();
     }
 
     // Unregister while the callback is still inside itself, so unregister_timer reaches its
     // wait and releases the mutex the rearm needs.
-    auto unregistering = std::async(std::launch::async, [&]() { service.unregister_timer(rearming); });
-    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    auto unregistering = std::async(std::launch::async, [&]() { service.unregister_timer(rearming.get()); });
+    std::this_thread::sleep_for(k_unregister_head_start);
     release_callback.set_value();
 
     if (unregistering.wait_for(k_wait) != std::future_status::ready)
@@ -100,7 +112,7 @@ int main()
         std::abort();  // A hung service thread would otherwise hang the whole test binary.
     }
     unregistering.get();
-    delete rearming;
+    rearming.reset();
 
     // The pass that would read the corpse. A second timer, registered and fired after the
     // deletion, makes the execution thread walk and SORT its collections -- which is where a
@@ -109,25 +121,25 @@ int main()
     std::mutex mutex;
     std::condition_variable fired_cv;
     bool fired = false;
-    auto *survivor = new TimedEventImpl(
+    auto survivor = std::make_unique<TimedEventImpl>(
         [&]() {
             const std::lock_guard<std::mutex> lock{mutex};
             fired = true;
             fired_cv.notify_all();
             return false;
         },
-        std::chrono::microseconds{1000});
-    service.register_timer(survivor);
+        k_timer_interval);
+    service.register_timer(survivor.get());
     survivor->go_ready();
-    service.notify(survivor);
+    service.notify(survivor.get());
 
     bool survivor_fired = false;
     {
         std::unique_lock<std::mutex> lock{mutex};
         survivor_fired = fired_cv.wait_for(lock, k_wait, [&] { return fired; });
     }
-    service.unregister_timer(survivor);
-    delete survivor;
+    service.unregister_timer(survivor.get());
+    survivor.reset();
 
     if (!survivor_fired)
     {

@@ -20,6 +20,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -56,7 +57,7 @@ namespace
     // asked to wait essentially forever is told at once that the wait expired.
     int test_saturating_deadline_does_not_overflow()
     {
-        using namespace provizio::dds::detail;
+        using provizio::dds::detail::saturating_deadline;
 
         const auto before = std::chrono::steady_clock::now();
         const auto saturated = saturating_deadline<std::chrono::steady_clock>(std::chrono::milliseconds::max());
@@ -114,7 +115,7 @@ namespace
     // above it exists to prevent, undone on the next line.
     int test_deadline_reserving_does_not_overflow()
     {
-        using namespace provizio::dds::detail;
+        using provizio::dds::detail::deadline_reserving;
 
         const auto floor = std::chrono::steady_clock::now() + std::chrono::milliseconds{50};
 
@@ -177,13 +178,14 @@ namespace
     // returns as soon as the predicate holds.
     int test_unbounded_deadline_waits_without_spinning()
     {
-        using namespace provizio::dds::detail;
+        using provizio::dds::detail::wait_until_bounded;
 
         std::mutex mutex;
         std::condition_variable condition;
         bool ready = false;
 
         constexpr auto hold = std::chrono::milliseconds{400 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
+        constexpr double milliseconds_per_second = 1000.0;
         std::thread setter{[&] {
             std::this_thread::sleep_for(hold);
             {
@@ -216,7 +218,7 @@ namespace
 
         std::cout << "unbounded_deadline_waits_without_spinning: " << (passed ? "PASS" : "FAIL") << " (waited "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(waited).count() << " ms, burned "
-                  << (cpu_used * 1000.0) << " ms of CPU)" << '\n';
+                  << (cpu_used * milliseconds_per_second) << " ms of CPU)" << '\n';
         return passed ? 0 : 1;
     }
 
@@ -231,7 +233,7 @@ namespace
     // is satisfied only after a delay, so a wait that gave up early returns false.
     int test_coarse_deadline_is_not_already_passed()
     {
-        using namespace provizio::dds::detail;
+        using provizio::dds::detail::wait_until_bounded;
         using coarse_time_point = std::chrono::time_point<std::chrono::steady_clock, std::chrono::seconds>;
 
         std::mutex mutex;
@@ -271,7 +273,7 @@ namespace
     // does so at the deadline rather than at the end of a slice.
     int test_deadline_expires()
     {
-        using namespace provizio::dds::detail;
+        using provizio::dds::detail::wait_until_bounded;
 
         std::mutex mutex;
         std::condition_variable condition;
@@ -355,8 +357,11 @@ namespace
                     return response;
                 });
 
+        // The service answers with the request's value plus one
+        constexpr std::int32_t request_value = 41;
+        constexpr std::int64_t expected_response_value = 42;
         std_msgs::msg::Int32 request_data;
-        request_data.data(41);
+        request_data.data(request_value);
 
         bool passed = true;
         {
@@ -373,7 +378,7 @@ namespace
             // an unguarded condition_variable spin rather than wait.
             passed &=
                 EXPECT(future.wait_until(std::chrono::steady_clock::time_point::max()) == std::future_status::ready);
-            passed &= EXPECT(future.get().data() == 42);
+            passed &= EXPECT(future.get().data() == expected_response_value);
         }
 
         std::cout << "future_response_accepts_an_unbounded_timeout: " << (passed ? "PASS" : "FAIL") << '\n';

@@ -119,9 +119,10 @@ namespace
         {
             return std::nullopt;
         }
-        bool is_futex = number == std::to_string(SYS_futex);
 #if defined(SYS_futex_time64)
-        is_futex = is_futex || number == std::to_string(SYS_futex_time64);
+        const bool is_futex = number == std::to_string(SYS_futex) || number == std::to_string(SYS_futex_time64);
+#else
+        const bool is_futex = number == std::to_string(SYS_futex);
 #endif
         if (!is_futex || !(syscall_file >> first_argument))
         {
