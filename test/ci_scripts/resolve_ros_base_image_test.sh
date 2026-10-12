@@ -392,13 +392,15 @@ expect_only_own_commands
 # 12. Prefixes no container tool takes, or that name no registry: a "-" for a component, a host
 #     ending in "." or starting with "-", a port out of range, or of more digits than the arithmetic
 #     checking its range takes without wrapping around (to 1, for this one), a component ending in
-#     "_", a name past the 255 characters a reference's name may be, and a first component Docker
-#     would read as a Docker Hub namespace. Refused before any registry is read, rather than handed to
+#     "_", a name past the 255 characters a reference's name may be, a first component Docker
+#     would read as a Docker Hub namespace, and bracketed hosts that are no IPv6 address. Refused before any registry is read, rather than handed to
 #     every job of the matrix to fail on at its pull -- or, for the last, to pull from Docker Hub.
 bad_prefixes=("registry.example.com/-" "registry.example.com." "-registry.example.com/mirrors"
   "registry.example.com:65536/mirrors" "registry.example.com:0/mirrors"
   "registry.example.com:18446744073709551617/mirrors" "registry.example.com/mirrors_"
-  "registry.example.com/$(printf 'a%.0s' {1..231})" "mirror")
+  "registry.example.com/$(printf 'a%.0s' {1..231})" "mirror"
+  "[:::]:5000/mirrors" "[1:2:3]/mirrors" "[::1::2]/mirrors" "[12345::1]/mirrors" "[:1::2]/mirrors"
+  "[1:2:3:4:5:6:7:8:9]/mirrors" "[1:2:3:4:5:6:7::8]/mirrors" "[:]/mirrors" "[1:2:3:4:5:6:7:8:]/mirrors")
 for index in "${!bad_prefixes[@]}"; do
   bad_prefix="${bad_prefixes[${index}]}"
   # Served under a name of its own, as case 6 is: nothing is to be read, and the longest prefix would
@@ -418,7 +420,8 @@ done
 
 # 13. Prefixes at the edges of that grammar -- a port, components joined by "__" and by "-", an IPv6
 #     address, localhost -- are repositories like any other: read, and pinned.
-for good_prefix in "registry.example.com:5000/ci__mirrors/ros-images" "[::1]:5000/mirrors" "localhost/mirrors"; do
+for good_prefix in "registry.example.com:5000/ci__mirrors/ros-images" "[::1]:5000/mirrors" "localhost/mirrors" \
+  "[2001:db8::1]:5000/mirrors" "[1:2:3:4:5:6:7:8]/mirrors" "[::]/mirrors" "[1::]:5000/mirrors"; do
   new_case "grammar_edge_$(printf '%s' "${good_prefix}" | tr -c 'a-z0-9' '_')" "${good_prefix}/ros"
   run_resolver CONTAINER_REGISTRY_PREFIX="${good_prefix}"
   expect_status 0

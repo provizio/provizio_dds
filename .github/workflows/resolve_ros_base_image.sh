@@ -96,10 +96,51 @@ readonly DISTRO_PATTERN='^[a-z][a-z0-9]*$'
 readonly HOST_LABEL='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
 readonly PATH_COMPONENT='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
 readonly REPO_PATTERN="^(${HOST_LABEL}(\\.${HOST_LABEL})*|\\[[a-f0-9:]+\\])(:[0-9]+)?(/${PATH_COMPONENT})+\$"
+# Whether <address>, the inside of the brackets of an IPv6 registry, is an IPv6 address: groups of one to
+# four hexadecimal digits -- eight of them, or at most seven with a single "::" standing for the zero groups
+# left out. The pattern above only says what characters it is made of, so "[:::]" or "[1:2:3]" would pass it,
+# and every job of the matrix would then fail on the reference at its pull. An address with an IPv4 tail
+# is not one of the shapes a registry is given in; the digits are spelled out, as a range would take a
+# non-ASCII digit in under some collations.
+is_ipv6_literal() {
+    local address="$1" head tail part group written=0
+    local -a groups
+    [[ "${address}" =~ ^[0123456789abcdef:]+$ ]] || return 1
+    case "${address}" in *:::*) return 1 ;; esac
+    if [[ "${address}" == *::* ]]; then
+        head="${address%%::*}"
+        tail="${address#*::}"
+        case "${tail}" in *::*) return 1 ;; esac
+        for part in "${head}" "${tail}"; do
+            [ -n "${part}" ] || continue
+            case "${part}" in :* | *:) return 1 ;; esac
+            IFS=: read -r -a groups <<<"${part}"
+            for group in "${groups[@]}"; do
+                [[ "${group}" =~ ^[0123456789abcdef]{1,4}$ ]] || return 1
+                written=$((written + 1))
+            done
+        done
+        [ "${written}" -le 7 ]
+    else
+        case "${address}" in :* | *:) return 1 ;; esac
+        IFS=: read -r -a groups <<<"${address}"
+        [ "${#groups[@]}" -eq 8 ] || return 1
+        for group in "${groups[@]}"; do
+            [[ "${group}" =~ ^[0123456789abcdef]{1,4}$ ]] || return 1
+        done
+    fi
+}
+
 is_repository_name() {
-    local registry port
+    local registry port literal
     [ "${#1}" -le 255 ] && [[ "$1" =~ ${REPO_PATTERN} ]] || return 1
     registry="${1%%/*}"
+    case "${registry}" in
+    \[*\]*)
+        literal="${registry#\[}"
+        is_ipv6_literal "${literal%%\]*}" || return 1
+        ;;
+    esac
     case "${registry}" in
     *.* | *:* | localhost) ;;
     *) return 1 ;;
