@@ -81,7 +81,6 @@
 
 namespace
 {
-    /// @brief This process' id, spelled the way the platform spells it.
     /// ctest's SKIP_RETURN_CODE for the cases that cannot run on a host (see this directory's CMakeLists.txt).
     constexpr int k_skip_return_code = 77;
 
@@ -100,7 +99,8 @@ namespace
 #endif
     }
 
-    int current_process_id()
+    /// @brief This process' id, spelled the way the platform spells it.
+    int current_process_id() noexcept
     {
 #if defined(_WIN32)
         return _getpid();
@@ -548,7 +548,9 @@ namespace
 #else
         // The library reads net.ipv4.ip_local_port_range; judge it by the same numbers, so a
         // host that tuned the range still sees the boundaries land where the library puts them.
-        std::uint32_t range_start = 32768;
+        // Linux default (net.ipv4.ip_local_port_range) when the file cannot be read.
+        constexpr std::uint32_t k_default_range_start = 32768;
+        std::uint32_t range_start = k_default_range_start;
         std::uint32_t range_end = highest_port;
         {
             std::ifstream range{"/proc/sys/net/ipv4/ip_local_port_range"};
@@ -703,14 +705,9 @@ namespace
         // inside setup_transports.
         const auto warned_about_the_mode = [&warnings, &warnings_mutex]() {
             const std::lock_guard<std::mutex> lock{warnings_mutex};
-            for (const auto &message : warnings)
-            {
-                if (message.find("transport=udp_only") != std::string::npos)
-                {
-                    return true;
-                }
-            }
-            return false;
+            return std::any_of(warnings.begin(), warnings.end(), [](const std::string &message) {
+                return message.find("transport=udp_only") != std::string::npos;
+            });
         };
 
         // Each value below is judged on its own. Warnings accumulate across participants, so
@@ -873,7 +870,7 @@ namespace
         auto *const factory = eprosima::fastdds::dds::DomainParticipantFactory::get_instance();
         // How the caller spelled their interface list, since Fast-DDS accepts more than one
         // spelling and the judgement has to read every one it accepts.
-        enum class caller_transport
+        enum class caller_transport : std::uint8_t
         {
             unconfined,             ///< No interface list: binds every interface Fast-DDS finds.
             allowlist_loopback,     ///< interface_allowlist = {127.0.0.1}.
@@ -909,14 +906,9 @@ namespace
 
         const auto warned_about_the_mode = [&warnings, &warnings_mutex]() {
             const std::lock_guard<std::mutex> lock{warnings_mutex};
-            for (const auto &message : warnings)
-            {
-                if (message.find("transport=localhost_only") != std::string::npos)
-                {
-                    return true;
-                }
-            }
-            return false;
+            return std::any_of(warnings.begin(), warnings.end(), [](const std::string &message) {
+                return message.find("transport=localhost_only") != std::string::npos;
+            });
         };
 
         // Each spelling below is judged on its own: warnings accumulate across participants,
@@ -1082,7 +1074,7 @@ namespace
             }
             const auto packed = std::stoul(local.substr(0, colon), nullptr, 16);
             std::array<char, INET_ADDRSTRLEN> text{};
-            const std::uint32_t address = static_cast<std::uint32_t>(packed);
+            const auto address = static_cast<std::uint32_t>(packed);
             if (::inet_ntop(AF_INET, &address, text.data(), text.size()) != nullptr)
             {
                 addresses.emplace_back(text.data());

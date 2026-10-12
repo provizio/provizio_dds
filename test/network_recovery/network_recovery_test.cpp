@@ -503,7 +503,7 @@ namespace
         latch.store(false);
         struct null_what final : std::exception
         {
-            const char *what() const noexcept override
+            [[nodiscard]] const char *what() const noexcept override
             {
                 return nullptr;
             }
@@ -525,9 +525,13 @@ namespace
         const bool single_line = !errors.empty() && errors.front().find('\n') == std::string::npos &&
                                  errors.front().find('\x1b') == std::string::npos;
         passed &= EXPECT(single_line);
+        // The printable ASCII range: space up to, excluding, DEL.
+        static constexpr auto k_first_printable = static_cast<unsigned char>(0x20);
+        static constexpr auto k_delete_character = static_cast<unsigned char>(0x7F);
         const bool ascii_only =
             !errors.empty() && std::all_of(errors.front().begin(), errors.front().end(), [](const char chr) {
-                return static_cast<unsigned char>(chr) >= 0x20 && static_cast<unsigned char>(chr) < 0x7F;
+                return static_cast<unsigned char>(chr) >= k_first_printable &&
+                       static_cast<unsigned char>(chr) < k_delete_character;
             });
         passed &= EXPECT(ascii_only);
 
