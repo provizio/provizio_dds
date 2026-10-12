@@ -30,6 +30,13 @@ add_test(NAME test_domain_parity COMMAND
 )
 set_tests_properties(test_domain_parity PROPERTIES TIMEOUT 60)
 
+# Parity of what a Python bin cache must hold between setup.py (the pip package) and
+# cmake/bin_cache/python_required.cmake (the CMake install): reads the two sources, needs no bindings.
+add_test(NAME bin_cache_python_required_parity COMMAND
+    "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bin_cache_python_required_parity.py" "${CMAKE_SOURCE_DIR}"
+)
+set_tests_properties(bin_cache_python_required_parity PROPERTIES TIMEOUT 60)
+
 # Scale this directory's test timeouts under a sanitizer, and let a stuck test report
 # itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
 provizio_dds_finalize_tests()

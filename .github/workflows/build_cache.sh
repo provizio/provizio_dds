@@ -37,13 +37,24 @@ if [[ "$(uname -m)" == "aarch64" && "$(realpath /usr/lib/aarch64-linux-gnu/libst
   exit 1
 fi
 
-# In aarch64, make sure the OpenSSL 3 of install_runner_openssl.sh is what the binaries are built
-# against and ship: Ubuntu 20.04's own is 1.1.1, which nothing newer supports. The version is read
-# from the header, as the private OpenSSL's libraries carry no RUNPATH for its own binary to run by.
-if [[ "$(uname -m)" == "aarch64" ]] &&
-  ! grep -qE '^# *define +OPENSSL_VERSION_MAJOR +3$' "${OPENSSL_ROOT_DIR:-/nonexistent}/include/openssl/opensslv.h" 2>/dev/null; then
-  echo "OPENSSL_ROOT_DIR=\"${OPENSSL_ROOT_DIR:-}\" does not hold an OpenSSL 3, which the aarch64 binaries are required to be built against (install_runner_openssl.sh installs one into /opt/openssl-3)!"
-  exit 1
+# In aarch64, make sure the OpenSSL of install_runner_openssl.sh -- the very release it pins -- is what
+# the binaries are built against and ship: Ubuntu 20.04's own is 1.1.1, which nothing newer supports,
+# and the cache key does not encode the OpenSSL a runner holds, so a runner left on another release
+# would build and publish the same key with other runtime libraries. The installed version is read from
+# the header, as the private OpenSSL's libraries carry no RUNPATH for its own binary to run by; the
+# pinned one from the installer, the one place it is written.
+if [[ "$(uname -m)" == "aarch64" ]]; then
+  OPENSSL_PINNED_VERSION="$(sed -n 's/^OPENSSL_VERSION="\([^"]*\)"$/\1/p' ./install_runner_openssl.sh)"
+  OPENSSL_INSTALLED_VERSION="$(awk -F'"' '/^# *define +OPENSSL_FULL_VERSION_STR/ { print $2 }' \
+    "${OPENSSL_ROOT_DIR:-/nonexistent}/include/openssl/opensslv.h" 2>/dev/null || true)"
+  if [ -z "${OPENSSL_PINNED_VERSION}" ]; then
+    echo "install_runner_openssl.sh pins no OPENSSL_VERSION, so there is no OpenSSL release to require of this runner!"
+    exit 1
+  fi
+  if [ "${OPENSSL_INSTALLED_VERSION}" != "${OPENSSL_PINNED_VERSION}" ]; then
+    echo "OPENSSL_ROOT_DIR=\"${OPENSSL_ROOT_DIR:-}\" holds OpenSSL ${OPENSSL_INSTALLED_VERSION:-(none)}, while the aarch64 binaries are required to be built against the ${OPENSSL_PINNED_VERSION} that install_runner_openssl.sh installs into /opt/openssl-3: run it again on this runner!"
+    exit 1
+  fi
 fi
 
 # patchelf rewrites every binary published from here: their RUNPATH below, and at install the names

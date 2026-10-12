@@ -52,6 +52,13 @@ add_test(NAME pip_package_built_packages_reusable
             "${CMAKE_CURRENT_BINARY_DIR}/built_packages_reusable")
 set_tests_properties(pip_package_built_packages_reusable PROPERTIES TIMEOUT 60)
 
+# That the CMake tree of packages built for another configuration is discarded whole, not left to be
+# configured again by setup.py
+add_test(NAME pip_package_clear_build_tree
+    COMMAND "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/clear_build_tree_test.py" "${PROJECT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/clear_build_tree")
+set_tests_properties(pip_package_clear_build_tree PROPERTIES TIMEOUT 60)
+
 # Scale this directory's test timeouts under a sanitizer, and let a stuck test report
 # itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).
 provizio_dds_finalize_tests()

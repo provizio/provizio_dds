@@ -382,6 +382,28 @@ def built_packages_reusable(packages_dir, record, source):
         return False
 
 
+def clear_build_tree(directory):
+    """Empties <directory>, a CMake build tree, and leaves it there, empty, for a configure of a new build.
+
+    A tree is not left to be configured again for another configuration: CMake keeps the compiler and the
+    toolchain a tree was first configured with, and what it cached -- the package results such as the
+    OpenSSL it found, the Fast-DDS built beside it -- would serve a build for other settings as it served
+    the one before. The read-only files git writes its objects as, among the ExternalProject checkouts
+    of such a tree, are made writable where the platform refuses to delete them as they are (Windows).
+    """
+    import stat
+
+    def make_writable_and_retry(function, path, _error):
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(directory, onexc=make_writable_and_retry)
+    else:
+        shutil.rmtree(directory, onerror=make_writable_and_retry)
+    os.makedirs(directory)
+
+
 # Build the CMake project and copy its artifacts to the destination directory
 source_dir = os.path.dirname(os.path.realpath(__file__))
 build_dir = source_dir + "/build/python_packaging"
@@ -393,16 +415,14 @@ built_for_record = os.path.join(build_dir, "pip_package_built_for.txt")
 if built_packages_reusable(target_dir, built_for_record, source_dir):
     print(f"Already built in {build_dir}, only packaging...", flush=True)
 else:
-    # Nothing of packages built for another configuration, nor its record, is kept: none of it is
-    # what this install packages
-    if os.path.lexists(built_for_record):
-        os.remove(built_for_record)
-    # Nor the version an earlier build recorded, which a build that writes none would package
-    if os.path.lexists(os.path.join(build_dir, "version.txt")):
-        os.remove(os.path.join(build_dir, "version.txt"))
+    # Nothing built for another configuration is kept: not its packages, nor the record of what they were
+    # built for, nor the version an earlier build recorded (which a build that writes none would package),
+    # and not the CMake tree it was built in either (see clear_build_tree). A tree whose build failed is
+    # discarded the same, so a retry builds Fast-DDS again; a tree of unknown configuration is not worth
+    # trusting for the time it would save.
     if os.path.isdir(target_dir):
         print(f"{target_dir} was not built for this configuration: building it again", flush=True)
-        shutil.rmtree(target_dir)
+    clear_build_tree(build_dir)
     needs_building = True
     cmake_arguments = os.environ.get("CMAKE_ARGUMENTS", "")
 

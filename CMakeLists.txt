@@ -22,6 +22,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/glob_escape.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/host_abi_compatibility.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/extract.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/missing_file.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/bin_cache/python_required.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fast_dds/openssl_package.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/python_bindings/swig_lookup.cmake")
 
@@ -288,12 +289,14 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
 
         # What the build hands on of the prebuilt binaries: the two libraries its imported targets name,
         # the Fast-DDS stack they load, bundled under its versioned names, and with the Python bindings,
-        # their extension module
+        # every Python artifact of a package (cmake/bin_cache/python_required.cmake)
         provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${BIN_CACHE_PATH}"
             lib/libprovizio_dds.so lib/libprovizio_dds_types.so "lib/libfastdds.so.*" "lib/libfastcdr.so.*")
         if(NOT BIN_CACHE_MISSING_FILE AND PYTHON_BINDINGS)
+            # Every Python artifact the install copies, not the extension module alone: see
+            # cmake/bin_cache/python_required.cmake
             provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${PYTHON_CACHE_PATH}"
-                provizio_dds_python_types/_provizio_dds_python_types.so)
+                ${PROVIZIO_DDS_BIN_CACHE_PYTHON_REQUIRED_LINUX})
             if(BIN_CACHE_MISSING_FILE)
                 set(BIN_CACHE_MISSING_FILE "python/${BIN_CACHE_MISSING_FILE}")
             endif(BIN_CACHE_MISSING_FILE)
@@ -431,8 +434,9 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                     bin/provizio_dds.dll lib/provizio_dds.lib bin/provizio_dds_types.dll lib/provizio_dds_types.lib
                     "bin/fastdds*.dll" "lib/fastdds*.lib" "bin/fastcdr*.dll" "lib/fastcdr*.lib")
                 if(NOT BIN_CACHE_MISSING_FILE AND PYTHON_BINDINGS)
+                    # See the Linux branch above
                     provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${PYTHON_CACHE_PATH}"
-                        provizio_dds_python_types/_provizio_dds_python_types.pyd)
+                        ${PROVIZIO_DDS_BIN_CACHE_PYTHON_REQUIRED_WINDOWS})
                     if(BIN_CACHE_MISSING_FILE)
                         set(BIN_CACHE_MISSING_FILE "python/${BIN_CACHE_MISSING_FILE}")
                     endif(BIN_CACHE_MISSING_FILE)
