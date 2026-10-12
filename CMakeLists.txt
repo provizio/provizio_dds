@@ -288,10 +288,11 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
             AND NOT EXISTS "${CACHED_PROVIZIO_DDS_PYTHON_TYPES_SO}")
 
         # What the build hands on of the prebuilt binaries: the two libraries its imported targets name,
-        # the Fast-DDS stack they load, bundled under its versioned names, and with the Python bindings,
+        # the Fast-DDS stack they load and the OpenSSL that stack loads, bundled under their versioned names, and with the Python bindings,
         # every Python artifact of a package (cmake/bin_cache/python_required.cmake)
         provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${BIN_CACHE_PATH}"
-            lib/libprovizio_dds.so lib/libprovizio_dds_types.so "lib/libfastdds.so.*" "lib/libfastcdr.so.*")
+            lib/libprovizio_dds.so lib/libprovizio_dds_types.so "lib/libfastdds.so.*" "lib/libfastcdr.so.*"
+            "lib/libssl.so.*" "lib/libcrypto.so.*")
         if(NOT BIN_CACHE_MISSING_FILE AND PYTHON_BINDINGS)
             # Every Python artifact the install copies, not the extension module alone: see
             # cmake/bin_cache/python_required.cmake
@@ -432,7 +433,8 @@ if(NOT IGNORE_BIN_CACHE AND(NOT DEFINED ENV{IGNORE_BIN_CACHE} OR "$ENV{IGNORE_BI
                 # import libraries a consumer links, and Fast-DDS's likewise
                 provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${BIN_CACHE_PATH}"
                     bin/provizio_dds.dll lib/provizio_dds.lib bin/provizio_dds_types.dll lib/provizio_dds_types.lib
-                    "bin/fastdds*.dll" "lib/fastdds*.lib" "bin/fastcdr*.dll" "lib/fastcdr*.lib")
+                    "bin/fastdds*.dll" "lib/fastdds*.lib" "bin/fastcdr*.dll" "lib/fastcdr*.lib"
+                    "bin/libssl-3*.dll" "bin/libcrypto-3*.dll")
                 if(NOT BIN_CACHE_MISSING_FILE AND PYTHON_BINDINGS)
                     # See the Linux branch above
                     provizio_dds_bin_cache_missing_file(BIN_CACHE_MISSING_FILE "${PYTHON_CACHE_PATH}"

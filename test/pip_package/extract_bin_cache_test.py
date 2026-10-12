@@ -115,11 +115,13 @@ def check_python_missing(repository, scratch):
     layouts = {
         "linux": ["version.txt", "fastdds/fastdds.py", "fastdds/_fastdds_python.so", "provizio_dds/provizio_dds.py",
                   "provizio_dds/libprovizio_dds.so", "provizio_dds/libfastdds.so.3.6", "provizio_dds/libfastcdr.so.2",
+                  "provizio_dds/libssl.so.3", "provizio_dds/libcrypto.so.3",
                   "provizio_dds_python_types/provizio_dds_python_types.py",
                   "provizio_dds_python_types/_provizio_dds_python_types.so",
                   "provizio_dds_python_types/libprovizio_dds_types.so"],
         "windows": ["version.txt", "fastdds/fastdds.py", "fastdds/_fastdds_python.pyd", "provizio_dds/provizio_dds.py",
                     "provizio_dds/provizio_dds.dll", "provizio_dds/fastdds-3.6.dll", "provizio_dds/fastcdr-2.3.dll",
+                    "provizio_dds/libssl-3-x64.dll", "provizio_dds/libcrypto-3-x64.dll",
                     "provizio_dds_python_types/provizio_dds_python_types.py",
                     "provizio_dds_python_types/_provizio_dds_python_types.pyd",
                     "provizio_dds_python_types/provizio_dds_types.dll"],

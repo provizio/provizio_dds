@@ -259,6 +259,9 @@ BIN_CACHE_PYTHON_REQUIRED = (
     # The Fast-DDS stack the libraries load, bundled beside them under its versioned names
     ("provizio_dds/libfastdds.so.*", "provizio_dds/libfastdds.*.dylib", "provizio_dds/fastdds*.dll"),
     ("provizio_dds/libfastcdr.so.*", "provizio_dds/libfastcdr.*.dylib", "provizio_dds/fastcdr*.dll"),
+    # ... and the OpenSSL Fast-DDS loads, which a host may not have (Ubuntu 20.04 ships 1.1.1)
+    ("provizio_dds/libssl.so.*", "provizio_dds/libssl.*.dylib", "provizio_dds/libssl-3*.dll"),
+    ("provizio_dds/libcrypto.so.*", "provizio_dds/libcrypto.*.dylib", "provizio_dds/libcrypto-3*.dll"),
     ("provizio_dds_python_types/provizio_dds_python_types.py",),
     ("provizio_dds_python_types/_provizio_dds_python_types.so",
      "provizio_dds_python_types/_provizio_dds_python_types.pyd"),

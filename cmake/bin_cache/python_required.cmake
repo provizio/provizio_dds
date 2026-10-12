@@ -13,8 +13,9 @@
 # limitations under the License.
 
 # What the python/ directory of a Python bin cache must hold for the install of it to produce a
-# package that imports: the modules, the extension modules, and the libraries they load, Fast-DDS's
-# bundled under its versioned names among them (a glob pattern, see missing_file.cmake). A cache
+# package that imports: the modules, the extension modules, and the libraries they load, Fast-DDS's and
+# the OpenSSL it loads bundled under their versioned names among them (a glob pattern, see
+# missing_file.cmake). A cache
 # truncated or malformed extracts all the same, and the install copies whatever python/ holds, so
 # without this a package that cannot import is built where a build from source would serve.
 #
@@ -31,6 +32,8 @@ set(PROVIZIO_DDS_BIN_CACHE_PYTHON_REQUIRED_LINUX
     provizio_dds/libprovizio_dds.so
     "provizio_dds/libfastdds.so.*"
     "provizio_dds/libfastcdr.so.*"
+    "provizio_dds/libssl.so.*"
+    "provizio_dds/libcrypto.so.*"
     provizio_dds_python_types/provizio_dds_python_types.py
     provizio_dds_python_types/_provizio_dds_python_types.so
     provizio_dds_python_types/libprovizio_dds_types.so)
@@ -44,6 +47,8 @@ set(PROVIZIO_DDS_BIN_CACHE_PYTHON_REQUIRED_WINDOWS
     provizio_dds/provizio_dds.dll
     "provizio_dds/fastdds*.dll"
     "provizio_dds/fastcdr*.dll"
+    "provizio_dds/libssl-3*.dll"
+    "provizio_dds/libcrypto-3*.dll"
     provizio_dds_python_types/provizio_dds_python_types.py
     provizio_dds_python_types/_provizio_dds_python_types.pyd
     provizio_dds_python_types/provizio_dds_types.dll)
