@@ -38,8 +38,8 @@ set(PROVIZIO_CODING_STANDARDS_VERSION "1.10.5" CACHE STRING "Provizio Coding Sta
 set(DISABLE_PROVIZIO_CODING_STANDARDS_CHECKS OFF CACHE BOOL "Disable all provizio/coding_standards checks")
 set(FORMAT_CMAKE_VERSION "1.7.3" CACHE STRING "Provizio Format.cmake version, without v prefix")
 set(ENABLE_TESTS OFF CACHE BOOL "Defines whether tests are built and enabled")
-# OFF by default so an ordinary `ctest` run cannot escalate. The two cases it gates
-# (network_recovery_carrier, network_recovery_cold_start_hosts) run their helpers as root
+# OFF by default so an ordinary `ctest` run cannot escalate. The three cases it gates
+# (network_recovery_carrier, network_recovery_cold_start_hosts, network_recovery_same_host_filter) run their helpers as root
 # -- directly when already root, otherwise through `sudo -n` -- to create network
 # namespaces. Registering them unconditionally meant a plain `ctest`, or any `-R` regex
 # reaching them, did that silently on every host with passwordless sudo; a test the caller
@@ -1048,6 +1048,13 @@ else(HAS_BIN_CACHE)
             # dependencies -- the OpenSSL placed next to it among them -- in this build tree only. A
             # no-op off Apple. See the script.
             "install_rpath_as_given.cmake|FAST_DDS_CPP_CMAKELISTS=src/cpp/CMakeLists.txt"
+            # Make FILTER_DIFFERENT_HOST (which provizio_dds transport_mode::localhost_only sets) also
+            # take a remote announcing this machine's id for a participant of this host, as the rest of
+            # Fast-DDS does, instead of judging by the host-id bytes of its GUID prefix alone. Those
+            # bytes come from whichever interfaces had carrier when each process started, so two
+            # processes of one machine started before and after the network came up refused each
+            # other as "another host". OR-ed with the old test; see the script for the effects.
+            "same_host_by_machine_id.cmake|PDP_SIMPLE_CPP=src/cpp/rtps/builtin/discovery/participant/PDPSimple.cpp"
         )
         set(PROVIZIO_DDS_FAST_DDS_PATCH_SCRIPTS)
         set(_FAST_DDS_PATCH_COMMAND)

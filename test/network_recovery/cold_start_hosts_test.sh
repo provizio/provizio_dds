@@ -271,10 +271,16 @@ sub_pid=$last_peer_pid
 peer_pids="$pub_pid $sub_pid"
 wait "$sub_pid"
 sub_status=$?
-wait "$pub_pid" 2> /dev/null
+wait "$pub_pid"
+pub_status=$?
 peer_pids=""
 show "control publisher" "$out_pub"
 show "control subscriber" "$out_sub"
+if [ "$pub_status" -ne 0 ]; then
+    echo "FAIL: the control publisher exited with status ${pub_status}"
+    echo "cold_start_hosts: FAIL (control run)"
+    exit 1
+fi
 if [ "$sub_status" -ne 0 ]; then
     echo "FAIL: the control run exchanged no sample, so the two namespaces cannot talk;"
     echo "      the cold run below cannot be judged"
@@ -325,7 +331,8 @@ nsb ip link set "$IF_B" up
 
 wait "$sub_pid"
 sub_status=$?
-wait "$pub_pid" 2> /dev/null
+wait "$pub_pid"
+pub_status=$?
 peer_pids=""
 show "cold publisher" "$out_pub"
 show "cold subscriber" "$out_sub"
@@ -350,6 +357,10 @@ if [ -n "$cold_id_a" ] && [ "$cold_id_a" = "$cold_id_b" ]; then
 fi
 if [ "$sub_status" -ne 0 ]; then
     echo "FAIL: after both participants were rebuilt, no sample crossed from one host to the other"
+    failures=$((failures + 1))
+fi
+if [ "$pub_status" -ne 0 ]; then
+    echo "FAIL: the cold publisher exited with status ${pub_status}"
     failures=$((failures + 1))
 fi
 

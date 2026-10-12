@@ -2119,6 +2119,130 @@ namespace
                   << subscriber->get_num_matched_publishers(no_wait, no_wait) << " matched publisher(s))" << '\n';
         return 1;
     }
+    // One of the two peers same_host_filter_test.sh drives, both on ONE host (one network
+    // namespace, one machine id) in transport_mode::localhost_only, which has the discovery
+    // layer refuse every participant it takes for another host (FILTER_DIFFERENT_HOST).
+    // The script starts the first peer while no interface has carrier and the second after
+    // one has, so the two derive different Fast-DDS host ids -- the id is computed once per
+    // process from the interfaces that have carrier at that moment. Fast-DDS used to judge
+    // "same host" by comparing the host-id bytes of the two GUID prefixes, so each peer took
+    // the other for a participant of another host and discarded it: they never matched.
+    // They must, whenever each was started. The host id is printed for the script, which
+    // asserts the two differ -- without that the exchange would prove nothing.
+    //
+    // usage: same_host_peer <pub|sub> <topic> <timeout_sec>
+    int test_same_host_peer(const std::vector<std::string_view> &args)
+    {
+        constexpr std::size_t expected_arg_count = 5;
+        if (args.size() < expected_arg_count)
+        {
+            std::cerr << "usage: " << args[0] << " same_host_peer <pub|sub> <topic> <timeout_sec>" << '\n';
+            return 2;
+        }
+        const std::string role{args[2]};
+        const std::string topic_name{args[3]};
+        int timeout_sec = 0;
+        try
+        {
+            timeout_sec = std::stoi(std::string{args[4]});
+        }
+        catch (const std::exception &)
+        {
+            std::cerr << "same_host_peer: bad timeout '" << args[4] << "'" << '\n';
+            return 2;
+        }
+        if (role != "pub" && role != "sub")
+        {
+            std::cerr << "same_host_peer: role must be pub|sub" << '\n';
+            return 2;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{timeout_sec};
+
+        // Recovery off: a rebuild would not change the host id, and the point is that the
+        // two peers differ in it from their first participant on.
+        const auto participant = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off,
+                                                                        {}, provizio::dds::endpoint_kind::data_writer,
+                                                                        provizio::dds::transport_mode::localhost_only);
+
+        {
+            const auto fdds = participant->fastdds_participant();
+            if (fdds.get() == nullptr)
+            {
+                std::cerr << "same_host_peer: no participant to report a host id for" << '\n';
+                return 1;
+            }
+            // Bytes 2 and 3 of the GUID prefix hold the 16-bit host id, little-endian.
+            const auto &prefix = fdds->guid().guidPrefix;
+            constexpr int hex_width = 2;
+            std::cout << "same_host_peer: host id " << std::hex << std::setw(hex_width) << std::setfill('0')
+                      << static_cast<int>(prefix.value[2]) << std::setw(hex_width) << std::setfill('0')
+                      << static_cast<int>(prefix.value[3]) << std::dec << '\n'
+                      << "same_host_peer: armed (" << role << ", "
+                      << provizio::dds::detail::capture_address_snapshot().size() << " interface address(es) visible)"
+                      << '\n'
+                      << std::flush;
+        }
+
+        std::atomic<int> received{0};
+        std::shared_ptr<provizio::dds::publisher_handle<std_msgs::msg::StringPubSubType>> publisher;
+        std::shared_ptr<provizio::dds::subscriber_handle<std_msgs::msg::StringPubSubType>> subscriber;
+        constexpr std::int32_t history_depth = 1;
+        if (role == "pub")
+        {
+            publisher = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(
+                participant, topic_name, eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS, history_depth,
+                eprosima::fastdds::dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+        }
+        else
+        {
+            subscriber = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
+                participant, topic_name, [&received](const std_msgs::msg::String &) { ++received; },
+                eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS, history_depth,
+                eprosima::fastdds::dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+        }
+
+        constexpr std::chrono::milliseconds poll_interval{100};
+        constexpr std::chrono::milliseconds no_wait{0};
+        if (role == "pub")
+        {
+            // Publish until the deadline or until the subscriber has come and gone (it exits
+            // on its first sample); the subscriber's verdict is what the script reads.
+            std::int32_t sequence = 0;
+            int max_matched = 0;
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                std_msgs::msg::String message;
+                message.data("same_host_peer " + std::to_string(++sequence));
+                publisher->publish(message);
+                const int matched = publisher->get_num_matched_subscribers(no_wait, no_wait);
+                max_matched = std::max(max_matched, matched);
+                if (matched == 0 && max_matched > 0)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(poll_interval);
+            }
+            std::cout << "same_host_peer: publisher done (" << sequence << " sample(s) published, at most "
+                      << max_matched << " matched subscriber(s))" << '\n';
+            return max_matched > 0 ? 0 : 1;
+        }
+
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (received.load() > 0)
+            {
+                std::cout << "same_host_peer: PASS (" << received.load() << " sample(s) received)" << '\n'
+                          << std::flush;
+                // Let the publisher observe the match and then its end before this goes away.
+                std::this_thread::sleep_for(std::chrono::seconds{1});
+                return 0;
+            }
+            std::this_thread::sleep_for(poll_interval);
+        }
+        std::cout << "same_host_peer: FAIL (no sample within " << timeout_sec << "s; "
+                  << subscriber->get_num_matched_publishers(no_wait, no_wait) << " matched publisher(s))" << '\n';
+        return 1;
+    }
 }  // namespace
 
 int main(int argc, char **argv)
@@ -2293,6 +2417,10 @@ int main(int argc, char **argv)
     if (subcommand == "await_reset")
     {
         return test_await_reset(args.size() > 2 ? std::string{args[2]} : std::string{"30"});
+    }
+    if (subcommand == "same_host_peer")
+    {
+        return test_same_host_peer(args);
     }
     if (subcommand == "cold_start_peer")
     {

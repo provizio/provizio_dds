@@ -16,10 +16,10 @@
 # the License.
 
 # Reclaims what a KILLED run of the privileged network-recovery tests left behind.
-# Sourced by carrier_recovery_test.sh and cold_start_hosts_test.sh; not executable on its
+# Sourced by carrier_recovery_test.sh, cold_start_hosts_test.sh and same_host_filter_test.sh; not executable on its
 # own. Expects $SUDO to be set by the caller (empty when already root).
 #
-# Why this exists: both scripts clean up through `trap ... EXIT INT TERM`, and CTest kills a
+# Why this exists: these scripts clean up through `trap ... EXIT INT TERM`, and CTest kills a
 # timed-out test with SIGKILL, which no handler can catch (test/CMakeLists.txt says so, and
 # it was verified there). A cancelled CI run can escalate the same way. What survives such a
 # kill is a named network namespace -- a root-owned bind mount under /run/netns -- plus, in
@@ -58,6 +58,7 @@ provizio_reap_stale_test_netns() {
     provizio_reap_stale_netns_by_prefix "provizio_dds_carrier_test_"
     provizio_reap_stale_netns_by_prefix "provizio_dds_cold_a_"
     provizio_reap_stale_netns_by_prefix "provizio_dds_cold_b_"
+    provizio_reap_stale_netns_by_prefix "provizio_dds_samehost_"
     provizio_reap_stale_host_veths
 }
 
