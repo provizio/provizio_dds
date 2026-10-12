@@ -82,6 +82,24 @@
 namespace
 {
     /// @brief This process' id, spelled the way the platform spells it.
+    /// ctest's SKIP_RETURN_CODE for the cases that cannot run on a host (see this directory's CMakeLists.txt).
+    constexpr int k_skip_return_code = 77;
+
+    /// Whether Fast-DDS can read this host's machine id: /etc/machine-id (32 characters at least) on Linux, always
+    /// on Windows (MachineGuid) and macOS (platform UUID). Without one it judges "same host" by GUID bytes alone.
+    bool machine_id_is_readable()
+    {
+#if defined(__linux__)
+        // /etc/machine-id holds the 128-bit id as 32 hexadecimal characters.
+        constexpr std::size_t k_machine_id_length = 32;
+        std::ifstream file{"/etc/machine-id"};
+        std::string machine_id;
+        return file.good() && std::getline(file, machine_id) && machine_id.size() >= k_machine_id_length;
+#else
+        return true;
+#endif
+    }
+
     int current_process_id()
     {
 #if defined(_WIN32)
@@ -210,6 +228,186 @@ namespace
 #else
         true;
 #endif
+
+    // Case: PROVIZIO_DDS_LOCALHOST_ONLY, whose value the ctest registration sets (or leaves unset) per
+    // entry, since the library reads it once per process. Only a caller who asked for no transport mode
+    // is affected: udp_only and localhost_only chosen in code stand, whatever the environment says.
+    // usage: resolve_transport_mode <automatic|localhost_only> [warns]   (what automatic must resolve to; and
+    // whether the value is to be reported as unrecognised, exactly once)
+    int test_resolve_transport_mode(const std::string_view expected_name, const bool expect_warning)
+    {
+        using provizio::dds::resolve_transport_mode;
+        using provizio::dds::transport_mode;
+
+        if (expected_name != "automatic" && expected_name != "localhost_only")
+        {
+            std::cerr << "resolve_transport_mode: expected must be automatic|localhost_only\n";
+            return 2;
+        }
+        const transport_mode expected =
+            expected_name == "localhost_only" ? transport_mode::localhost_only : transport_mode::automatic;
+
+        // Hermetic: transports given through this variable would make the library skip its own localhost
+        // setup, and the case would then be asserting on a configuration it never applied.
+        unset_env("FASTDDS_BUILTIN_TRANSPORTS");
+
+        std::vector<std::string> warnings;
+        std::mutex warnings_mutex;
+        auto previous = provizio::dds::set_log_callback(
+            [&warnings, &warnings_mutex](const provizio::dds::log_level level, const std::string_view message) {
+                if (level == provizio::dds::log_level::warning &&
+                    message.find("PROVIZIO_DDS_LOCALHOST_ONLY") != std::string_view::npos)
+                {
+                    const std::lock_guard<std::mutex> lock{warnings_mutex};
+                    warnings.emplace_back(message);
+                }
+            });
+
+        bool passed = true;
+        passed &= EXPECT(resolve_transport_mode(transport_mode::automatic) == expected);
+        passed &= EXPECT(resolve_transport_mode(transport_mode::udp_only) == transport_mode::udp_only);
+        passed &= EXPECT(resolve_transport_mode(transport_mode::localhost_only) == transport_mode::localhost_only);
+
+        // The participant itself follows: left at automatic, it is built as localhost_only exactly when the
+        // environment says so. Read back off what only that mode sets -- the discovery layer's refusal of
+        // other hosts' participants -- and off the one thing it takes away, auto-recovery. (Not off the
+        // shape of the transports' allowlist, which the VPN exclusion may legitimately widen.)
+        const auto participant =
+            provizio::dds::make_domain_participant(k_domain, provizio::dds::network_recovery_mode::on);
+        bool filters_other_hosts = false;
+        {
+            const auto fdds = participant->fastdds_participant();
+            const auto &discovery = fdds->get_qos().wire_protocol().builtin.discovery_config;
+            filters_other_hosts =
+                (static_cast<std::uint32_t>(discovery.ignoreParticipantFlags) &
+                 static_cast<std::uint32_t>(
+                     eprosima::fastdds::rtps::ParticipantFilteringFlags::FILTER_DIFFERENT_HOST)) != 0U;
+        }
+        const bool localhost_only = expected == transport_mode::localhost_only;
+        passed &= EXPECT(filters_other_hosts == localhost_only);
+        passed &= EXPECT(participant->takes_part_in_network_recovery() == !localhost_only);
+
+        // The answer is cached for the life of the process: flipping the variable now changes nothing.
+        set_env("PROVIZIO_DDS_LOCALHOST_ONLY", localhost_only ? "off" : "1");
+        passed &= EXPECT(resolve_transport_mode(transport_mode::automatic) == expected);
+
+        provizio::dds::set_log_callback(std::move(previous));
+        {
+            const std::lock_guard<std::mutex> lock{warnings_mutex};
+            // An unrecognised value is reported once however many participants ask, and nothing else is.
+            passed &= EXPECT(warnings.size() == (expect_warning ? 1U : 0U));
+        }
+
+        std::cout << "resolve_transport_mode(" << expected_name << "): " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
+    }
+
+    // Case: two localhost_only participants of THIS machine whose GUID prefixes carry different host-id
+    // bytes (2 and 3) still discover each other and exchange a sample. Those bytes are what Fast-DDS
+    // derives, once per process, from the interfaces that had carrier at its start; two processes of one
+    // machine started under different network states therefore disagree on them, and FILTER_DIFFERENT_HOST
+    // -- which localhost_only turns on -- used to take each for another host's and refuse it. The prefixes
+    // are set by hand through the factory's default QoS (which this library builds its participants from),
+    // so the case needs neither root nor a second process and runs on every platform. Both participants
+    // announce this machine's id, which is what the patched filter goes by (see
+    // cmake/fast_dds/same_host_by_machine_id.cmake).
+    int test_same_host_by_machine_id()
+    {
+        using namespace std::chrono_literals;
+        using string_pub_sub_type = std_msgs::msg::StringPubSubType;
+
+        // Where no machine id can be read (a container without /etc/machine-id), Fast-DDS falls back to the very
+        // GUID comparison under test, so there is nothing for this case to show. Skipped, as ctest SKIP, the way
+        // the privileged scripts skip for the same reason; Windows and macOS always have one.
+        if (!machine_id_is_readable())
+        {
+            std::cout << "SKIP: no machine id can be read on this host\n";
+            return k_skip_return_code;
+        }
+
+        const std::string topic{"provizio_dds_same_host_by_machine_id_" + std::to_string(current_process_id())};
+        constexpr auto k_timeout = 30s * PROVIZIO_DDS_TEST_TIMEOUT_SCALE;
+
+        auto *const factory = eprosima::fastdds::dds::DomainParticipantFactory::get_instance();
+        const auto process_id = static_cast<std::uint32_t>(current_process_id());
+        const auto make_participant_with_prefix = [factory, process_id](const std::uint8_t host_low,
+                                                                        const std::uint8_t host_high,
+                                                                        const std::uint8_t unique) {
+            eprosima::fastdds::dds::DomainParticipantQos qos;
+            factory->get_default_participant_qos(qos);
+            auto &prefix = qos.wire_protocol().prefix;
+            // Vendor id first, then the host id bytes under test, then this process' id (so a concurrent run of
+            // this case on another domain-sharing process cannot produce the same prefix), then bytes that
+            // tell the two participants apart.
+            const std::array<std::uint8_t, 12> bytes{0x01,
+                                                     0x0f,
+                                                     host_low,
+                                                     host_high,
+                                                     static_cast<std::uint8_t>(process_id & 0xFFU),
+                                                     static_cast<std::uint8_t>((process_id >> 8U) & 0xFFU),
+                                                     static_cast<std::uint8_t>((process_id >> 16U) & 0xFFU),
+                                                     static_cast<std::uint8_t>((process_id >> 24U) & 0xFFU),
+                                                     unique,
+                                                     unique,
+                                                     unique,
+                                                     unique};
+            std::copy(bytes.begin(), bytes.end(), std::begin(prefix.value));
+            factory->set_default_participant_qos(qos);
+            return provizio::dds::make_domain_participant(k_traffic_domain, provizio::dds::network_recovery_mode::off,
+                                                          {}, provizio::dds::endpoint_kind::data_writer,
+                                                          provizio::dds::transport_mode::localhost_only);
+        };
+
+        std::atomic_bool received{false};
+        // Host-id bytes (2 and 3 of the GUID prefix) that differ between the two, as a process started before the
+        // network came up differs from one started after it; and a byte that tells the participants apart.
+        constexpr std::uint8_t k_sub_host_low = 0x11;
+        constexpr std::uint8_t k_sub_host_high = 0x22;
+        constexpr std::uint8_t k_sub_unique = 0x31;
+        constexpr std::uint8_t k_pub_host_low = 0x33;
+        constexpr std::uint8_t k_pub_host_high = 0x44;
+        constexpr std::uint8_t k_pub_unique = 0x32;
+        auto sub_participant = make_participant_with_prefix(k_sub_host_low, k_sub_host_high, k_sub_unique);
+        auto pub_participant = make_participant_with_prefix(k_pub_host_low, k_pub_host_high, k_pub_unique);
+
+        // Vacuity guard: the case is about participants that disagree on the host bytes.
+        bool passed = true;
+        {
+            const auto sub_fdds = sub_participant->fastdds_participant();
+            const auto pub_fdds = pub_participant->fastdds_participant();
+            passed &= EXPECT(sub_fdds->guid().guidPrefix.value[2] != pub_fdds->guid().guidPrefix.value[2]);
+            passed &= EXPECT(sub_fdds->guid().guidPrefix.value[3] != pub_fdds->guid().guidPrefix.value[3]);
+            // And that the filter under test is on: without it (transports given through
+            // FASTDDS_BUILTIN_TRANSPORTS skip the localhost setup) the pair would match whatever the patch does.
+            const auto filters_other_hosts = [](const auto &fdds) {
+                return (static_cast<std::uint32_t>(
+                            fdds->get_qos().wire_protocol().builtin.discovery_config.ignoreParticipantFlags) &
+                        static_cast<std::uint32_t>(
+                            eprosima::fastdds::rtps::ParticipantFilteringFlags::FILTER_DIFFERENT_HOST)) != 0U;
+            };
+            passed &= EXPECT(filters_other_hosts(sub_fdds));
+            passed &= EXPECT(filters_other_hosts(pub_fdds));
+        }
+
+        auto subscriber = provizio::dds::make_subscriber<string_pub_sub_type>(
+            sub_participant, topic, [&received](const std_msgs::msg::String &) { received.store(true); },
+            provizio::dds::RELIABLE_RELIABILITY_QOS);
+        auto publisher = provizio::dds::make_publisher<string_pub_sub_type>(
+            pub_participant, topic, provizio::dds::RELIABLE_RELIABILITY_QOS, provizio::dds::use_default_history_depth);
+
+        std_msgs::msg::String message;
+        message.data("same-host-by-machine-id");
+        const auto deadline = std::chrono::steady_clock::now() + k_timeout;
+        while (std::chrono::steady_clock::now() < deadline && !received.load())
+        {
+            std::ignore = publisher->publish(message);
+            std::this_thread::sleep_for(100ms);
+        }
+        passed &= EXPECT(received.load());
+
+        std::cout << "same_host_by_machine_id: " << (passed ? "PASS" : "FAIL") << '\n';
+        return passed ? 0 : 1;
+    }
 
     // Case: transport_mode::localhost_only confines the socket transports to loopback while
     // KEEPING shared memory wherever the platform allows it. Both halves matter and neither
@@ -1040,6 +1238,13 @@ int main(int argc, char **argv)
     // Except for the one case that is ABOUT a caller's XML profile, which asks to keep it: the variable
     // has to be set before the factory reads it, so its ctest registration supplies both, and clearing it
     // here would leave that case asserting on the very configuration path it exists to avoid.
+    // Likewise PROVIZIO_DDS_LOCALHOST_ONLY, which would turn every automatic participant below into a
+    // localhost_only one: only the case about the variable keeps it.
+    if (subcommand != "resolve_transport_mode")
+    {
+        unset_env("PROVIZIO_DDS_LOCALHOST_ONLY");
+    }
+
     // NOLINTNEXTLINE(concurrency-mt-unsafe): startup-only probe, single-threaded here
     if (std::getenv("PROVIZIO_DDS_TEST_KEEP_XML_PROFILE") == nullptr)
     {
@@ -1061,6 +1266,15 @@ int main(int argc, char **argv)
     if (subcommand == "localhost_only")
     {
         return test_localhost_only();
+    }
+    if (subcommand == "same_host_by_machine_id")
+    {
+        return test_same_host_by_machine_id();
+    }
+    if (subcommand == "resolve_transport_mode")
+    {
+        return test_resolve_transport_mode(args.size() > 2 ? args[2] : std::string_view{},
+                                           args.size() > 3 && args[3] == "warns");
     }
     if (subcommand == "udp_only_shared_memory_decides_warning")
     {

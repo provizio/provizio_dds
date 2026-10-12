@@ -18,6 +18,7 @@
 
 #include <std_srvs/srv/SetBoolPubSubTypes.hpp>
 
+#include "../expect_localhost_only.h"
 #include "provizio/dds/request_response.h"
 
 constexpr const char *log_prefix = "ros_interop_request: ";
@@ -25,6 +26,11 @@ constexpr const char *log_prefix = "ros_interop_request: ";
 int main()
 try
 {
+    if (!ros_interop_test::localhost_only_expectation_met())
+    {
+        return 1;
+    }
+
     const std::string service_name{"provizio_dds_test_ros_interop_request"};
     constexpr std::chrono::seconds timeout{4};
 

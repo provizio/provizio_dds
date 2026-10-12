@@ -21,10 +21,16 @@
 
 #include <std_srvs/srv/SetBoolPubSubTypes.hpp>
 
+#include "../expect_localhost_only.h"
 #include "provizio/dds/request_response.h"
 
 int main()
 {
+    if (!ros_interop_test::localhost_only_expectation_met())
+    {
+        return 1;
+    }
+
     constexpr const char *log_prefix = "ros_interop_service: ";
     const std::string service_name{"provizio_dds_test_ros_interop_service"};
     constexpr int requests_expected = 2;

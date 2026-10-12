@@ -481,6 +481,32 @@ foreach(_tt_case defaults env_override env_invalid dynamic_port_range_domain_war
     set_tests_properties(python_transport_tuning_${_tt_case} PROPERTIES TIMEOUT 30)
 endforeach()
 
+# PROVIZIO_DDS_LOCALHOST_ONLY in the Python API, which has no localhost_only mode and so only warns,
+# once per process, when the variable is on or unrecognised (banana) and the participant chose no transport. One process per
+# case, the environment registered here (PATH stays on its own entry on Windows). Like the
+# _python_nr_env_test cases, these MUST NOT be added to PYTHON_TEST_NAMES at the bottom of the file:
+# that block sets ENVIRONMENT to PATH alone on Windows, which would erase the variable under test
+# there (the case then runs with it unset and sees no notice).
+foreach(_lo_case "warns_once|1" "warns_once|on" "warns_once|banana" "silent|off" "silent|EMPTY" "explicit_transport_silent|1")
+    string(REPLACE "|" ";" _lo_fields "${_lo_case}")
+    list(GET _lo_fields 0 _lo_name)
+    list(GET _lo_fields 1 _lo_value)
+    set(_lo_test python_localhost_only_env_${_lo_name}_${_lo_value})
+    if(_lo_value STREQUAL "EMPTY")
+        set(_lo_value "")  # registered as the empty value, which counts as unset
+    endif()
+    add_test(NAME ${_lo_test} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
+        ./python_localhost_only_env_test.py ${_lo_name}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    set(_lo_env "PROVIZIO_DDS_LOCALHOST_ONLY=${_lo_value}")
+    if(WIN32)
+        list(APPEND _lo_env "PATH=${PROVIZIO_DDS_TEST_PATH}")
+    endif()
+    set_tests_properties(${_lo_test} PROPERTIES TIMEOUT 30 ENVIRONMENT "${_lo_env}")
+endforeach()
+
 # Keeping VPN / tunnel interfaces out of the DDS transports — Python mirror of the
 # C++ test/vpn_interfaces/ subcommands: the interface classifier, the generated
 # transport profile and its once-per-configuration loading, that a participant

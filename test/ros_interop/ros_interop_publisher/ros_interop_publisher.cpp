@@ -15,12 +15,18 @@
 #include <iostream>
 #include <thread>
 
+#include "../expect_localhost_only.h"
 #include "provizio/dds/publisher.h"
 
 #include <std_msgs/msg/StringPubSubTypes.hpp>
 
 int main()
 {
+    if (!ros_interop_test::localhost_only_expectation_met())
+    {
+        return 1;
+    }
+
     const std::string topic_name{"rt/chatter"};
     const std::string value{"provizio_test_ros_interop_publisher_says_hi"};
     const std::chrono::milliseconds wait_time{100};

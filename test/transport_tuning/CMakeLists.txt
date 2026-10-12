@@ -30,8 +30,8 @@ target_link_libraries(transport_tuning_test PUBLIC provizio_dds provizio_dds_typ
 target_include_directories(transport_tuning_test PRIVATE "${CMAKE_SOURCE_DIR}/test")
 
 # Per-OS timeouts. Most cases create a participant or two and only read the QoS
-# back, so they return near-instantly. localhost_only_round_trip is the exception:
-# it waits for real discovery and delivery under its own 30 s deadline, which these
+# back, so they return near-instantly. localhost_only_round_trip and same_host_by_machine_id are the
+# exceptions: they wait for real discovery and delivery under their own 30 s deadline, which these
 # ceilings must stay clear of so a stuck case reports itself before CTest kills it.
 if(WIN32)
     set(_TT_TIMEOUT 90)
@@ -47,7 +47,7 @@ endif()
 
 foreach(_case defaults env_override env_invalid localhost_only localhost_only_not_applied_warns
         localhost_only_caller_confinement_decides_warning udp_only_shared_memory_decides_warning
-        localhost_only_round_trip dynamic_port_range_domain_warns)
+        localhost_only_round_trip same_host_by_machine_id dynamic_port_range_domain_warns)
     add_test(NAME transport_tuning_${_case}
              COMMAND "$<TARGET_FILE:transport_tuning_test>" ${_case}
              WORKING_DIRECTORY "$<TARGET_FILE_DIR:transport_tuning_test>")
@@ -57,6 +57,10 @@ foreach(_case defaults env_override env_invalid localhost_only localhost_only_no
         set_tests_properties(transport_tuning_${_case} PROPERTIES TIMEOUT ${_TT_TIMEOUT})
     endif()
 endforeach()
+
+# Skipped, not failed, where Fast-DDS can read no machine id (a container without /etc/machine-id): the
+# case is about that id, and without it the library falls back to the comparison under test.
+set_tests_properties(transport_tuning_same_host_by_machine_id PROPERTIES SKIP_RETURN_CODE 77)
 
 # The discovery-filter case is registered on its own because it is the one case that must run WITH a
 # caller's XML profile in force: Fast-DDS reads FASTDDS_DEFAULT_PROFILES_FILE when the factory is first
@@ -68,6 +72,28 @@ provizio_dds_add_subcommand_test(transport_tuning_localhost_only_discovery_filte
     TIMEOUT ${_TT_TIMEOUT}
     ENV "PROVIZIO_DDS_TEST_KEEP_XML_PROFILE=1"
         "FASTDDS_DEFAULT_PROFILES_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../fast_dds_localhost_profile.xml")
+
+# PROVIZIO_DDS_LOCALHOST_ONLY, one process per value because the library reads it once: unset, an
+# explicit off, an unrecognised value (all leave transport_mode::automatic alone) and on in two spellings.
+provizio_dds_add_subcommand_test(transport_tuning_localhost_only_env_unset
+    TARGET transport_tuning_test ARGS resolve_transport_mode automatic TIMEOUT ${_TT_TIMEOUT}
+    ENV "PROVIZIO_DDS_LOCALHOST_ONLY=")  # empty counts as unset, and shields the case from an ambient value
+provizio_dds_add_subcommand_test(transport_tuning_localhost_only_env_off
+    TARGET transport_tuning_test ARGS resolve_transport_mode automatic TIMEOUT ${_TT_TIMEOUT}
+    ENV "PROVIZIO_DDS_LOCALHOST_ONLY=off")
+provizio_dds_add_subcommand_test(transport_tuning_localhost_only_env_invalid
+    TARGET transport_tuning_test ARGS resolve_transport_mode automatic warns TIMEOUT ${_TT_TIMEOUT}
+    ENV "PROVIZIO_DDS_LOCALHOST_ONLY=banana")
+provizio_dds_add_subcommand_test(transport_tuning_localhost_only_env_on
+    TARGET transport_tuning_test ARGS resolve_transport_mode localhost_only TIMEOUT ${_TT_TIMEOUT}
+    ENV "PROVIZIO_DDS_LOCALHOST_ONLY=1")
+# Surrounding whitespace is not part of the value (an env file with Windows line endings hands over "1\r").
+provizio_dds_add_subcommand_test(transport_tuning_localhost_only_env_padded
+    TARGET transport_tuning_test ARGS resolve_transport_mode localhost_only TIMEOUT ${_TT_TIMEOUT}
+    ENV "PROVIZIO_DDS_LOCALHOST_ONLY=  on  ")
+provizio_dds_add_subcommand_test(transport_tuning_localhost_only_env_true
+    TARGET transport_tuning_test ARGS resolve_transport_mode localhost_only TIMEOUT ${_TT_TIMEOUT}
+    ENV "PROVIZIO_DDS_LOCALHOST_ONLY=True")
 
 # Scale this directory's test timeouts under a sanitizer, and let a stuck test report
 # itself before CTest kills it (see provizio_dds_finalize_tests in test/CMakeLists.txt).

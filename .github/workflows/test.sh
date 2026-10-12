@@ -140,4 +140,8 @@ export TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1:history_size=7:supp
 # transport tuning. Honour a caller-supplied value so it can be overridden locally.
 export FASTDDS_DEFAULT_PROFILES_FILE="${FASTDDS_DEFAULT_PROFILES_FILE:-${SCRIPT_DIR}/../../test/fast_dds_localhost_profile.xml}"
 
+# PROVIZIO_DDS_LOCALHOST_ONLY, if exported in the caller's shell, would make every default participant of the
+# suite a localhost_only one (and switch its auto-recovery off), which no case but its own expects.
+unset PROVIZIO_DDS_LOCALHOST_ONLY
+
 ctest --output-on-failure "${CTEST_EXTRA_ARGS[@]}"

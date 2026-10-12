@@ -277,7 +277,9 @@ none of the following. Each topic is summarised here and covered in full in
 - **[Transport selection](DETAILS.md#transport-selection)** defaults to shared memory plus UDP on
   Linux and UDP-only on Windows and macOS, with enlarged socket buffers and an MTU-sized message
   cap suited to camera frames and point clouds. Pass `transport_mode` to override it — including
-  `localhost_only`, which confines a same-host domain to shared memory and loopback UDP.
+  `localhost_only`, which confines a same-host domain to shared memory and loopback UDP — or set
+  `PROVIZIO_DDS_LOCALHOST_ONLY=1` to apply it to an existing C++ application (the Python API has no
+  such mode and only warns), like ROS 2's `ROS_LOCALHOST_ONLY`.
 - **[Discovery tuning](DETAILS.md#discovery-tuning)** controls the announcement burst and lease
   durations. The defaults suit a mixed fleet; large deployments may want them longer.
 - **[Logging](DETAILS.md#logging)** goes to stdout and stderr unless you install a callback with
