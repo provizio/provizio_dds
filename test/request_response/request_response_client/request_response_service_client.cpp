@@ -60,6 +60,10 @@ try
         // as this client's Python mirror and request_response_client do: the service counts the
         // requests it gets, and the last one, sent as the client exits, could otherwise go down with
         // the client's participant before it is delivered, which failed the service on a slow runner.
+        // Whether that response arrives is the service's to assert, not this client's: a request that
+        // is lost leaves the service short of the requests it expects, and it fails then. An unchecked
+        // response that does not arrive is not a failure of the contract this client keeps (nothing
+        // about it is validated), as in the two clients named above.
         const auto status = future_response.wait_for(timeout);
         if (request_response_pair.second != 0)
         {

@@ -101,6 +101,9 @@ else
             # names it links -- is not passed over, nor one grep cannot tell of. Any other failure
             # would leave a library unpatched, so it ends the script, and the install with it.
             if ! needed="$(patchelf --print-needed "${file}" 2>/dev/null)"; then
+                # patchelf's error text alone: inside the command substitution 2>&1 points stderr at the
+                # capture, and the >/dev/null after it then discards stdout (the other order would send
+                # stderr to the script's own stdout and capture nothing)
                 patchelf_error="$(patchelf --print-needed "${file}" 2>&1 >/dev/null || true)"
                 names_link=0
                 if [[ "${patchelf_error}" == *"no section headers"* ]]; then
