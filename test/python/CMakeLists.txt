@@ -1,3 +1,17 @@
+# Copyright 2023 Provizio Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set(TEST_PATH "${CMAKE_CURRENT_BINARY_DIR}")
 
 # Install dependencies, copy tests and all dependencies to the same test directory.
@@ -14,12 +28,39 @@ add_custom_target(python_tests ALL
     COMMAND ${PYTHON_EXECUTABLE} -c "import subprocess, sys$<SEMICOLON> subprocess.call([sys.executable, '-m', 'pip', 'install', ${PYTHON_TEST_DEPS}, '--quiet'])"
     VERBATIM
 )
-file(GLOB TEST_SCRIPTS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
+# The Fast-DDS built here, and the OpenSSL runtime placed next to it, as the build left them: found
+# when this runs rather than when the tree was configured, and what an earlier configure had copied
+# that this one does not removed -- all of it where no Fast-DDS is built here -- ahead of the other
+# copies below, so that none of theirs is what it removes, and copied after them, so that a file of
+# the same name as one of theirs is the one beside Fast-DDS (see copy_runtime.cmake).
+set(_FAST_DDS_RUNTIME_GLOBS)
+if(FAST_DDS_INSTALL_DIR)
+    provizio_dds_glob_escape(_FAST_DDS_INSTALL_PATTERN "${FAST_DDS_INSTALL_DIR}")
+    set(_FAST_DDS_RUNTIME_GLOBS "${_FAST_DDS_INSTALL_PATTERN}/lib/*${CMAKE_SHARED_LIBRARY_SUFFIX}*")
+    if(WIN32)
+        # On Windows, DLLs are in bin/, not lib/
+        list(APPEND _FAST_DDS_RUNTIME_GLOBS "${_FAST_DDS_INSTALL_PATTERN}/bin/*.dll")
+    endif()
+    string(REPLACE ";" "|" _FAST_DDS_RUNTIME_GLOBS "${_FAST_DDS_RUNTIME_GLOBS}")
+endif()
+# VERBATIM, or the | reaches cmd.exe unquoted on Windows, which takes it for a pipe
+add_custom_command(TARGET python_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} "-DDESTINATION=${TEST_PATH}" -DSTEP=prune
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/copy_runtime.cmake"
+    VERBATIM
+)
+provizio_dds_glob_escape(_TEST_SCRIPTS_PATTERN "${CMAKE_CURRENT_SOURCE_DIR}")
+file(GLOB TEST_SCRIPTS "${_TEST_SCRIPTS_PATTERN}/*.py")
 foreach(FILE ${PROVIZIO_DDS_ALL_PYTHON_LIBS} ${TEST_SCRIPTS})
     add_custom_command(TARGET python_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy "${FILE}" "${TEST_PATH}"
     )
 endforeach()
+add_custom_command(TARGET python_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} "-DDESTINATION=${TEST_PATH}" "-DGLOBS=${_FAST_DDS_RUNTIME_GLOBS}" -DSTEP=copy
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/copy_runtime.cmake"
+    VERBATIM
+)
 if("${CMAKE_SHARED_LIBRARY_SUFFIX}" STREQUAL ".dylib")
     # Python expects .so and .so only in import
     add_custom_command(TARGET python_tests POST_BUILD
@@ -49,6 +90,14 @@ add_dependencies(python_tests provizio_dds_python_types provizio_dds)
 if(FAST_DDS_DEPENDENCIES)
     add_dependencies(python_tests ${FAST_DDS_DEPENDENCIES})
 endif(FAST_DDS_DEPENDENCIES)
+
+# What the copies above leave in the tests' directory, from one configure to the next: CMake in
+# script mode
+add_test(NAME python_copy_runtime
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/copy_runtime_test"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/copy_runtime_test.cmake")
+set_tests_properties(python_copy_runtime PROPERTIES TIMEOUT 60)
 
 add_test(NAME python_pub_python_sub COMMAND
     "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/run_parallel.py"
@@ -430,6 +479,32 @@ foreach(_tt_case defaults env_override env_invalid dynamic_port_range_domain_war
     )
     list(APPEND _PYTHON_TRANSPORT_TUNING_TEST_NAMES python_transport_tuning_${_tt_case})
     set_tests_properties(python_transport_tuning_${_tt_case} PROPERTIES TIMEOUT 30)
+endforeach()
+
+# PROVIZIO_DDS_LOCALHOST_ONLY in the Python API, which has no localhost_only mode and so only warns,
+# once per process, when the variable is on or unrecognised (banana) and the participant chose no transport. One process per
+# case, the environment registered here (PATH stays on its own entry on Windows). Like the
+# _python_nr_env_test cases, these MUST NOT be added to PYTHON_TEST_NAMES at the bottom of the file:
+# that block sets ENVIRONMENT to PATH alone on Windows, which would erase the variable under test
+# there (the case then runs with it unset and sees no notice).
+foreach(_lo_case "warns_once|1" "warns_once|on" "warns_once|banana" "silent|off" "silent|EMPTY" "explicit_transport_silent|1")
+    string(REPLACE "|" ";" _lo_fields "${_lo_case}")
+    list(GET _lo_fields 0 _lo_name)
+    list(GET _lo_fields 1 _lo_value)
+    set(_lo_test python_localhost_only_env_${_lo_name}_${_lo_value})
+    if(_lo_value STREQUAL "EMPTY")
+        set(_lo_value "")  # registered as the empty value, which counts as unset
+    endif()
+    add_test(NAME ${_lo_test} COMMAND
+        "${PYTHON_EXECUTABLE}" -q -X faulthandler -m provizio_test_deadline
+        ./python_localhost_only_env_test.py ${_lo_name}
+        WORKING_DIRECTORY "${TEST_PATH}"
+    )
+    set(_lo_env "PROVIZIO_DDS_LOCALHOST_ONLY=${_lo_value}")
+    if(WIN32)
+        list(APPEND _lo_env "PATH=${PROVIZIO_DDS_TEST_PATH}")
+    endif()
+    set_tests_properties(${_lo_test} PROPERTIES TIMEOUT 30 ENVIRONMENT "${_lo_env}")
 endforeach()
 
 # Keeping VPN / tunnel interfaces out of the DDS transports — Python mirror of the

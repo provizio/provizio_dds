@@ -126,11 +126,16 @@ namespace provizio::dds
      * repopulate its process-wide interface cache.
      *
      * Fast-DDS keeps a static @c eprosima::SystemInfo cache of network interfaces
-     * that is populated exactly once — at the first call to @c SystemInfo::instance()
+     * that it populates once — at the first call to @c SystemInfo::instance()
      * which is invoked deep inside the first @c DomainParticipantFactory::create_participant.
      * Every subsequent locator lookup (in @c UDPv4Transport, @c UDPv6Transport,
      * @c TCPv4Transport, etc.) goes through the cache via @c get_ips(force_lookup=false)
-     * and so observes the same fixed interface set for the lifetime of the process.
+     * and so, in a stock Fast-DDS, observes the same interface set until something
+     * calls this. The Fast-DDS provizio_dds builds also refreshes it, rate-limited,
+     * when a participant of this host announces an address the cache lacks, or an
+     * initial peer is not in it (@c cmake/fast_dds/local_address_by_current_interfaces.cmake)
+     * -- the latter during a creation, but only once its transports are built from the
+     * cache, so this is still needed.
      *
      * The auto-recovery path (destroy + recreate the @c DomainParticipant) does
      * NOT refresh that cache on its own. Without an explicit refresh, a participant
@@ -152,9 +157,11 @@ namespace provizio::dds
      * which would overflow the 65535-symbol Windows DLL export ceiling on a
      * library Fast-DDS' size).
      *
-     * Thread-safe: @c SystemInfo guards the cache with its own internal mutex.
-     * Cost: one @c getifaddrs / @c GetAdaptersAddresses syscall, on the order
-     * of microseconds.
+     * Thread-safe: @c SystemInfo guards the cache with its own internal mutex (and,
+     * in the Fast-DDS provizio_dds builds, runs one refresh at a time, so a refresh
+     * that started earlier cannot overwrite the result of a later one).
+     * Cost: one @c getifaddrs / @c GetAdaptersAddresses call, tens of microseconds
+     * on Linux.
      *
      * @return true on success, false if Fast-DDS reported the underlying OS
      *         enumeration failed (in which case the cache is left untouched

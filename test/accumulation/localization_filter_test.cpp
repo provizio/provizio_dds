@@ -17,9 +17,12 @@
 // mirroring the accumulation_test style.
 
 #include "provizio/dds/detail/localization_filter.h"
+#include <array>
 #include <cmath>
 #include <iostream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 namespace acc = provizio::dds::accumulation;
 using acc::rigid_transform;
@@ -27,86 +30,137 @@ using acc::detail::localization_filter;
 
 namespace
 {
-    int failures = 0;
-    void check_near(const double actual, const double expected, const double tol, const std::string &msg)
+    // Records a failure (and says why) when actual is further than the tolerance from expected.
+    // Returns the number of failures recorded: 1 for a mismatch, 0 otherwise.
+    int check_near(const double actual, const double expected, const double tolerance, const std::string &msg)
     {
-        if (std::abs(actual - expected) > tol)
+        if (std::abs(actual - expected) > tolerance)
         {
             std::cerr << "FAIL: " << msg << " (actual " << actual << ", expected " << expected << ")\n";
-            ++failures;
+            return 1;
         }
+        return 0;
     }
-    rigid_transform pose(const double x, const double y, const double yaw)
+
+    rigid_transform pose(const double position_x, const double position_y, const double yaw)
     {
-        return rigid_transform{{x, y, 0.0}, std::array<double, 3>{0.0, 0.0, yaw}};
+        return rigid_transform{{position_x, position_y, 0.0}, std::array<double, 3>{0.0, 0.0, yaw}};
     }
-    void test_cold_start()
+
+    // Returns the number of failures recorded by the test case.
+    int test_cold_start()
     {
-        localization_filter f;
-        if (f.has_estimate())
+        constexpr double first_update_time_s = 100.0;
+        constexpr double held_position_x_m = 5.0;
+        constexpr double predict_time_s = 100.5;
+        constexpr double hold_tolerance_m = 1e-9;
+
+        int failures = 0;
+        localization_filter filter;
+        if (filter.has_estimate())
         {
             std::cerr << "FAIL: empty filter has_estimate\n";
             ++failures;
         }
-        f.update(100.0, pose(5.0, 0.0, 0.0));
-        if (!f.has_estimate())
+        filter.update(first_update_time_s, pose(held_position_x_m, 0.0, 0.0));
+        if (!filter.has_estimate())
         {
             std::cerr << "FAIL: has_estimate after update\n";
             ++failures;
         }
-        check_near(f.predict(100.5).translation()[0], 5.0, 1e-9, "cold-start predict holds last x");
+        failures += check_near(filter.predict(predict_time_s).translation()[0], held_position_x_m, hold_tolerance_m,
+                               "cold-start predict holds last x");
+        return failures;
     }
-    void test_constant_velocity()
+
+    // Returns the number of failures recorded by the test case.
+    int test_constant_velocity()
     {
-        localization_filter f;
-        const double v = 2.0;
-        double t = 0.0;
-        for (int k = 0; k < 25; ++k)
+        constexpr double velocity_mps = 2.0;
+        constexpr double sample_period_s = 0.1;
+        constexpr int sample_count = 25;
+        constexpr double predict_time_s = 2.45;
+        constexpr double position_tolerance_m = 0.02;
+
+        localization_filter filter;
+        double time_s = 0.0;
+        for (int sample_index = 0; sample_index < sample_count; ++sample_index)
         {
-            f.update(t, pose(v * t, 0.0, 0.0));
-            t += 0.1;
+            filter.update(time_s, pose(velocity_mps * time_s, 0.0, 0.0));
+            time_s += sample_period_s;
         }
-        check_near(f.predict(2.45).translation()[0], v * 2.45, 0.02, "CV predict extrapolates x");
+        return check_near(filter.predict(predict_time_s).translation()[0], velocity_mps * predict_time_s,
+                          position_tolerance_m, "CV predict extrapolates x");
     }
-    void test_constant_yaw_rate()
+
+    // Returns the number of failures recorded by the test case.
+    int test_constant_yaw_rate()
     {
-        localization_filter f;
-        const double w = 0.5;
-        double t = 0.0;
-        for (int k = 0; k < 25; ++k)
+        constexpr double yaw_rate_rps = 0.5;
+        constexpr double sample_period_s = 0.1;
+        constexpr int sample_count = 25;
+        constexpr double predict_time_s = 2.45;
+        constexpr double yaw_tolerance_rad = 0.02;
+
+        localization_filter filter;
+        double time_s = 0.0;
+        for (int sample_index = 0; sample_index < sample_count; ++sample_index)
         {
-            f.update(t, pose(0.0, 0.0, std::atan2(std::sin(w * t), std::cos(w * t))));
-            t += 0.1;
+            filter.update(time_s,
+                          pose(0.0, 0.0, std::atan2(std::sin(yaw_rate_rps * time_s), std::cos(yaw_rate_rps * time_s))));
+            time_s += sample_period_s;
         }
-        const auto rpy = acc::math::euler_from_matrix(f.predict(2.45).matrix());
-        check_near(std::atan2(std::sin(rpy[2] - w * 2.45), std::cos(rpy[2] - w * 2.45)), 0.0, 0.02,
-                   "CV predict extrapolates yaw");
+        const auto roll_pitch_yaw = acc::math::euler_from_matrix(filter.predict(predict_time_s).matrix());
+        return check_near(std::atan2(std::sin(roll_pitch_yaw[2] - yaw_rate_rps * predict_time_s),
+                                     std::cos(roll_pitch_yaw[2] - yaw_rate_rps * predict_time_s)),
+                          0.0, yaw_tolerance_rad, "CV predict extrapolates yaw");
     }
-    void test_yaw_wrap()
+
+    // Returns the number of failures recorded by the test case.
+    int test_yaw_wrap()
     {
-        localization_filter f;
-        f.update(0.0, pose(0.0, 0.0, 3.0));
-        f.update(0.1, pose(0.0, 0.0, -3.0));
-        const auto rpy = acc::math::euler_from_matrix(f.predict(0.1).matrix());
-        if (std::abs(rpy[2]) < 2.5)
+        // Two yaws just either side of the +/-pi wrap, 0.1 s apart: the short way round is a small rotation
+        constexpr double yaw_before_wrap_rad = 3.0;
+        constexpr double yaw_after_wrap_rad = -3.0;
+        constexpr double sample_period_s = 0.1;
+        // A prediction taking the long way round (through zero) would land well inside this magnitude
+        constexpr double min_wrapped_yaw_magnitude_rad = 2.5;
+
+        localization_filter filter;
+        filter.update(0.0, pose(0.0, 0.0, yaw_before_wrap_rad));
+        filter.update(sample_period_s, pose(0.0, 0.0, yaw_after_wrap_rad));
+        const auto roll_pitch_yaw = acc::math::euler_from_matrix(filter.predict(sample_period_s).matrix());
+        if (std::abs(roll_pitch_yaw[2]) < min_wrapped_yaw_magnitude_rad)
         {
             std::cerr << "FAIL: yaw wrap produced a mid-range angle\n";
-            ++failures;
+            return 1;
         }
+        return 0;
     }
 }  // namespace
 
 int main(int argc, char **argv)
 {
-    const std::string which = argc > 1 ? argv[1] : "";
+    const std::vector<std::string> args(
+        argv, std::next(argv, argc));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    const std::string which = args.size() > 1 ? args.at(1) : "";
+    int failures = 0;
     if (which == "cold_start")
-        test_cold_start();
+    {
+        failures = test_cold_start();
+    }
     else if (which == "constant_velocity")
-        test_constant_velocity();
+    {
+        failures = test_constant_velocity();
+    }
     else if (which == "constant_yaw_rate")
-        test_constant_yaw_rate();
+    {
+        failures = test_constant_yaw_rate();
+    }
     else if (which == "yaw_wrap")
-        test_yaw_wrap();
+    {
+        failures = test_yaw_wrap();
+    }
     else
     {
         std::cerr << "unknown subcommand: " << which << "\n";

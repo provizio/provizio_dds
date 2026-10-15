@@ -56,7 +56,9 @@ namespace
     namespace acc = provizio::dds::accumulation;
     namespace pc2 = provizio::dds::point_cloud2;
 
+    // NOLINTNEXTLINE(readability-identifier-length): pi is the mathematical constant, its standard name
     constexpr double pi = 3.14159265358979323846;
+    constexpr double degrees_per_half_turn = 180.0;
     // The Python tests use 0.0001 with float64 maths throughout; the C++ per-point batch deliberately runs in
     // float32 (see detail/accumulation_math.h), so at the synthetic test coordinate magnitudes (up to ~3 km of
     // ego translation) representation error alone reaches ~5e-4. 1e-3 keeps the checks meaningful (real radar
@@ -70,12 +72,17 @@ namespace
     // accumulated ego pose by a constant and corrupts the tests. Loopback confinement cannot exclude a publisher on
     // the same board, so a per-process domain is needed to give each test its own discovery space (it also isolates
     // against any concurrent run on another host). Which domains are eligible, and why not just 1..200, is in
-    // detail/test_domain.h.
-    const auto test_domain = provizio::dds::test::random_test_domain();
-
-    double radians(const double degrees)
+    // detail/test_domain.h. A function-local static, not a namespace-scope variable: drawing the domain may throw
+    // (it reads the system's entropy source), and an exception from a static initialiser cannot be caught.
+    provizio::dds::DomainId_t test_domain()
     {
-        return degrees * pi / 180.0;
+        static const auto domain = provizio::dds::test::random_test_domain();
+        return domain;
+    }
+
+    constexpr double radians(const double degrees) noexcept
+    {
+        return degrees * pi / degrees_per_half_turn;
     }
 
     void check(const bool condition, const std::string &message)
@@ -103,7 +110,7 @@ namespace
         {
             for (std::size_t column = 0; column < 4; ++column)
             {
-                check_near(actual[row][column], expected[row][column], tolerance,
+                check_near(actual.at(row).at(column), expected.at(row).at(column), tolerance,
                            message + " [" + std::to_string(row) + "][" + std::to_string(column) + "]");
             }
         }
@@ -111,7 +118,11 @@ namespace
 
     void test_rigid_transform_golden()
     {
+        // 1e-9 for results compared against a golden, 1e-8 where the matrix is rebuilt from the golden quaternion
+        // (itself rounded to 12 digits), 1e-12 for the roundtrip, which compares two computed matrices.
         constexpr double tolerance = 1e-9;
+        constexpr double quaternion_matrix_tolerance = 1e-8;
+        constexpr double roundtrip_tolerance = 1e-12;
 
         // Identity by default
         const acc::rigid_transform identity_transform;
@@ -121,40 +132,46 @@ namespace
 
         // Golden values computed with Python transforms3d (the library the Python implementation uses):
         // compose_matrix(angles=(0.1, 0.2, 0.3), translate=(1, 2, 3)) — 'sxyz' convention
-        acc::matrix4x4 expected{};
-        expected[0] = {0.936293363584, -0.275095847318, 0.218350663146, 1.0};
-        expected[1] = {0.289629477626, 0.956425085849, -0.036957013525, 2.0};
-        expected[2] = {-0.198669330795, 0.097843395007, 0.975170327202, 3.0};
-        expected[3] = {0.0, 0.0, 0.0, 1.0};
+        constexpr std::array<double, 3> golden_translation{1, 2, 3};
+        constexpr acc::matrix4x4 golden_matrix{{{{0.936293363584, -0.275095847318, 0.218350663146, 1.0}},
+                                                {{0.289629477626, 0.956425085849, -0.036957013525, 2.0}},
+                                                {{-0.198669330795, 0.097843395007, 0.975170327202, 3.0}},
+                                                {{0.0, 0.0, 0.0, 1.0}}}};
 
-        const acc::rigid_transform euler_transform{{1, 2, 3}, {0.1, 0.2, 0.3}};
-        check_matrix_near(euler_transform.matrix(), expected, tolerance, "rigid_transform: euler compose");
+        const acc::rigid_transform euler_transform{golden_translation, {0.1, 0.2, 0.3}};
+        check_matrix_near(euler_transform.matrix(), golden_matrix, tolerance, "rigid_transform: euler compose");
 
         // The same rotation as a quaternion (w, x, y, z) = transforms3d euler2quat(0.1, 0.2, 0.3)
+        constexpr double golden_quaternion_w = 0.983347443256;
+        constexpr double golden_quaternion_x = 0.03427079855;
+        constexpr double golden_quaternion_y = 0.106020511062;
+        constexpr double golden_quaternion_z = 0.143572175027;
         const acc::rigid_transform quaternion_transform{
-            {1, 2, 3}, {0.983347443256, 0.03427079855, 0.106020511062, 0.143572175027}};
-        check_matrix_near(quaternion_transform.matrix(), expected, 1e-8, "rigid_transform: quaternion compose");
+            golden_translation, {golden_quaternion_w, golden_quaternion_x, golden_quaternion_y, golden_quaternion_z}};
+        check_matrix_near(quaternion_transform.matrix(), golden_matrix, quaternion_matrix_tolerance,
+                          "rigid_transform: quaternion compose");
 
         // rotation() recovers the quaternion; translation() the translation
         const auto rotation = euler_transform.rotation();
-        check_near(rotation.w, 0.983347443256, 1e-9, "rigid_transform: rotation w");
-        check_near(rotation.x, 0.03427079855, 1e-9, "rigid_transform: rotation x");
-        check_near(rotation.y, 0.106020511062, 1e-9, "rigid_transform: rotation y");
-        check_near(rotation.z, 0.143572175027, 1e-9, "rigid_transform: rotation z");
+        check_near(rotation.w, golden_quaternion_w, tolerance, "rigid_transform: rotation w");
+        check_near(rotation.x, golden_quaternion_x, tolerance, "rigid_transform: rotation x");
+        check_near(rotation.y, golden_quaternion_y, tolerance, "rigid_transform: rotation y");
+        check_near(rotation.z, golden_quaternion_z, tolerance, "rigid_transform: rotation z");
         const auto translation = euler_transform.translation();
-        check(translation[0] == 1.0 && translation[1] == 2.0 && translation[2] == 3.0, "rigid_transform: translation");
+        check(translation == golden_translation, "rigid_transform: translation");
 
         // Inverse golden (transforms3d inverse_matrix of the matrix above)
-        acc::matrix4x4 expected_inverse{};
-        expected_inverse[0] = {0.936293363584, 0.289629477626, -0.198669330795, -0.91954432645};
-        expected_inverse[1] = {-0.275095847318, 0.956425085849, 0.097843395007, -1.931284509402};
-        expected_inverse[2] = {0.218350663146, -0.036957013525, 0.975170327202, -3.069947617703};
-        expected_inverse[3] = {0.0, 0.0, 0.0, 1.0};
-        check_matrix_near(euler_transform.inversed_matrix(), expected_inverse, tolerance, "rigid_transform: inverse");
+        constexpr acc::matrix4x4 golden_inverse_matrix{
+            {{{0.936293363584, 0.289629477626, -0.198669330795, -0.91954432645}},
+             {{-0.275095847318, 0.956425085849, 0.097843395007, -1.931284509402}},
+             {{0.218350663146, -0.036957013525, 0.975170327202, -3.069947617703}},
+             {{0.0, 0.0, 0.0, 1.0}}}};
+        check_matrix_near(euler_transform.inversed_matrix(), golden_inverse_matrix, tolerance,
+                          "rigid_transform: inverse");
 
         // from_matrix roundtrip
-        const acc::rigid_transform from_matrix_transform{expected};
-        check_matrix_near(from_matrix_transform.matrix(), expected, 0, "rigid_transform: from_matrix");
+        const acc::rigid_transform from_matrix_transform{golden_matrix};
+        check_matrix_near(from_matrix_transform.matrix(), golden_matrix, 0, "rigid_transform: from_matrix");
 
         // Near-180-degree rotations exercise all four Shepperd branches of quaternion_from_matrix: rotation about
         // x/y/z by ~pi each plus a composite. Each must roundtrip matrix -> quaternion -> matrix exactly.
@@ -165,7 +182,7 @@ namespace
             const acc::rigid_transform original{{0, 0, 0}, rotation_roll_pitch_yaw};
             const auto quaternion = original.rotation();
             const acc::rigid_transform roundtripped{{0, 0, 0}, quaternion};
-            check_matrix_near(roundtripped.matrix(), original.matrix(), 1e-12,
+            check_matrix_near(roundtripped.matrix(), original.matrix(), roundtrip_tolerance,
                               "rigid_transform: Shepperd roundtrip for near-pi rotation");
         }
     }
@@ -196,7 +213,7 @@ namespace
     // Mirrors Python test_accumulate_0_accumulated_point_clouds
     void test_zero_accumulated()
     {
-        acc::point_clouds_accumulator accumulator{2, no_filters_options()};
+        const acc::point_clouds_accumulator accumulator{2, no_filters_options()};
         check(accumulator.get_points_local_frame_relative().empty(), "zero: local frame not empty");
         check(accumulator.get_points_ego_relative(acc::rigid_transform{{0, 0, 0}, {0, 0, 0}}).empty(),
               "zero: ego relative not empty");
@@ -223,7 +240,7 @@ namespace
         check_near(points_ego[0].position[2], 3, default_precision, "extrinsics: z");
         for (std::size_t dim = 0; dim < 3; ++dim)
         {
-            check(points_local_frame[0].position[dim] == points_ego[0].position[dim],
+            check(points_local_frame[0].position.at(dim) == points_ego[0].position.at(dim),
                   "extrinsics: local == ego with identity localization");
         }
     }
@@ -255,16 +272,17 @@ namespace
 
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
-            const std::array<float, 3> xyz{input_points[pt].x, input_points[pt].y, input_points[pt].z};
+            const auto &input_point = input_points.at(pt);
+            const std::array<float, 3> xyz{input_point.x, input_point.y, input_point.z};
             for (std::size_t dim = 0; dim < 3; ++dim)
             {
-                check_near(local[pt].position[dim], xyz[dim] + ego_poses[pt][dim], default_precision,
+                check_near(local[pt].position.at(dim), xyz.at(dim) + ego_poses.at(pt).at(dim), default_precision,
                            "move_no_extrinsics: local position");
-                check_near(ego[pt].position[dim], xyz[dim] + ego_poses[pt][dim] - ego_pos_now[dim], default_precision,
-                           "move_no_extrinsics: ego position");
+                check_near(ego[pt].position.at(dim), xyz.at(dim) + ego_poses.at(pt).at(dim) - ego_pos_now.at(dim),
+                           default_precision, "move_no_extrinsics: ego position");
             }
-            check_point_meta(local[pt], input_points[pt], radar_id, "move_no_extrinsics local");
-            check_point_meta(ego[pt], input_points[pt], radar_id, "move_no_extrinsics ego");
+            check_point_meta(local[pt], input_point, radar_id, "move_no_extrinsics local");
+            check_point_meta(ego[pt], input_point, radar_id, "move_no_extrinsics ego");
         }
     }
 
@@ -301,17 +319,19 @@ namespace
 
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
-            const std::array<float, 3> xyz{input_points[pt].x, input_points[pt].y, input_points[pt].z};
+            const auto &input_point = input_points.at(pt);
+            const std::array<float, 3> xyz{input_point.x, input_point.y, input_point.z};
             for (std::size_t dim = 0; dim < 3; ++dim)
             {
-                check_near(local[pt].position[dim], xyz[dim] + ego_poses[pt][dim] + extrinsics[pt][dim],
-                           default_precision, "move_simple_extrinsics: local position");
-                check_near(ego[pt].position[dim],
-                           xyz[dim] + ego_poses[pt][dim] + extrinsics[pt][dim] - ego_pos_now[dim], default_precision,
-                           "move_simple_extrinsics: ego position");
+                check_near(local[pt].position.at(dim),
+                           xyz.at(dim) + ego_poses.at(pt).at(dim) + extrinsics.at(pt).at(dim), default_precision,
+                           "move_simple_extrinsics: local position");
+                check_near(ego[pt].position.at(dim),
+                           xyz.at(dim) + ego_poses.at(pt).at(dim) + extrinsics.at(pt).at(dim) - ego_pos_now.at(dim),
+                           default_precision, "move_simple_extrinsics: ego position");
             }
-            check_point_meta(local[pt], input_points[pt], radar_ids[pt], "move_simple_extrinsics local");
-            check_point_meta(ego[pt], input_points[pt], radar_ids[pt], "move_simple_extrinsics ego");
+            check_point_meta(local[pt], input_point, radar_ids.at(pt), "move_simple_extrinsics local");
+            check_point_meta(ego[pt], input_point, radar_ids.at(pt), "move_simple_extrinsics ego");
         }
 
         // Extrinsics required but never provided => throws BEFORE any buffer is created, so the accumulator
@@ -352,6 +372,12 @@ namespace
         acc::point_clouds_accumulator accumulator{2, no_filters_options()};
         const pc2::radar_point point{1, 2, 3, 4, 5, 6};
 
+        // Room for two frames per radar: radar 0 is fed frames of 1, 2 and 3 points (the first is dropped by the
+        // third), radar 1 frames of 4 and 1 points
+        constexpr std::size_t radar_0_points_after_third_frame = 5;    // 2 + 3
+        constexpr std::size_t points_after_radar_1_first_frame = 9;    // 5 + 4
+        constexpr std::size_t points_after_radar_1_second_frame = 10;  // 5 + 4 + 1
+
         check(accumulator.get_points_local_frame_relative().empty(), "overflow: initially non-empty");
 
         accumulator.accumulate(radar_id_0, radar_points{point}, identity_transform);
@@ -360,12 +386,15 @@ namespace
         check(accumulator.get_points_local_frame_relative().size() == 3, "overflow: != 3");
         // Now the very first frame gets dropped
         accumulator.accumulate(radar_id_0, radar_points{point, point, point}, identity_transform);
-        check(accumulator.get_points_local_frame_relative().size() == 5, "overflow: != 5");
+        check(accumulator.get_points_local_frame_relative().size() == radar_0_points_after_third_frame,
+              "overflow: != 5");
         // Another radar, so nothing gets dropped from the first one
         accumulator.accumulate(radar_id_1, radar_points{point, point, point, point}, identity_transform);
-        check(accumulator.get_points_local_frame_relative().size() == 9, "overflow: != 9");
+        check(accumulator.get_points_local_frame_relative().size() == points_after_radar_1_first_frame,
+              "overflow: != 9");
         accumulator.accumulate(radar_id_1, radar_points{point}, identity_transform);
-        check(accumulator.get_points_local_frame_relative().size() == 10, "overflow: != 10");
+        check(accumulator.get_points_local_frame_relative().size() == points_after_radar_1_second_frame,
+              "overflow: != 10");
         // Clear all by pushing empty frames twice to both radars
         for (const auto &radar_id : {radar_id_0, radar_id_1})
         {
@@ -414,7 +443,7 @@ namespace
         for (std::size_t variant = 0; variant < snr_thresholds.size(); ++variant)
         {
             acc::accumulation_options options;
-            options.snr_threshold = snr_thresholds[variant];
+            options.snr_threshold = snr_thresholds.at(variant);
             options.point_filter = {};
             options.allow_no_extrinsics = false;
             acc::point_clouds_accumulator accumulator{2, options};
@@ -426,20 +455,22 @@ namespace
                                    acc::rigid_transform{extrinsics_pos_1, {0, 0, 0}});
 
             const auto accumulated = accumulator.get_points_local_frame_relative();
-            check(accumulated.size() == expected_kept[variant],
-                  "snr_filter: wrong number of points kept for threshold " + std::to_string(snr_thresholds[variant]));
+            check(accumulated.size() == expected_kept.at(variant),
+                  "snr_filter: wrong number of points kept for threshold " +
+                      std::to_string(snr_thresholds.at(variant)));
 
             // SNR filtering removes the lowest-SNR points first here because the lowest-SNR point belongs to
             // radar_0, which accumulates before radar_1 (output is in first-accumulation radar order)
             const std::size_t filtered_out = 3 - accumulated.size();
             for (std::size_t pt = 0; pt < accumulated.size(); ++pt)
             {
-                const auto &input = input_points[pt + filtered_out];
+                const auto &input = input_points.at(pt + filtered_out);
                 const std::array<float, 3> xyz{input.x, input.y, input.z};
                 for (std::size_t dim = 0; dim < 3; ++dim)
                 {
-                    check_near(accumulated[pt].position[dim],
-                               xyz[dim] + ego_poses[pt + filtered_out][dim] + extrinsics[pt + filtered_out][dim],
+                    check_near(accumulated[pt].position.at(dim),
+                               xyz.at(dim) + ego_poses.at(pt + filtered_out).at(dim) +
+                                   extrinsics.at(pt + filtered_out).at(dim),
                                default_precision, "snr_filter: position");
                 }
             }
@@ -455,6 +486,8 @@ namespace
         const std::array<float, 5> velocity_thresholds{0, 2, 5, 20, 100};
         const std::array<float, 6> velocities{0, 1, 2, 5, 15, 40};
         const std::array<std::size_t, 2> max_frames_without_filter_variants{0, 1};
+        // An arbitrary localization the points are accumulated under: the assertions only look at snr and velocity
+        const acc::rigid_transform arbitrary_localization{{5, 6, 7}, {8, 9, 10}};
 
         for (const float snr_threshold : snr_thresholds)
         {
@@ -492,7 +525,7 @@ namespace
 
                     check(accumulator.get_points_local_frame_relative().empty(), "filters: not initially empty");
 
-                    accumulator.accumulate(radar_id, points, acc::rigid_transform{{5, 6, 7}, {8, 9, 10}});
+                    accumulator.accumulate(radar_id, points, arbitrary_localization);
 
                     if (max_frames_without_filter > 0)
                     {
@@ -554,9 +587,12 @@ namespace
         options.allow_no_extrinsics = true;
         acc::point_clouds_accumulator accumulator{2, options};
 
-        accumulator.accumulate(radar_id_1, radar_points{{1, 2, 3, 4, 5, 6}}, identity_transform);
-        accumulator.accumulate(radar_id_2, radar_points{{7, 8, 9, 10, 11, 12}}, identity_transform);
-        accumulator.accumulate(radar_id_3, radar_points{{13, 14, 15, 16, 17, 18}}, identity_transform);
+        const pc2::radar_point radar_1_point{1, 2, 3, 4, 5, 6};
+        const pc2::radar_point radar_2_point{7, 8, 9, 10, 11, 12};
+        const pc2::radar_point radar_3_point{13, 14, 15, 16, 17, 18};
+        accumulator.accumulate(radar_id_1, radar_points{radar_1_point}, identity_transform);
+        accumulator.accumulate(radar_id_2, radar_points{radar_2_point}, identity_transform);
+        accumulator.accumulate(radar_id_3, radar_points{radar_3_point}, identity_transform);
 
         const auto accumulated = accumulator.get_points_local_frame_relative();
         check(accumulated.size() == 2, "radar_filter: size != 2");
@@ -581,11 +617,15 @@ namespace
         // inverse(extrinsics).translation = -R^T*t = -(Rz(-90)*[0.3,0.5,0.7]) = [-0.5, 0.3, -0.7]
         // ego.translation = sensor_localization * [-0.5, 0.3, -0.7, 1] = [10,20,30] + Rz(90)*[-0.5,0.3,-0.7]
         //                 = [10 - 0.3, 20 - 0.5, 30 - 0.7] = [9.7, 19.5, 29.3]
-        check_near(translation[0], 9.7, 1e-9, "localization_from_sensor_to_ego: x");
-        check_near(translation[1], 19.5, 1e-9, "localization_from_sensor_to_ego: y");
-        check_near(translation[2], 29.3, 1e-9, "localization_from_sensor_to_ego: z");
+        constexpr double expected_x = 9.7;
+        constexpr double expected_y = 19.5;
+        constexpr double expected_z = 29.3;
+        constexpr double tolerance = 1e-9;
+        check_near(translation[0], expected_x, tolerance, "localization_from_sensor_to_ego: x");
+        check_near(translation[1], expected_y, tolerance, "localization_from_sensor_to_ego: y");
+        check_near(translation[2], expected_z, tolerance, "localization_from_sensor_to_ego: z");
         // Rotation: Rz(90) * Rz(-90) = identity => quaternion w == 1
-        check_near(ego.rotation().w, 1.0, 1e-9, "localization_from_sensor_to_ego: rotation w");
+        check_near(ego.rotation().w, 1.0, tolerance, "localization_from_sensor_to_ego: rotation w");
     }
 
     // The retroactive localization-extrinsics correction (apply_localization_correction): a frame accumulated
@@ -622,7 +662,7 @@ namespace
         {
             for (std::size_t dim = 0; dim < 3; ++dim)
             {
-                check_near(actual[pt].position[dim], expected[pt].position[dim], default_precision,
+                check_near(actual[pt].position.at(dim), expected[pt].position.at(dim), default_precision,
                            "localization_correction: position matches extrinsics-known-from-start");
             }
         }
@@ -631,10 +671,10 @@ namespace
     struct rotation_case
     {
         std::array<pc2::radar_point, 3> points;
-        std::array<std::array<double, 3>, 3> orientations_roll_pitch_yaw;  // per-frame ego orientation
+        std::array<std::array<double, 3>, 3> orientations_roll_pitch_yaw{};  // per-frame ego orientation
         std::optional<acc::rigid_transform> extrinsics;
-        std::array<std::array<double, 3>, 3> expected_ego_relative;  // golden, for ego at
-                                                                     // orientations_roll_pitch_yaw[2]
+        std::array<std::array<double, 3>, 3> expected_ego_relative{};  // golden, for ego at
+                                                                       // orientations_roll_pitch_yaw[2]
     };
 
     void run_rotation_case(const rotation_case &test_case, const std::string &name)
@@ -645,70 +685,86 @@ namespace
         acc::point_clouds_accumulator accumulator{3, no_filters_options(0, !test_case.extrinsics.has_value())};
         for (std::size_t i = 0; i < 3; ++i)
         {
-            accumulator.accumulate(radar_id, radar_points{test_case.points[i]},
-                                   acc::rigid_transform{no_translation, test_case.orientations_roll_pitch_yaw[i]},
+            accumulator.accumulate(radar_id, radar_points{test_case.points.at(i)},
+                                   acc::rigid_transform{no_translation, test_case.orientations_roll_pitch_yaw.at(i)},
                                    test_case.extrinsics);
         }
 
         const auto accumulated = accumulator.get_points_ego_relative(
-            acc::rigid_transform{no_translation, test_case.orientations_roll_pitch_yaw[2]});
+            acc::rigid_transform{no_translation, test_case.orientations_roll_pitch_yaw.at(2)});
         check(accumulated.size() == 3, name + ": size != 3");
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
             for (std::size_t dim = 0; dim < 3; ++dim)
             {
-                check_near(accumulated[pt].position[dim], test_case.expected_ego_relative[pt][dim], default_precision,
-                           name + ": point " + std::to_string(pt));
+                check_near(accumulated[pt].position.at(dim), test_case.expected_ego_relative.at(pt).at(dim),
+                           default_precision, name + ": point " + std::to_string(pt));
             }
         }
     }
 
+    // The point each of the three frames of the rotation cases accumulates, in the radar frame (which is the ego
+    // frame in the cases without extrinsics)
+    constexpr std::array<pc2::radar_point, 3> rotation_input_points{
+        {{101, 102, 103, 0, 0, 0}, {110, 120, 130, 0, 0, 0}, {200, 300, 400, 0, 0, 0}}};
+
+    // The same points as rotation_input_points, expressed in the radar frame of the yaw with extrinsics case (yawed by
+    // +15 deg relative to the ego frame)
+    constexpr std::array<pc2::radar_point, 3> rotation_input_points_in_yawed_radar_frame{
+        {{123.95805106F, 72.38371073F, 103, 0, 0, 0},
+         {137.3101263F, 87.44100419F, 130, 0, 0, 0},
+         {270.83087879F, 238.01393887F, 400, 0, 0, 0}}};
+
+    // Ego orientation (roll, pitch, yaw in radians) when each of the three frames is received; the last one is also the
+    // ego orientation the points are read back in
+    constexpr std::array<std::array<double, 3>, 3> yaw_orientations_roll_pitch_yaw{
+        {{0, 0, 0}, {0, 0, radians(30)}, {0, 0, radians(45)}}};
+    constexpr std::array<std::array<double, 3>, 3> pitch_orientations_roll_pitch_yaw{
+        {{0, 0, 0}, {0, radians(30), 0}, {0, radians(45), 0}}};
+    constexpr std::array<std::array<double, 3>, 3> roll_orientations_roll_pitch_yaw{
+        {{0, 0, 0}, {radians(30), 0, 0}, {radians(45), 0, 0}}};
+
+    // Golden ego-relative positions of rotation_input_points for the orientations above
+    constexpr std::array<std::array<double, 3>, 3> yaw_golden_ego_relative{
+        {{143.5427, 0.7071018, 103.0}, {137.31013, 87.44099, 130.0}, {200, 300, 400}}};
+    constexpr std::array<std::array<double, 3>, 3> pitch_golden_ego_relative{
+        {{-1.414223, 102.0, 144.24978}, {72.60535, 120.0, 154.04045}, {200, 300, 400}}};
+    constexpr std::array<std::array<double, 3>, 3> roll_golden_ego_relative{
+        {{101.0, 144.9569, 0.7070923}, {110.0, 149.5576, 94.51205}, {200, 300, 400}}};
+
     // Mirrors Python test_accumulate_rotation_yaw
     void test_rotation_yaw()
     {
-        run_rotation_case(
-            rotation_case{{{{101, 102, 103, 0, 0, 0}, {110, 120, 130, 0, 0, 0}, {200, 300, 400, 0, 0, 0}}},
-                          {{{0, 0, 0}, {0, 0, radians(30)}, {0, 0, radians(45)}}},
-                          std::nullopt,
-                          {{{143.5427, 0.7071018, 103.0}, {137.31013, 87.44099, 130.0}, {200, 300, 400}}}},
-            "rotation_yaw");
+        run_rotation_case(rotation_case{rotation_input_points, yaw_orientations_roll_pitch_yaw, std::nullopt,
+                                        yaw_golden_ego_relative},
+                          "rotation_yaw");
     }
 
     // Mirrors Python test_accumulate_rotation_pitch
     void test_rotation_pitch()
     {
-        run_rotation_case(
-            rotation_case{{{{101, 102, 103, 0, 0, 0}, {110, 120, 130, 0, 0, 0}, {200, 300, 400, 0, 0, 0}}},
-                          {{{0, 0, 0}, {0, radians(30), 0}, {0, radians(45), 0}}},
-                          std::nullopt,
-                          {{{-1.414223, 102.0, 144.24978}, {72.60535, 120.0, 154.04045}, {200, 300, 400}}}},
-            "rotation_pitch");
+        run_rotation_case(rotation_case{rotation_input_points, pitch_orientations_roll_pitch_yaw, std::nullopt,
+                                        pitch_golden_ego_relative},
+                          "rotation_pitch");
     }
 
     // Mirrors Python test_accumulate_rotation_roll: orientations are (0, 0, 0), (radians(30), 0, 0),
     // (radians(45), 0, 0) — frame 0 has NO rotation, exactly as in the Python original
     void test_rotation_roll()
     {
-        run_rotation_case(
-            rotation_case{{{{101, 102, 103, 0, 0, 0}, {110, 120, 130, 0, 0, 0}, {200, 300, 400, 0, 0, 0}}},
-                          {{{0, 0, 0}, {radians(30), 0, 0}, {radians(45), 0, 0}}},
-                          std::nullopt,
-                          {{{101.0, 144.9569, 0.7070923}, {110.0, 149.5576, 94.51205}, {200, 300, 400}}}},
-            "rotation_roll");
+        run_rotation_case(rotation_case{rotation_input_points, roll_orientations_roll_pitch_yaw, std::nullopt,
+                                        roll_golden_ego_relative},
+                          "rotation_roll");
     }
 
     // Mirrors Python test_accumulate_rotation_yaw_with_extrinsics: same expected output as rotation_yaw, but the
     // input points are pre-rotated by -15 deg yaw and the radar extrinsics rotate by +15 deg yaw
     void test_rotation_yaw_with_extrinsics()
     {
-        run_rotation_case(
-            rotation_case{{{{123.95805106F, 72.38371073F, 103, 0, 0, 0},
-                            {137.3101263F, 87.44100419F, 130, 0, 0, 0},
-                            {270.83087879F, 238.01393887F, 400, 0, 0, 0}}},
-                          {{{0, 0, 0}, {0, 0, radians(30)}, {0, 0, radians(45)}}},
-                          acc::rigid_transform{{0, 0, 0}, {0, 0, radians(15)}},
-                          {{{143.5427, 0.7071018, 103.0}, {137.31013, 87.44099, 130.0}, {200, 300, 400}}}},
-            "rotation_yaw_with_extrinsics");
+        const acc::rigid_transform radar_extrinsics{{0, 0, 0}, {0, 0, radians(15)}};
+        run_rotation_case(rotation_case{rotation_input_points_in_yawed_radar_frame, yaw_orientations_roll_pitch_yaw,
+                                        radar_extrinsics, yaw_golden_ego_relative},
+                          "rotation_yaw_with_extrinsics");
     }
 
     // Mirrors Python test_accumulate_rotation_and_move_simple_no_extrinsics
@@ -723,10 +779,15 @@ namespace
         const auto accumulated = accumulator.get_points_ego_relative(current_fix);
 
         check(accumulated.size() == 1, "rotation_and_move_simple_no_extrinsics: size");
-        check_near(accumulated[0].position[0], -2, default_precision, "rotation_and_move_simple_no_extrinsics: x");
-        check_near(accumulated[0].position[1], 1 + 10 * std::sqrt(2.0), default_precision,
+        const double expected_x = -2;
+        const double expected_y = 1 + 10 * std::sqrt(2.0);
+        const double expected_z = 3;
+        check_near(accumulated[0].position[0], expected_x, default_precision,
+                   "rotation_and_move_simple_no_extrinsics: x");
+        check_near(accumulated[0].position[1], expected_y, default_precision,
                    "rotation_and_move_simple_no_extrinsics: y");
-        check_near(accumulated[0].position[2], 3, default_precision, "rotation_and_move_simple_no_extrinsics: z");
+        check_near(accumulated[0].position[2], expected_z, default_precision,
+                   "rotation_and_move_simple_no_extrinsics: z");
     }
 
     // Mirrors Python test_accumulate_rotation_and_move_simple_with_extrinsics
@@ -744,11 +805,21 @@ namespace
         const auto accumulated = accumulator.get_points_ego_relative(current_fix);
 
         check(accumulated.size() == 1, "rotation_and_move_simple_with_extrinsics: size");
-        check_near(accumulated[0].position[0], -2, default_precision, "rotation_and_move_simple_with_extrinsics: x");
-        check_near(accumulated[0].position[1], 1 + 10 * std::sqrt(2.0), default_precision,
+        const double expected_x = -2;
+        const double expected_y = 1 + 10 * std::sqrt(2.0);
+        const double expected_z = 3;
+        check_near(accumulated[0].position[0], expected_x, default_precision,
+                   "rotation_and_move_simple_with_extrinsics: x");
+        check_near(accumulated[0].position[1], expected_y, default_precision,
                    "rotation_and_move_simple_with_extrinsics: y");
-        check_near(accumulated[0].position[2], 3, default_precision, "rotation_and_move_simple_with_extrinsics: z");
+        check_near(accumulated[0].position[2], expected_z, default_precision,
+                   "rotation_and_move_simple_with_extrinsics: z");
     }
+
+    // Golden ego-relative positions of the three points the rotation_and_move cases accumulate (one per frame): the
+    // same for the cases with and without extrinsics
+    constexpr std::array<std::array<double, 3>, 3> rotation_and_move_golden_ego_relative{
+        {{106.18976, -7.7577, 103.0}, {107.8386, 97.979, 130.0}, {200.0, 300.0, 400.0}}};
 
     // Mirrors Python test_accumulate_rotation_and_move_no_extrinsics: based on its analogue in
     // provizio_radar_api_core, which was proven to match the APT GUI implementation of accumulation
@@ -770,15 +841,24 @@ namespace
 
         const auto accumulated = accumulator.get_points_ego_relative(fix_2);
         check(accumulated.size() == 3, "rotation_and_move_no_extrinsics: size");
-        check_near(accumulated[0].position[0], 106.18976, default_precision, "ram_ne: p0 x");
-        check_near(accumulated[0].position[1], -7.7577, default_precision, "ram_ne: p0 y");
-        check_near(accumulated[0].position[2], 103.0, default_precision, "ram_ne: p0 z");
-        check_near(accumulated[1].position[0], 107.8386, default_precision, "ram_ne: p1 x");
-        check_near(accumulated[1].position[1], 97.979, default_precision, "ram_ne: p1 y");
-        check_near(accumulated[1].position[2], 130.0, default_precision, "ram_ne: p1 z");
-        check_near(accumulated[2].position[0], 200.0, default_precision, "ram_ne: p2 x");
-        check_near(accumulated[2].position[1], 300.0, default_precision, "ram_ne: p2 y");
-        check_near(accumulated[2].position[2], 400.0, default_precision, "ram_ne: p2 z");
+        check_near(accumulated[0].position[0], rotation_and_move_golden_ego_relative[0][0], default_precision,
+                   "ram_ne: p0 x");
+        check_near(accumulated[0].position[1], rotation_and_move_golden_ego_relative[0][1], default_precision,
+                   "ram_ne: p0 y");
+        check_near(accumulated[0].position[2], rotation_and_move_golden_ego_relative[0][2], default_precision,
+                   "ram_ne: p0 z");
+        check_near(accumulated[1].position[0], rotation_and_move_golden_ego_relative[1][0], default_precision,
+                   "ram_ne: p1 x");
+        check_near(accumulated[1].position[1], rotation_and_move_golden_ego_relative[1][1], default_precision,
+                   "ram_ne: p1 y");
+        check_near(accumulated[1].position[2], rotation_and_move_golden_ego_relative[1][2], default_precision,
+                   "ram_ne: p1 z");
+        check_near(accumulated[2].position[0], rotation_and_move_golden_ego_relative[2][0], default_precision,
+                   "ram_ne: p2 x");
+        check_near(accumulated[2].position[1], rotation_and_move_golden_ego_relative[2][1], default_precision,
+                   "ram_ne: p2 y");
+        check_near(accumulated[2].position[2], rotation_and_move_golden_ego_relative[2][2], default_precision,
+                   "ram_ne: p2 z");
     }
 
     // Mirrors Python test_accumulate_rotation_and_move_with_extrinsics: same golden output as above, with the
@@ -802,36 +882,69 @@ namespace
 
         const auto accumulated = accumulator.get_points_ego_relative(fix_2);
         check(accumulated.size() == 3, "rotation_and_move_with_extrinsics: size");
-        check_near(accumulated[0].position[0], 106.18976, default_precision, "ram_we: p0 x");
-        check_near(accumulated[0].position[1], -7.7577, default_precision, "ram_we: p0 y");
-        check_near(accumulated[0].position[2], 103.0, default_precision, "ram_we: p0 z");
-        check_near(accumulated[1].position[0], 107.8386, default_precision, "ram_we: p1 x");
-        check_near(accumulated[1].position[1], 97.979, default_precision, "ram_we: p1 y");
-        check_near(accumulated[1].position[2], 130.0, default_precision, "ram_we: p1 z");
-        check_near(accumulated[2].position[0], 200.0, default_precision, "ram_we: p2 x");
-        check_near(accumulated[2].position[1], 300.0, default_precision, "ram_we: p2 y");
-        check_near(accumulated[2].position[2], 400.0, default_precision, "ram_we: p2 z");
+        check_near(accumulated[0].position[0], rotation_and_move_golden_ego_relative[0][0], default_precision,
+                   "ram_we: p0 x");
+        check_near(accumulated[0].position[1], rotation_and_move_golden_ego_relative[0][1], default_precision,
+                   "ram_we: p0 y");
+        check_near(accumulated[0].position[2], rotation_and_move_golden_ego_relative[0][2], default_precision,
+                   "ram_we: p0 z");
+        check_near(accumulated[1].position[0], rotation_and_move_golden_ego_relative[1][0], default_precision,
+                   "ram_we: p1 x");
+        check_near(accumulated[1].position[1], rotation_and_move_golden_ego_relative[1][1], default_precision,
+                   "ram_we: p1 y");
+        check_near(accumulated[1].position[2], rotation_and_move_golden_ego_relative[1][2], default_precision,
+                   "ram_we: p1 z");
+        check_near(accumulated[2].position[0], rotation_and_move_golden_ego_relative[2][0], default_precision,
+                   "ram_we: p2 x");
+        check_near(accumulated[2].position[1], rotation_and_move_golden_ego_relative[2][1], default_precision,
+                   "ram_we: p2 y");
+        check_near(accumulated[2].position[2], rotation_and_move_golden_ego_relative[2][2], default_precision,
+                   "ram_we: p2 z");
     }
 
     void test_gps_utils_golden()
     {
+        // The local ENU frame is anchored at this point, at ground level
+        constexpr double origin_latitude_degrees = 52.705502;
+        constexpr double origin_longitude_degrees = -8.899619;
+        // The origin itself must land on (0, 0, 0) to within numerical noise; the other points are compared to golden
+        // ENU coordinates at the precision those are quoted to
+        constexpr double origin_tolerance = 1e-9;
+        constexpr double golden_tolerance = 1e-5;
+
+        // A point about 100 m east and 200 m north of the origin, 5.5 m above it
+        constexpr double near_latitude_degrees = 52.707298;
+        constexpr double near_longitude_degrees = -8.898137;
+        constexpr double near_altitude_metres = 5.5;
+        constexpr double near_golden_east_metres = 100.169027;
+        constexpr double near_golden_north_metres = 199.861401;
+        constexpr double near_golden_up_metres = 5.496083;
+
+        // A point about 680 m west and 1.1 km north of the origin, 100 m above it
+        constexpr double far_latitude_degrees = 52.715502;
+        constexpr double far_longitude_degrees = -8.909619;
+        constexpr double far_altitude_metres = 100;
+        constexpr double far_golden_east_metres = -675.787585;
+        constexpr double far_golden_north_metres = 1112.872476;
+        constexpr double far_golden_up_metres = 99.867155;
+
         provizio::dds::accumulation::detail::gps_utils gps;
-        gps.set_enu_origin(52.705502, -8.899619, 0);
+        gps.set_enu_origin(origin_latitude_degrees, origin_longitude_degrees, 0);
 
-        const auto at_origin = gps.geo_to_enu(52.705502, -8.899619, 0);
-        check_near(at_origin[0], 0, 1e-9, "gps: origin east");
-        check_near(at_origin[1], 0, 1e-9, "gps: origin north");
-        check_near(at_origin[2], 0, 1e-9, "gps: origin up");
+        const auto at_origin = gps.geo_to_enu(origin_latitude_degrees, origin_longitude_degrees, 0);
+        check_near(at_origin[0], 0, origin_tolerance, "gps: origin east");
+        check_near(at_origin[1], 0, origin_tolerance, "gps: origin north");
+        check_near(at_origin[2], 0, origin_tolerance, "gps: origin up");
 
-        const auto near_point = gps.geo_to_enu(52.707298, -8.898137, 5.5);
-        check_near(near_point[0], 100.169027, 1e-5, "gps: near east");
-        check_near(near_point[1], 199.861401, 1e-5, "gps: near north");
-        check_near(near_point[2], 5.496083, 1e-5, "gps: near up");
+        const auto near_point = gps.geo_to_enu(near_latitude_degrees, near_longitude_degrees, near_altitude_metres);
+        check_near(near_point[0], near_golden_east_metres, golden_tolerance, "gps: near east");
+        check_near(near_point[1], near_golden_north_metres, golden_tolerance, "gps: near north");
+        check_near(near_point[2], near_golden_up_metres, golden_tolerance, "gps: near up");
 
-        const auto far_point = gps.geo_to_enu(52.715502, -8.909619, 100);
-        check_near(far_point[0], -675.787585, 1e-5, "gps: far east");
-        check_near(far_point[1], 1112.872476, 1e-5, "gps: far north");
-        check_near(far_point[2], 99.867155, 1e-5, "gps: far up");
+        const auto far_point = gps.geo_to_enu(far_latitude_degrees, far_longitude_degrees, far_altitude_metres);
+        check_near(far_point[0], far_golden_east_metres, golden_tolerance, "gps: far east");
+        check_near(far_point[1], far_golden_north_metres, golden_tolerance, "gps: far north");
+        check_near(far_point[2], far_golden_up_metres, golden_tolerance, "gps: far up");
     }
 
     using namespace std::chrono_literals;
@@ -856,7 +969,7 @@ namespace
             // The domain is in the message because a match that never comes has one known cause
             // that depends on it: see detail/test_domain.h.
             check(publisher->get_num_matched_subscribers(match_timeout, std::chrono::milliseconds{0}) > 0,
-                  "accumulation_test: a subscriber failed to match in time on domain " + std::to_string(test_domain));
+                  "accumulation_test: a subscriber failed to match in time on domain " + std::to_string(test_domain()));
         };
         (wait_one(publishers), ...);
     }
@@ -940,8 +1053,8 @@ namespace
     {
         const std::string localization_topic{"rt/test_dds_simple_localization_topic"};
         const std::string pointcloud2_topic{"rt/test_dds_simple_pointcloud2_topic"};
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -989,16 +1102,17 @@ namespace
         const std::array<std::array<double, 3>, 3> ego_poses{ego_pos_0, ego_pos_1, ego_pos_1};
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
-            const std::array<float, 3> xyz{input_points[pt].x, input_points[pt].y, input_points[pt].z};
+            const auto &input_point = input_points.at(pt);
+            const std::array<float, 3> xyz{input_point.x, input_point.y, input_point.z};
             for (std::size_t dim = 0; dim < 3; ++dim)
             {
-                check_near(local[pt].position[dim], xyz[dim] + ego_poses[pt][dim], default_precision,
+                check_near(local[pt].position.at(dim), xyz.at(dim) + ego_poses.at(pt).at(dim), default_precision,
                            "dds_simple: local position");
-                check_near(ego[pt].position[dim], xyz[dim] + ego_poses[pt][dim] - ego_pos_now[dim], default_precision,
-                           "dds_simple: ego position");
+                check_near(ego[pt].position.at(dim), xyz.at(dim) + ego_poses.at(pt).at(dim) - ego_pos_now.at(dim),
+                           default_precision, "dds_simple: ego position");
             }
-            check_point_meta(local[pt], input_points[pt], radar_id, "dds_simple local");
-            check_point_meta(ego[pt], input_points[pt], radar_id, "dds_simple ego");
+            check_point_meta(local[pt], input_point, radar_id, "dds_simple local");
+            check_point_meta(ego[pt], input_point, radar_id, "dds_simple ego");
         }
     }
 
@@ -1008,8 +1122,8 @@ namespace
         const std::string localization_topic{"rt/test_dds_simple_extrinsics_localization_topic"};
         const std::string pointcloud2_topic{"rt/test_dds_simple_extrinsics_pointcloud2_topic"};
         const std::string extrinsics_topic{"rt/test_dds_simple_extrinsics_extrinsics_topic"};
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -1060,17 +1174,19 @@ namespace
         const std::array<std::array<double, 3>, 3> ego_poses{ego_pos_0, ego_pos_1, ego_pos_1};
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
-            const std::array<float, 3> xyz{input_points[pt].x, input_points[pt].y, input_points[pt].z};
+            const auto &input_point = input_points.at(pt);
+            const std::array<float, 3> xyz{input_point.x, input_point.y, input_point.z};
             for (std::size_t dim = 0; dim < 3; ++dim)
             {
-                check_near(local[pt].position[dim], xyz[dim] + ego_poses[pt][dim] + radar_extrinsics_pos[dim],
-                           default_precision, "dds_simple_extrinsics: local position");
-                check_near(ego[pt].position[dim],
-                           xyz[dim] + ego_poses[pt][dim] + radar_extrinsics_pos[dim] - ego_pos_now[dim],
+                check_near(local[pt].position.at(dim),
+                           xyz.at(dim) + ego_poses.at(pt).at(dim) + radar_extrinsics_pos.at(dim), default_precision,
+                           "dds_simple_extrinsics: local position");
+                check_near(ego[pt].position.at(dim),
+                           xyz.at(dim) + ego_poses.at(pt).at(dim) + radar_extrinsics_pos.at(dim) - ego_pos_now.at(dim),
                            default_precision, "dds_simple_extrinsics: ego position");
             }
-            check_point_meta(local[pt], input_points[pt], radar_id, "dds_simple_extrinsics local");
-            check_point_meta(ego[pt], input_points[pt], radar_id, "dds_simple_extrinsics ego");
+            check_point_meta(local[pt], input_point, radar_id, "dds_simple_extrinsics local");
+            check_point_meta(ego[pt], input_point, radar_id, "dds_simple_extrinsics ego");
         }
     }
 
@@ -1083,8 +1199,8 @@ namespace
             "rt/test_dds_simple_extrinsics_including_localization_radar_extrinsics"};
         const std::string localization_extrinsics_topic{
             "rt/test_dds_simple_extrinsics_including_localization_localization_extrinsics"};
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -1167,16 +1283,17 @@ namespace
         const std::array<std::array<double, 3>, 3> ego_poses{ego_pos_0, ego_pos_1, ego_pos_1};
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
-            const std::array<float, 3> xyz{input_points_ego[pt].x, input_points_ego[pt].y, input_points_ego[pt].z};
+            const auto &input_point = input_points_ego.at(pt);
+            const std::array<float, 3> xyz{input_point.x, input_point.y, input_point.z};
             for (std::size_t dim = 0; dim < 3; ++dim)
             {
-                check_near(local[pt].position[dim], xyz[dim] + ego_poses[pt][dim], default_precision,
+                check_near(local[pt].position.at(dim), xyz.at(dim) + ego_poses.at(pt).at(dim), default_precision,
                            "dds_extr_incl_loc: local position");
-                check_near(ego[pt].position[dim], xyz[dim] + ego_poses[pt][dim] - ego_pos_now[dim], default_precision,
-                           "dds_extr_incl_loc: ego position");
+                check_near(ego[pt].position.at(dim), xyz.at(dim) + ego_poses.at(pt).at(dim) - ego_pos_now.at(dim),
+                           default_precision, "dds_extr_incl_loc: ego position");
             }
-            check_point_meta(local[pt], input_points_ego[pt], radar_id, "dds_extr_incl_loc local");
-            check_point_meta(ego[pt], input_points_ego[pt], radar_id, "dds_extr_incl_loc ego");
+            check_point_meta(local[pt], input_point, radar_id, "dds_extr_incl_loc local");
+            check_point_meta(ego[pt], input_point, radar_id, "dds_extr_incl_loc ego");
         }
     }
 
@@ -1190,8 +1307,8 @@ namespace
         const std::string radar_extrinsics_topic{"rt/test_dds_localization_extrinsics_late_radar_extrinsics"};
         const std::string localization_extrinsics_topic{
             "rt/test_dds_localization_extrinsics_late_localization_extrinsics"};
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -1264,12 +1381,13 @@ namespace
         // Poll until the correction has landed (the first point moves from its identity placement to the
         // extrinsics-corrected one).
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{10000};
+        constexpr auto correction_poll_interval = std::chrono::milliseconds{20};
         auto local = accumulator.get_points_local_frame_relative();
         while (std::chrono::steady_clock::now() < deadline &&
                (local.size() < 3 || std::abs(static_cast<double>(local[0].position[0]) -
                                              (point_0_ego.x + ego_pos_0[0])) > default_precision))
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+            std::this_thread::sleep_for(correction_poll_interval);
             local = accumulator.get_points_local_frame_relative();
         }
         check(local.size() == 3, "dds_loc_extr_late: local size");
@@ -1278,13 +1396,14 @@ namespace
         const std::array<std::array<double, 3>, 3> ego_poses{ego_pos_0, ego_pos_1, ego_pos_1};
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
-            const std::array<float, 3> xyz{input_points_ego[pt].x, input_points_ego[pt].y, input_points_ego[pt].z};
+            const auto &input_point = input_points_ego.at(pt);
+            const std::array<float, 3> xyz{input_point.x, input_point.y, input_point.z};
             for (std::size_t dim = 0; dim < 3; ++dim)
             {
-                check_near(local[pt].position[dim], xyz[dim] + ego_poses[pt][dim], default_precision,
+                check_near(local[pt].position.at(dim), xyz.at(dim) + ego_poses.at(pt).at(dim), default_precision,
                            "dds_loc_extr_late: retroactively corrected local position");
             }
-            check_point_meta(local[pt], input_points_ego[pt], radar_id, "dds_loc_extr_late");
+            check_point_meta(local[pt], input_point, radar_id, "dds_loc_extr_late");
         }
     }
 
@@ -1292,8 +1411,8 @@ namespace
     void test_dds_no_localization_no_extrinsics()
     {
         const std::string pointcloud2_topic{"rt/test_dds_no_localization_no_extrinsics_pointcloud2_topic"};
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::none;
@@ -1324,14 +1443,16 @@ namespace
         const std::array<pc2::radar_point, 3> input_points{point_0, point_1, point_2};
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
-            const std::array<float, 3> xyz{input_points[pt].x, input_points[pt].y, input_points[pt].z};
+            const auto &input_point = input_points.at(pt);
+            const std::array<float, 3> xyz{input_point.x, input_point.y, input_point.z};
             for (const auto *accumulated : {&local, &ego})
             {
                 for (std::size_t dim = 0; dim < 3; ++dim)
                 {
-                    check((*accumulated)[pt].position[dim] == xyz[dim], "dds_no_loc_no_extr: position passthrough");
+                    check((*accumulated)[pt].position.at(dim) == xyz.at(dim),
+                          "dds_no_loc_no_extr: position passthrough");
                 }
-                check_point_meta((*accumulated)[pt], input_points[pt], radar_id, "dds_no_loc_no_extr");
+                check_point_meta((*accumulated)[pt], input_point, radar_id, "dds_no_loc_no_extr");
             }
         }
     }
@@ -1341,8 +1462,8 @@ namespace
     {
         const std::string pointcloud2_topic{"rt/test_dds_no_localization_with_extrinsics_pointcloud2_topic"};
         const std::string extrinsics_topic{"rt/test_dds_no_localization_with_extrinsics_extrinsics_topic"};
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::none;
@@ -1378,15 +1499,16 @@ namespace
         const std::array<pc2::radar_point, 3> input_points{point_0, point_1, point_2};
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
-            const std::array<float, 3> xyz{input_points[pt].x, input_points[pt].y, input_points[pt].z};
+            const auto &input_point = input_points.at(pt);
+            const std::array<float, 3> xyz{input_point.x, input_point.y, input_point.z};
             for (const auto *accumulated : {&local, &ego})
             {
                 for (std::size_t dim = 0; dim < 3; ++dim)
                 {
-                    check_near((*accumulated)[pt].position[dim], xyz[dim] + radar_extrinsics_pos[dim],
+                    check_near((*accumulated)[pt].position.at(dim), xyz.at(dim) + radar_extrinsics_pos.at(dim),
                                default_precision, "dds_no_loc_with_extr: position");
                 }
-                check_point_meta((*accumulated)[pt], input_points[pt], radar_id, "dds_no_loc_with_extr");
+                check_point_meta((*accumulated)[pt], input_point, radar_id, "dds_no_loc_with_extr");
             }
         }
     }
@@ -1418,8 +1540,8 @@ namespace
     {
         const std::string localization_topic{"rt/test_dds_nav_sat_fix_localization_nav_sat_fix_topic"};
         const std::string pointcloud2_topic{"rt/test_dds_nav_sat_fix_localization_pointcloud2_topic"};
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::nav_sat_fix;
@@ -1478,22 +1600,23 @@ namespace
         const double precision = 0.05;
         for (std::size_t pt = 0; pt < 3; ++pt)
         {
-            const std::array<float, 3> xyz{input_points[pt].x, input_points[pt].y, input_points[pt].z};
+            const auto &input_point = input_points.at(pt);
+            const std::array<float, 3> xyz{input_point.x, input_point.y, input_point.z};
             for (std::size_t dim = 0; dim < 3; ++dim)
             {
-                check_near(local[pt].position[dim], xyz[dim] + ego_poses_enu[pt][dim], precision,
+                check_near(local[pt].position.at(dim), xyz.at(dim) + ego_poses_enu.at(pt).at(dim), precision,
                            "dds_nav_sat_fix: local position");
             }
-            check_point_meta(local[pt], input_points[pt], radar_id, "dds_nav_sat_fix local");
-            check_point_meta(ego[pt], input_points[pt], radar_id, "dds_nav_sat_fix ego");
+            check_point_meta(local[pt], input_point, radar_id, "dds_nav_sat_fix local");
+            check_point_meta(ego[pt], input_point, radar_id, "dds_nav_sat_fix ego");
 
             // Ego-relative positions are rotated: by the time of the last fix the estimated yaw is 90 deg
             // (the ego moved straight north relative to the position history start)
-            check_near(ego[pt].position[0], xyz[1] + ego_poses_enu[pt][1] - ego_enu_offset_now[1], precision,
+            check_near(ego[pt].position[0], xyz[1] + ego_poses_enu.at(pt)[1] - ego_enu_offset_now[1], precision,
                        "dds_nav_sat_fix: ego x");
-            check_near(ego[pt].position[1], -xyz[0] - ego_poses_enu[pt][0] + ego_enu_offset_now[0], precision,
+            check_near(ego[pt].position[1], -xyz[0] - ego_poses_enu.at(pt)[0] + ego_enu_offset_now[0], precision,
                        "dds_nav_sat_fix: ego y");
-            check_near(ego[pt].position[2], xyz[2] + ego_poses_enu[pt][2] - ego_enu_offset_now[2], precision,
+            check_near(ego[pt].position[2], xyz[2] + ego_poses_enu.at(pt)[2] - ego_enu_offset_now[2], precision,
                        "dds_nav_sat_fix: ego z");
         }
     }
@@ -1504,8 +1627,8 @@ namespace
         const std::string pointcloud2_topic{"rt/test_dds_on_pc2_callback_pointcloud2_topic"};
         const std::string radar_id{"test_radar"};
         const pc2::radar_point point{1, 2, 3, 4, 5, 6};
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         std::mutex callback_mutex;
         std::condition_variable callback_cv;
@@ -1554,6 +1677,27 @@ namespace
         check(num_accumulated == 1,
               "dds_on_pc2_callback: expected 1 accumulated point, got " + std::to_string(num_accumulated));
     }
+
+    // Shared by the Kalman and timesync cases below, which feed the accumulator a constant-velocity ramp of odometry
+    // fixes: the header stamp of fix k is fix_period_seconds * k and, the ego moving at
+    // ramp_velocity_metres_per_second along x, its x is k.
+    constexpr double fix_period_seconds = 0.1;
+    constexpr double ramp_velocity_metres_per_second = 10.0;
+    // The odometry fix that releases a buffered cloud is received this long after the cloud, which is well inside
+    // the timesync_max_delay_seconds of those cases
+    constexpr double covering_fix_receive_delay_seconds = 0.1;
+    // How far from the expected position a timesync-placed point may land
+    constexpr double timesync_position_tolerance = 1e-2;
+    // Bounded waits for the injected time source to be called: wait_poll_interval each, at most max_wait_polls times,
+    // so that a delivery failure fails the case instead of hanging it
+    constexpr auto wait_poll_interval = std::chrono::milliseconds{10};
+    constexpr int max_wait_polls = 1000;
+    // The single point the Kalman and timesync cases publish, at the origin of the radar frame, and one a unit along
+    // its x axis. The signal-to-noise ratio is arbitrary: no_filters_options() keeps every point.
+    constexpr float probe_signal_to_noise_ratio = 100;
+    constexpr pc2::radar_point radar_frame_origin_point{0, 0, 0, 0, probe_signal_to_noise_ratio, 0};
+    constexpr pc2::radar_point radar_frame_unit_x_point{1, 0, 0, 0, probe_signal_to_noise_ratio, 0};
+
     // Drives the Kalman-predicted localization path end-to-end over DDS with a deterministic
     // injected clock. The clock is sequenced by the time_source call count: each processed
     // odometry fix and the point cloud call time_source exactly once, so the test advances the
@@ -1566,17 +1710,18 @@ namespace
         const std::string localization_topic{"rt/test_kalman_localization_topic"};
         const std::string pointcloud2_topic{"rt/test_kalman_pointcloud2_topic"};
         const std::size_t num_fixes = 20;
+        constexpr double cloud_delay_after_last_fix_seconds = 0.6;
 
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         std::atomic<std::size_t> calls{0};
         std::vector<double> times(num_fixes + 1);
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            times[k] = 0.1 * static_cast<double>(k);  // fix k at t = 0.1*k
+            times[k] = fix_period_seconds * static_cast<double>(k);  // fix k at t = 0.1*k
         }
-        times[num_fixes] = times[num_fixes - 1] + 0.6;  // cloud 0.6 s after the last fix
+        times[num_fixes] = times[num_fixes - 1] + cloud_delay_after_last_fix_seconds;  // cloud 0.6 s after the last fix
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -1586,8 +1731,8 @@ namespace
         options.accumulation = no_filters_options();
         options.kalman_localization = true;
         options.time_source = [&calls, &times] {
-            const std::size_t i = calls.fetch_add(1);
-            return times[std::min(i, times.size() - 1)];
+            const std::size_t call_index = calls.fetch_add(1);
+            return times[std::min(call_index, times.size() - 1)];
         };
         const acc::dds_point_clouds_accumulator accumulator{2, options, subscribers_participant};
 
@@ -1605,18 +1750,18 @@ namespace
         }
         // Wait until all fixes are processed (each calls time_source once) BEFORE the cloud, so the
         // cloud deterministically gets times[num_fixes]. Bounded so a delivery failure can't hang.
-        for (int waited = 0; calls.load() < num_fixes && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes, "dds_kalman: all fixes processed before the cloud");
 
-        publish_pc2(*pc2_publisher, radar_points{pc2::radar_point{0, 0, 0, 0, 100, 0}}, radar_id);
+        publish_pc2(*pc2_publisher, radar_points{radar_frame_origin_point}, radar_id);
         wait_for_accumulated_points(accumulator, 1);
         const auto local = accumulator.get_points_local_frame_relative();
         check(local.size() == 1, "dds_kalman: one accumulated point");
 
-        const double last_fix_x = static_cast<double>(num_fixes - 1);  // 19
+        const auto last_fix_x = static_cast<double>(num_fixes - 1);  // 19
         // Enabled Kalman extrapolates ~0.6 s forward at ~10 m/s -> ~25, well past the last fix (19).
         check(local[0].position[0] > last_fix_x + 1.0,
               "dds_kalman: cloud placed at the extrapolated receive-time ego pose, not the stale last fix");
@@ -1642,8 +1787,8 @@ namespace
         // Cloud header stamp — one step ahead of the last fix so the buffer is triggered.
         const double t_pc = 0.1 * static_cast<double>(num_fixes);  // 2.0
 
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         std::atomic<std::size_t> calls{0};
         std::atomic<std::size_t> callback_count{0};
@@ -1656,10 +1801,11 @@ namespace
         std::vector<double> times(num_fixes + 2);
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            times[k] = 0.1 * static_cast<double>(k);
+            times[k] = fix_period_seconds * static_cast<double>(k);
         }
-        times[num_fixes] = t_pc;            // cloud receive time (same as header; timeout = 100s)
-        times[num_fixes + 1] = t_pc + 0.1;  // covering odometry receive time (barely after cloud)
+        times[num_fixes] = t_pc;  // cloud receive time (same as header; timeout = 100s)
+        // Covering odometry receive time (barely after cloud)
+        times[num_fixes + 1] = t_pc + covering_fix_receive_delay_seconds;
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -1670,8 +1816,8 @@ namespace
         options.kalman_localization = true;
         options.timesync_max_delay_seconds = 100.0;
         options.time_source = [&calls, &times] {
-            const std::size_t i = calls.fetch_add(1);
-            return times[std::min(i, times.size() - 1)];
+            const std::size_t call_index = calls.fetch_add(1);
+            return times[std::min(call_index, times.size() - 1)];
         };
         options.on_point_cloud = [&callback_count](acc::dds_point_clouds_accumulator &) { ++callback_count; };
 
@@ -1687,24 +1833,25 @@ namespace
         // Constant-velocity ramp: ego x = 10 * h_k = k; header stamp = h_k = 0.1*k.
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            const double h_k = 0.1 * static_cast<double>(k);
-            publish_odometry(*localization_publisher, acc::rigid_transform{{10.0 * h_k, 0, 0}, {0, 0, 0}},
+            const double h_k = fix_period_seconds * static_cast<double>(k);
+            publish_odometry(*localization_publisher,
+                             acc::rigid_transform{{ramp_velocity_metres_per_second * h_k, 0, 0}, {0, 0, 0}},
                              "provizio_radar_front_center", "test_world", h_k);
         }
         // Wait until all fixes are processed (each calls time_source once) before publishing the cloud.
-        for (int waited = 0; calls.load() < num_fixes && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes, "dds_timesync_buffered: all fixes processed before the cloud");
 
         // Publish a cloud with header AHEAD of the latest localization header (1.9) — on_pc2 buffers it.
-        publish_pc2(*pc2_publisher, radar_points{pc2::radar_point{0, 0, 0, 0, 100, 0}}, radar_id, t_pc);
+        publish_pc2(*pc2_publisher, radar_points{radar_frame_origin_point}, radar_id, t_pc);
 
         // Wait until on_pc2 has executed (calls bumped to N+1).
-        for (int waited = 0; calls.load() < num_fixes + 1 && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes + 1 && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes + 1, "dds_timesync_buffered: on_pc2 callback executed");
 
@@ -1716,7 +1863,8 @@ namespace
 
         // Covering odometry: header = T_pc = 2.0, ego x = 10 * T_pc = 20.
         // This fix covers the cloud's header stamp, releasing it from the buffer.
-        publish_odometry(*localization_publisher, acc::rigid_transform{{10.0 * t_pc, 0, 0}, {0, 0, 0}},
+        publish_odometry(*localization_publisher,
+                         acc::rigid_transform{{ramp_velocity_metres_per_second * t_pc, 0, 0}, {0, 0, 0}},
                          "provizio_radar_front_center", "test_world", t_pc);
 
         // Wait for accumulation: the buffered cloud is placed at predict(T_pc) — the exact covering pose.
@@ -1726,7 +1874,8 @@ namespace
 
         // The cloud point is at the origin of the radar frame; with ego == radar, position == ego pose.
         // predict(T_pc) with the covering fix at T_pc and ego x = 20 → position[0] ≈ 20.
-        check_near(local[0].position[0], 20.0, 1e-2,
+        constexpr double expected_covering_x = 20.0;
+        check_near(local[0].position[0], expected_covering_x, timesync_position_tolerance,
                    "dds_timesync_buffered: point placed at the exact covering localization, x ~= 20");
 
         // on_point_cloud must have fired exactly once (at buffer release, not at buffer insertion).
@@ -1752,8 +1901,8 @@ namespace
         // Cloud header strictly between h_{N-1}=1.9 and the covering fix at 2.0.
         const double t_pc = 1.95;
 
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         std::atomic<std::size_t> calls{0};
         std::atomic<std::size_t> callback_count{0};
@@ -1765,10 +1914,10 @@ namespace
         std::vector<double> times(num_fixes + 2);
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            times[k] = 0.1 * static_cast<double>(k);
+            times[k] = fix_period_seconds * static_cast<double>(k);
         }
         times[num_fixes] = t_pc;
-        times[num_fixes + 1] = t_pc + 0.1;
+        times[num_fixes + 1] = t_pc + covering_fix_receive_delay_seconds;
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -1779,8 +1928,8 @@ namespace
         options.kalman_localization = true;
         options.timesync_max_delay_seconds = 100.0;
         options.time_source = [&calls, &times] {
-            const std::size_t i = calls.fetch_add(1);
-            return times[std::min(i, times.size() - 1)];
+            const std::size_t call_index = calls.fetch_add(1);
+            return times[std::min(call_index, times.size() - 1)];
         };
         options.on_point_cloud = [&callback_count](acc::dds_point_clouds_accumulator &) { ++callback_count; };
 
@@ -1796,24 +1945,25 @@ namespace
         // Constant-velocity ramp: ego x = 10 * h_k = k; header stamp h_k = 0.1*k.
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            const double h_k = 0.1 * static_cast<double>(k);
-            publish_odometry(*localization_publisher, acc::rigid_transform{{10.0 * h_k, 0, 0}, {0, 0, 0}},
+            const double h_k = fix_period_seconds * static_cast<double>(k);
+            publish_odometry(*localization_publisher,
+                             acc::rigid_transform{{ramp_velocity_metres_per_second * h_k, 0, 0}, {0, 0, 0}},
                              "provizio_radar_front_center", "test_world", h_k);
         }
         // Wait until all ramp fixes are processed before the cloud.
-        for (int waited = 0; calls.load() < num_fixes && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes, "dds_timesync_interp: all ramp fixes processed before the cloud");
 
         // Cloud header 1.95 is ahead of the latest localization header 1.9 — buffered.
-        publish_pc2(*pc2_publisher, radar_points{pc2::radar_point{0, 0, 0, 0, 100, 0}}, radar_id, t_pc);
+        publish_pc2(*pc2_publisher, radar_points{radar_frame_origin_point}, radar_id, t_pc);
 
         // Wait until on_pc2 has executed (calls bumped to N+1).
-        for (int waited = 0; calls.load() < num_fixes + 1 && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes + 1 && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes + 1, "dds_timesync_interp: on_pc2 callback executed");
 
@@ -1834,7 +1984,8 @@ namespace
         check(local.size() == 1, "dds_timesync_interp: one accumulated point after covering fix");
 
         // Interpolated x = 19.5; old snap-to-covering would give 20.0; stale-last-fix would give 19.0.
-        check_near(local[0].position[0], 19.5, 1e-2,
+        constexpr double expected_interpolated_x = 19.5;
+        check_near(local[0].position[0], expected_interpolated_x, timesync_position_tolerance,
                    "dds_timesync_interp: point placed at interpolated pose, x ~= 19.5");
 
         check(callback_count.load() == 1, "dds_timesync_interp: on_point_cloud fired exactly once at release");
@@ -1859,8 +2010,8 @@ namespace
         const double t_pc = 1.5;  // midpoint of [h_a, h_b]
         const double h_b = 2.0;
 
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         std::atomic<std::size_t> calls{0};
         std::atomic<std::size_t> callback_count{0};
@@ -1869,7 +2020,7 @@ namespace
         //   call 0 : fix A (yaw 0)        → receive time = h_a
         //   call 1 : on_pc2 (buffer)      → receive time = t_pc (well inside the 100s timeout)
         //   call 2 : covering fix B (yaw 90°) → receive time = t_pc + 0.1
-        const std::vector<double> times{h_a, t_pc, t_pc + 0.1};
+        const std::vector<double> times{h_a, t_pc, t_pc + covering_fix_receive_delay_seconds};
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -1880,8 +2031,8 @@ namespace
         options.kalman_localization = true;
         options.timesync_max_delay_seconds = 100.0;
         options.time_source = [&calls, &times] {
-            const std::size_t i = calls.fetch_add(1);
-            return times[std::min(i, times.size() - 1)];
+            const std::size_t call_index = calls.fetch_add(1);
+            return times[std::min(call_index, times.size() - 1)];
         };
         options.on_point_cloud = [&callback_count](acc::dds_point_clouds_accumulator &) { ++callback_count; };
 
@@ -1898,19 +2049,19 @@ namespace
         publish_odometry(*localization_publisher, acc::rigid_transform{{0, 0, 0}, {0, 0, 0}},
                          "provizio_radar_front_center", "test_world", h_a);
         // Wait until fix A is processed before the cloud.
-        for (int waited = 0; calls.load() < 1 && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < 1 && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= 1, "dds_timesync_orient: fix A processed before the cloud");
 
         // Cloud header 1.5 is ahead of the latest localization header 1.0 — buffered. Point at local (1,0,0).
-        publish_pc2(*pc2_publisher, radar_points{pc2::radar_point{1, 0, 0, 0, 100, 0}}, radar_id, t_pc);
+        publish_pc2(*pc2_publisher, radar_points{radar_frame_unit_x_point}, radar_id, t_pc);
 
         // Wait until on_pc2 has executed (calls bumped to 2).
-        for (int waited = 0; calls.load() < 2 && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < 2 && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= 2, "dds_timesync_orient: on_pc2 callback executed");
 
@@ -1931,11 +2082,10 @@ namespace
         // Interpolated yaw 45° rotates local (1,0,0) to world (cos45°, sin45°, 0) = (0.7071, 0.7071, 0).
         const double expected = std::sqrt(2.0) / 2.0;  // 0.70710678...
         std::cout << "dds_timesync_orient: world point = (" << local[0].position[0] << ", " << local[0].position[1]
-                  << ", " << local[0].position[2] << "), expected (" << expected << ", " << expected << ", 0)"
-                  << std::endl;
-        check_near(local[0].position[0], expected, 1e-2,
+                  << ", " << local[0].position[2] << "), expected (" << expected << ", " << expected << ", 0)" << '\n';
+        check_near(local[0].position[0], expected, timesync_position_tolerance,
                    "dds_timesync_orient: interpolated yaw 45 deg places x ~= 0.7071 (short-way slerp)");
-        check_near(local[0].position[1], expected, 1e-2,
+        check_near(local[0].position[1], expected, timesync_position_tolerance,
                    "dds_timesync_orient: interpolated yaw 45 deg places y ~= 0.7071 (short-way slerp)");
 
         check(callback_count.load() == 1, "dds_timesync_orient: on_point_cloud fired exactly once at release");
@@ -1960,9 +2110,12 @@ namespace
         const std::size_t num_fixes = 20;
         // Cloud header — ahead of the last ramp fix (1.9) so it stays buffered.
         const double t_pc = 2.2;
+        // The trigger fix is received this long after the cloud: past the timesync delay, so the cloud times out
+        constexpr double trigger_fix_receive_delay_seconds = 0.4;
+        constexpr double timesync_delay_seconds = 0.3;
 
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         std::atomic<std::size_t> calls{0};
         std::atomic<std::size_t> callback_count{0};
@@ -1975,10 +2128,11 @@ namespace
         std::vector<double> times(num_fixes + 2);
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            times[k] = 0.1 * static_cast<double>(k);
+            times[k] = fix_period_seconds * static_cast<double>(k);
         }
-        times[num_fixes] = t_pc;            // cloud receive time
-        times[num_fixes + 1] = t_pc + 0.4;  // trigger fix receive time; exceeds max_delay (0.3) since cloud arrived
+        times[num_fixes] = t_pc;  // cloud receive time
+        // Trigger fix receive time; exceeds max_delay (0.3) since cloud arrived
+        times[num_fixes + 1] = t_pc + trigger_fix_receive_delay_seconds;
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -1987,10 +2141,10 @@ namespace
         options.extrinsics_topics.clear();  // ego frame == radar frame
         options.accumulation = no_filters_options();
         options.kalman_localization = true;
-        options.timesync_max_delay_seconds = 0.3;
+        options.timesync_max_delay_seconds = timesync_delay_seconds;
         options.time_source = [&calls, &times] {
-            const std::size_t i = calls.fetch_add(1);
-            return times[std::min(i, times.size() - 1)];
+            const std::size_t call_index = calls.fetch_add(1);
+            return times[std::min(call_index, times.size() - 1)];
         };
         options.on_point_cloud = [&callback_count](acc::dds_point_clouds_accumulator &) { ++callback_count; };
 
@@ -2006,24 +2160,24 @@ namespace
         // Constant-velocity ramp: ego x = k; header stamp h_k = 0.1*k.
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            const double h_k = 0.1 * static_cast<double>(k);
+            const double h_k = fix_period_seconds * static_cast<double>(k);
             publish_odometry(*localization_publisher, acc::rigid_transform{{static_cast<double>(k), 0, 0}, {0, 0, 0}},
                              "provizio_radar_front_center", "test_world", h_k);
         }
         // Wait until all ramp fixes are processed before the cloud arrives.
-        for (int waited = 0; calls.load() < num_fixes && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes, "dds_timesync_timeout: all ramp fixes processed before the cloud");
 
         // Cloud header T_pc = 2.2 is ahead of latest localization header 1.9 → buffered.
-        publish_pc2(*pc2_publisher, radar_points{pc2::radar_point{0, 0, 0, 0, 100, 0}}, radar_id, t_pc);
+        publish_pc2(*pc2_publisher, radar_points{radar_frame_origin_point}, radar_id, t_pc);
 
         // Wait until on_pc2 has executed (calls bumped to N+1).
-        for (int waited = 0; calls.load() < num_fixes + 1 && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes + 1 && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes + 1, "dds_timesync_timeout: on_pc2 callback executed");
 
@@ -2080,8 +2234,8 @@ namespace
         // Cloud header strictly between h_{N-1}=1.9 and the covering fix at 2.0.
         const double t_pc = 1.95;
 
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         std::atomic<std::size_t> calls{0};
         std::atomic<std::size_t> callback_count{0};
@@ -2094,10 +2248,10 @@ namespace
         std::vector<double> times(num_fixes + 2);
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            times[k] = 0.1 * static_cast<double>(k);
+            times[k] = fix_period_seconds * static_cast<double>(k);
         }
         times[num_fixes] = t_pc;
-        times[num_fixes + 1] = t_pc + 0.1;
+        times[num_fixes + 1] = t_pc + covering_fix_receive_delay_seconds;
 
         acc::dds_accumulation_options options;
         options.localization = acc::localization_source::odometry;
@@ -2108,8 +2262,8 @@ namespace
         options.kalman_localization = true;
         options.timesync_max_delay_seconds = 100.0;
         options.time_source = [&calls, &times] {
-            const std::size_t i = calls.fetch_add(1);
-            return times[std::min(i, times.size() - 1)];
+            const std::size_t call_index = calls.fetch_add(1);
+            return times[std::min(call_index, times.size() - 1)];
         };
         options.on_point_cloud = [&callback_count](acc::dds_point_clouds_accumulator &) { ++callback_count; };
 
@@ -2125,24 +2279,25 @@ namespace
         // Constant-velocity ramp: ego x = 10 * h_k = k; header stamp h_k = 0.1*k.
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            const double h_k = 0.1 * static_cast<double>(k);
-            publish_odometry(*localization_publisher, acc::rigid_transform{{10.0 * h_k, 0, 0}, {0, 0, 0}},
+            const double h_k = fix_period_seconds * static_cast<double>(k);
+            publish_odometry(*localization_publisher,
+                             acc::rigid_transform{{ramp_velocity_metres_per_second * h_k, 0, 0}, {0, 0, 0}},
                              "provizio_radar_front_center", "test_world", h_k);
         }
         // Wait until all ramp fixes are processed before the cloud.
-        for (int waited = 0; calls.load() < num_fixes && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes, "dds_timesync_drop_oor: all ramp fixes processed before the cloud");
 
         // Cloud header 1.95 is ahead of the latest localization header 1.9 — buffered.
-        publish_pc2(*pc2_publisher, radar_points{pc2::radar_point{0, 0, 0, 0, 100, 0}}, radar_id, t_pc);
+        publish_pc2(*pc2_publisher, radar_points{radar_frame_origin_point}, radar_id, t_pc);
 
         // Wait until on_pc2 has executed (calls bumped to N+1).
-        for (int waited = 0; calls.load() < num_fixes + 1 && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes + 1 && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes + 1, "dds_timesync_drop_oor: on_pc2 callback executed");
 
@@ -2156,11 +2311,12 @@ namespace
         // This must be silently dropped (no state mutation, no time_source() call).
         const double stale_header = 1.5;
         const double stale_x = 999.0;
+        constexpr auto stale_fix_settle_time = std::chrono::milliseconds{100};
         publish_odometry(*localization_publisher, acc::rigid_transform{{stale_x, 0, 0}, {0, 0, 0}},
                          "provizio_radar_front_center", "test_world", stale_header);
 
         // Allow the stale fix to be processed (it should be a no-op).
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(stale_fix_settle_time);
 
         // The stale fix must not have accumulated the cloud or fired the callback.
         check(accumulator.get_points_local_frame_relative().empty(),
@@ -2182,7 +2338,8 @@ namespace
 
         // If the stale fix had corrupted previous_fix the bracket would be wrong and interpolation would
         // not yield 19.5. The correct result proves the stale fix was fully ignored.
-        check_near(local[0].position[0], 19.5, 1e-2,
+        constexpr double expected_interpolated_x = 19.5;
+        check_near(local[0].position[0], expected_interpolated_x, timesync_position_tolerance,
                    "dds_timesync_drop_oor: point placed at interpolated pose x ~= 19.5 (stale fix ignored)");
 
         check(callback_count.load() == 1, "dds_timesync_drop_oor: on_point_cloud fired exactly once at release");
@@ -2208,8 +2365,8 @@ namespace
         // Cloud header is older than previous_fix (1.9); covered immediately by the last fix (2.0).
         const double t_pc = 1.5;
 
-        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain);
-        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain);
+        const auto publishers_participant = provizio::dds::make_domain_participant(test_domain());
+        const auto subscribers_participant = provizio::dds::make_domain_participant(test_domain());
 
         std::atomic<std::size_t> calls{0};
         std::atomic<std::size_t> callback_count{0};
@@ -2222,7 +2379,7 @@ namespace
         std::vector<double> times(num_fixes + 1);
         for (std::size_t k = 0; k < num_fixes; ++k)
         {
-            times[k] = 0.1 * static_cast<double>(k);
+            times[k] = fix_period_seconds * static_cast<double>(k);
         }
         times[num_fixes] = t_pc;  // cloud receive time (well inside the 100s timeout)
 
@@ -2235,8 +2392,8 @@ namespace
         options.kalman_localization = true;
         options.timesync_max_delay_seconds = 100.0;
         options.time_source = [&calls, &times] {
-            const std::size_t i = calls.fetch_add(1);
-            return times[std::min(i, times.size() - 1)];
+            const std::size_t call_index = calls.fetch_add(1);
+            return times[std::min(call_index, times.size() - 1)];
         };
         options.on_point_cloud = [&callback_count](acc::dds_point_clouds_accumulator &) { ++callback_count; };
 
@@ -2254,20 +2411,21 @@ namespace
         // After k=20 (final fix at h=2.0, x=20): latest_fix = {2.0, x=20}, previous_fix = {1.9, x=19}.
         for (std::size_t k = 1; k <= num_fixes; ++k)
         {
-            const double h_k = 0.1 * static_cast<double>(k);
-            publish_odometry(*localization_publisher, acc::rigid_transform{{10.0 * h_k, 0, 0}, {0, 0, 0}},
+            const double h_k = fix_period_seconds * static_cast<double>(k);
+            publish_odometry(*localization_publisher,
+                             acc::rigid_transform{{ramp_velocity_metres_per_second * h_k, 0, 0}, {0, 0, 0}},
                              "provizio_radar_front_center", "test_world", h_k);
         }
         // Wait until all ramp fixes are processed before the cloud.
-        for (int waited = 0; calls.load() < num_fixes && waited < 1000; ++waited)
+        for (int waited = 0; calls.load() < num_fixes && waited < max_wait_polls; ++waited)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(wait_poll_interval);
         }
         check(calls.load() >= num_fixes, "dds_timesync_stale_cloud: all ramp fixes processed before the cloud");
 
         // Cloud header 1.5 is OLDER than previous_fix (1.9) but COVERED by latest_fix (2.0):
         // it should be buffered and released immediately inside on_pc2, using previous_fix.pose (x=19).
-        publish_pc2(*pc2_publisher, radar_points{pc2::radar_point{0, 0, 0, 0, 100, 0}}, radar_id, t_pc);
+        publish_pc2(*pc2_publisher, radar_points{radar_frame_origin_point}, radar_id, t_pc);
 
         // Wait for the cloud to be accumulated (released inside on_pc2 callback).
         wait_for_accumulated_points(accumulator, 1);
@@ -2276,7 +2434,8 @@ namespace
 
         // previous_fix.pose has x=19; latest_fix.pose has x=20; true-time pose would have x=15.
         // The correct result is x ≈ 19 (closest retained fix, not the covering fix).
-        check_near(local[0].position[0], 19.0, 1e-2,
+        constexpr double expected_previous_fix_x = 19.0;
+        check_near(local[0].position[0], expected_previous_fix_x, timesync_position_tolerance,
                    "dds_timesync_stale_cloud: stale cloud placed at previous_fix pose, x ~= 19");
 
         check(callback_count.load() == 1, "dds_timesync_stale_cloud: on_point_cloud fired exactly once");
@@ -2287,7 +2446,7 @@ int main(int argc, const char *argv[])
 {
     if (argc != 2)
     {
-        std::cerr << "Usage: accumulation_test <subcommand>" << std::endl;
+        std::cerr << "Usage: accumulation_test <subcommand>\n";
         return 2;
     }
     const std::string subcommand{argv[1]};  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
@@ -2435,15 +2594,15 @@ int main(int argc, const char *argv[])
         }
         else
         {
-            std::cerr << "Unknown subcommand: " << subcommand << std::endl;
+            std::cerr << "Unknown subcommand: " << subcommand << "\n";
             return 2;
         }
     }
     catch (const std::exception &exception)
     {
-        std::cerr << "accumulation_test " << subcommand << " FAILED: " << exception.what() << std::endl;
+        std::cerr << "accumulation_test " << subcommand << " FAILED: " << exception.what() << "\n";
         return 1;
     }
-    std::cout << "accumulation_test " << subcommand << " PASSED" << std::endl;
+    std::cout << "accumulation_test " << subcommand << " PASSED\n";
     return 0;
 }

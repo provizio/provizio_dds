@@ -189,7 +189,7 @@ _nr_add_test(network_recovery_safety_net_no_rebuild_on_address_loss
     ARGS safety_net_no_rebuild_on_address_loss TIMEOUT ${_NR_TIMEOUT_DDS}
     ENV "PROVIZIO_DDS_NETWORK_RECOVERY_SAFETY_NET_SEC=0")
 
-# The two cases below are registered only under ENABLE_PRIVILEGED_TESTS (see the option's
+# The three privileged cases below are registered only under ENABLE_PRIVILEGED_TESTS (see the option's
 # declaration in the top-level CMakeLists.txt). They run their helpers as root -- directly
 # when already root, otherwise through `sudo -n` -- to create network namespaces, bind-mount
 # over /etc/machine-id and give a peer its own /dev/shm. Everything else here is an ordinary
@@ -226,6 +226,23 @@ if(UNIX AND NOT APPLE AND ENABLE_PRIVILEGED_TESTS)
     add_test(NAME network_recovery_cold_start_hosts
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/cold_start_hosts_test.sh" "$<TARGET_FILE:network_recovery_test>")
     set_tests_properties(network_recovery_cold_start_hosts PROPERTIES TIMEOUT 240 SKIP_RETURN_CODE 77)
+endif()
+
+# Two processes of ONE host in transport_mode::localhost_only, the first started before the
+# host's network came up and the second after, so they carry different Fast-DDS host ids. The
+# discovery filter that mode enables used to compare those id bytes and made each discard the
+# other as "another host" (fixed by cmake/fast_dds/same_host_by_machine_id.cmake). And with the
+# second in the ordinary transport, in both directions: it announces only the address of the
+# interface that came up, which the first took for another host's and could not reach (fixed by
+# cmake/fast_dds/local_address_by_current_interfaces.cmake). Needs root or passwordless sudo plus
+# iproute2, and reports ctest SKIP otherwise.
+if(UNIX AND NOT APPLE AND ENABLE_PRIVILEGED_TESTS)
+    add_test(NAME network_recovery_same_host_filter
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/same_host_filter_test.sh" "$<TARGET_FILE:network_recovery_test>")
+    # Seconds. Three cases of two peers, each a few seconds when it passes; one that fails waits out the
+    # peers' own 60 s deadline, and one whose peers hang past it is stopped after another 45 s for each
+    # peer. All three must still be able to report: 3 x (30 s to arm + 10 s for carrier + 60 + 45 + 45).
+    set_tests_properties(network_recovery_same_host_filter PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77)
 endif()
 
 # Scale this directory's test timeouts under a sanitizer, and let a stuck test report

@@ -98,6 +98,8 @@ function(provizio_dds_finalize_tests)
             endif()
         endif()
         set_property(TEST "${_provizio_dds_test}" PROPERTY ENVIRONMENT "${_provizio_dds_env}")
+        # For the check at the end of this file that no test went without this.
+        set_property(GLOBAL APPEND PROPERTY PROVIZIO_DDS_FINALIZED_TESTS "${_provizio_dds_test}")
     endforeach()
 endfunction()
 
@@ -198,6 +200,27 @@ add_subdirectory(point_cloud2)
 add_subdirectory(accumulation)
 add_subdirectory(source_text)
 add_subdirectory(fast_dds_patches)
+# Whenever this tree builds Fast-DDS from source, and so applies the patches in cmake/fast_dds/, the
+# tests showing those patches are in effect must be among the ones CTest runs -- and only then: a
+# system Fast-DDS (LOOK_FOR_FAST_DDS) or the prebuilt binaries carry no patch of ours, and
+# FAST_DDS_SOURCE_DIR is unset for both. Checked here, outside the directory whose own guard decides
+# it, because that guard once asked for a file the sources have only after the build downloads
+# them, and so skipped every one of those tests on a fresh tree -- the only kind a CI job configures
+# -- without anything failing.
+if(FAST_DDS_SOURCE_DIR)
+    get_property(_fast_dds_patch_tests DIRECTORY fast_dds_patches PROPERTY TESTS)
+    if(NOT _fast_dds_patch_tests)
+        message(FATAL_ERROR
+            "Fast-DDS is built from source here, yet test/fast_dds_patches registered no test: nothing "
+            "would show that the Fast-DDS this tree builds carries provizio_dds's patches.")
+    endif()
+endif()
+add_subdirectory(bin_cache)
+add_subdirectory(pip_package)
+add_subdirectory(swig_lookup)
+add_subdirectory(ci_scripts)
+add_subdirectory(install)
+add_subdirectory(glob_escape)
 
 # See the link_libraries() above: from here on, targets are not test executables.
 set_property(DIRECTORY PROPERTY LINK_LIBRARIES "")
@@ -206,3 +229,25 @@ if(PYTHON_BINDINGS)
     message(STATUS "PYTHON_BINDINGS is ON: Python tests will be built and enabled.")
     add_subdirectory(python)
 endif(PYTHON_BINDINGS)
+
+# Every test must have been through provizio_dds_finalize_tests(): nothing else gives it its scaled
+# TIMEOUT, its deadline or unbuffered output. A directory that returns early on a platform the rest of
+# it does not apply to, after registering tests that do, skips that call there without anything
+# failing -- Windows once ran four Fast-DDS patch tests that way, and Windows and macOS two bin cache
+# tests -- and so does a test registered after the call. Checked on whichever platform configures.
+function(provizio_dds_check_tests_finalized directory)
+    get_property(_finalized GLOBAL PROPERTY PROVIZIO_DDS_FINALIZED_TESTS)
+    get_property(_tests DIRECTORY "${directory}" PROPERTY TESTS)
+    foreach(_test ${_tests})
+        if(NOT _test IN_LIST _finalized)
+            message(FATAL_ERROR
+                "Test ${_test} (${directory}) did not go through provizio_dds_finalize_tests(): register it "
+                "before that call, and call it before any return() that follows a registration.")
+        endif()
+    endforeach()
+    get_property(_subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(_subdirectory ${_subdirectories})
+        provizio_dds_check_tests_finalized("${_subdirectory}")
+    endforeach()
+endfunction()
+provizio_dds_check_tests_finalized("${CMAKE_CURRENT_SOURCE_DIR}")

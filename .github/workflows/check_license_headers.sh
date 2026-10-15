@@ -41,24 +41,27 @@ check_license_header() {
     grep -q "${COMMENT_MARK} Licensed under the Apache License, Version 2.0 (the \"License\");" "${FILE}" || (echo "${FAILURE_PREFIX} ${FILE}"; exit 1)
 }
 
-# .c/.cpp/.h/.hpp
-for FILE in $(find . -not \( -path ./build -prune \) -name '*.c' -or -name '*.cpp' -or -name '*.h' -or -name '*.hpp'); do
-    check_license_header "$FILE" "//"
-done
+# check_license_headers <comment mark> <name pattern>...: checks every file matching one of the
+# patterns, outside ./build. NUL-separated, so that no path is split at a space or read as a glob.
+check_license_headers() {
+    local comment_mark="$1"
+    shift
+    local names=(-name "$1")
+    shift
+    local pattern
+    for pattern in "$@"; do
+        names+=(-o -name "${pattern}")
+    done
+    local file
+    while IFS= read -r -d '' file; do
+        check_license_header "${file}" "${comment_mark}"
+    done < <(find . -path ./build -prune -o -type f \( "${names[@]}" \) -print0)
+}
 
-# .sh/.py
-for FILE in $(find . -not \( -path ./build -prune \) -name '*.sh' -or -name '*.py'); do
-    check_license_header "$FILE" "#"
-done
-
-# .bat
-for FILE in $(find . -not \( -path ./build -prune \) -name '*.bat'); do
-    check_license_header "$FILE" "::"
-done
-
-# .ps1
-for FILE in $(find . -not \( -path ./build -prune \) -name '*.ps1'); do
-    check_license_header "$FILE" "#"
-done
+check_license_headers "//" '*.c' '*.cpp' '*.h' '*.hpp'
+check_license_headers "#" '*.sh' '*.py'
+check_license_headers "#" 'CMakeLists.txt' '*.cmake' '*.cmake.in'
+check_license_headers "::" '*.bat'
+check_license_headers "#" '*.ps1'
 
 echo "Licence headers OK"

@@ -63,10 +63,11 @@ if os.name == "nt":
     # silently no-op the preload.
     import ctypes as _ctypes
     import glob as _glob
-    _module_dir = os.path.dirname(os.path.abspath(__file__))
-    for _dll in sorted(_glob.glob(os.path.join(_module_dir, "fastcdr*-*.dll"))):
+    # The directory as it is: a [, * or ? an install path can hold is no pattern
+    _module_pattern = _glob.escape(os.path.dirname(os.path.abspath(__file__)))
+    for _dll in sorted(_glob.glob(os.path.join(_module_pattern, "fastcdr*-*.dll"))):
         _ctypes.WinDLL(_dll)
-    for _dll in sorted(_glob.glob(os.path.join(_module_dir, "fastdds*-*.dll"))):
+    for _dll in sorted(_glob.glob(os.path.join(_module_pattern, "fastdds*-*.dll"))):
         _ctypes.WinDLL(_dll)
 
 # Import fastdds first: on Windows, _provizio_dds_python_types.pyd has a DLL-level
@@ -1504,6 +1505,38 @@ _vpn_transports_profiles_lock = threading.Lock()
 # each time — and would repeat a warning whose remedy never changes.
 _vpn_transports_profile_limit_warned = False
 
+# Whether the one-time notice that PROVIZIO_DDS_LOCALHOST_ONLY does not apply to Python has been given.
+_localhost_only_env_notice_given = False
+_localhost_only_env_notice_lock = threading.Lock()
+
+
+def _warn_localhost_only_env_not_applied() -> None:
+    """Say, once per process, that ``PROVIZIO_DDS_LOCALHOST_ONLY`` has no effect here.
+
+    The C++ API turns it into ``transport_mode::localhost_only`` for every participant that chose no
+    mode; this layer has no such mode (see :class:`TransportMode`), so a Python participant in a
+    deployment that set the variable would ignore it without a word -- worse than a refusal, for a
+    variable whose whole purpose is to keep a process off the network. Only the variable is reported
+    as not applied: what the participant can reach depends on its own configuration (an XML profile or
+    factory QoS of the caller may already confine it), which this layer cannot read back.
+    """
+    global _localhost_only_env_notice_given  # pylint: disable=global-statement
+    value = os.environ.get("PROVIZIO_DDS_LOCALHOST_ONLY", "").strip().lower()
+    # Same spellings as the C++ side: off ones and an empty value say nothing; anything else, recognised
+    # or not, is a confinement request this layer cannot honour.
+    if value in ("", "0", "off", "false", "no"):
+        return
+    with _localhost_only_env_notice_lock:
+        if _localhost_only_env_notice_given:
+            return
+        _localhost_only_env_notice_given = True
+    _network_recovery._emit_log(
+        _network_recovery.LogLevel.WARNING,
+        "PROVIZIO_DDS_LOCALHOST_ONLY is set, but it does not apply to the Python API, which has no "
+        "localhost_only transport mode; to confine a Python participant to this host, restrict its "
+        "interfaces with an XML profile (FASTDDS_DEFAULT_PROFILES_FILE) instead",
+    )
+
 
 def _caller_configured_transports(factory: "DomainParticipantFactory") -> bool:
     """Whether the process' default participant QoS already carries transports the caller
@@ -1819,7 +1852,11 @@ class TransportMode(Enum):
 
     That env variable selects a transport stack but cannot express an interface
     allowlist, so the C++ enum's ``localhost_only`` has no counterpart here: confining a
-    participant to loopback needs per-descriptor configuration this layer cannot reach.
+    participant to loopback needs per-descriptor configuration this layer cannot reach. For
+    the same reason the C++ ``PROVIZIO_DDS_LOCALHOST_ONLY`` environment variable (which makes
+    every participant that chose no mode ``localhost_only``) is NOT honoured here; a Python
+    participant that chose no transport logs a warning, once, saying so when it is set to anything
+    but an off value (``0``, ``off``, ``false``, ``no``) or empty -- an unrecognised value included.
     """
 
     #: Platform default: SHM + UDPv4 on Linux; UDPv4-only on Windows/macOS (where shared
@@ -2036,6 +2073,8 @@ def make_domain_participant(domain_id: int = 0,
         initial_discovery_kinds = EndpointKind.DATA_WRITER
     if transport is None:
         transport = TransportMode.AUTOMATIC
+    if transport == TransportMode.AUTOMATIC:
+        _warn_localhost_only_env_not_applied()
 
     class _DomainParticipant:
         # Hardcoded — must match the default_fastdds_env_variable constant in

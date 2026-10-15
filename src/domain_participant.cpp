@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -958,12 +959,84 @@ namespace provizio::dds
         };
     }  // namespace detail
 
+    transport_mode resolve_transport_mode(const transport_mode requested)
+    {
+        if (requested != transport_mode::automatic)
+        {
+            return requested;  // Chosen in code: the environment does not override it.
+        }
+
+        // Read and parsed exactly once per process, like PROVIZIO_DDS_NETWORK_RECOVERY, so every
+        // participant of the process agrees and a concurrent setenv cannot make two of them differ.
+        //
+        // Nothing is LOGGED inside the initialiser: a log callback may create a participant (the
+        // library supports it), which would re-enter this function while the static is still being
+        // constructed -- undefined behaviour, and a deadlock on libstdc++ and MSVC. The initialiser
+        // only records what it found; the warning goes out afterwards, once.
+        struct reading final
+        {
+            bool localhost_only{false};
+            /// The sanitised value, when it is neither an on nor an off spelling.
+            std::string unrecognised;
+        };
+        static const reading result = [] {
+            reading found;
+            const auto *raw =
+                std::getenv("PROVIZIO_DDS_LOCALHOST_ONLY");  // NOLINT(concurrency-mt-unsafe): first participant
+            if (raw == nullptr)
+            {
+                return found;
+            }
+
+            // Surrounding whitespace is not part of the value: an env file with Windows line endings, or a
+            // mis-quoted service unit, hands over "1\r" or "1 ", and a confinement request that quietly
+            // stops meaning "on" because of a trailing character is the failure this variable exists to avoid.
+            std::string value{raw};
+            const auto is_not_space = [](const char character) {
+                return std::isspace(static_cast<unsigned char>(character)) == 0;
+            };
+            value.erase(value.begin(), std::find_if(value.begin(), value.end(), is_not_space));
+            value.erase(std::find_if(value.rbegin(), value.rend(), is_not_space).base(), value.end());
+            if (value.empty())
+            {
+                return found;
+            }
+
+            bool enabled = false;
+            if (detail::try_parse_bool(value.c_str(), enabled))
+            {
+                found.localhost_only = enabled;
+            }
+            else
+            {
+                found.unrecognised = detail::sanitise_env_value_for_log(value);
+            }
+            return found;
+        }();
+
+        static std::atomic_bool unrecognised_reported{false};
+        if (!result.unrecognised.empty() && !unrecognised_reported.exchange(true))
+        {
+            // A confinement request that is silently dropped is worse than one that is loud.
+            log_warning() << "PROVIZIO_DDS_LOCALHOST_ONLY='" << result.unrecognised
+                          << "' is not recognised (use on/off), so it is ignored";
+        }
+        const bool localhost_only = result.localhost_only;
+
+        return localhost_only ? transport_mode::localhost_only : transport_mode::automatic;
+    }
+
     domain_participant::domain_participant(const DomainId_t the_domain_id, const network_recovery_mode mode,
                                            on_discovered_endpoint_callback initial_discovery_callback,
-                                           const endpoint_kind initial_discovery_kinds, const transport_mode transport)
-        : domain_id(the_domain_id), recovery_enabled(network_recovery_applies(mode, transport)),
-          configured_transport_mode(transport), registered_topics_mutex(std::make_shared<std::mutex>())
+                                           const endpoint_kind initial_discovery_kinds, transport_mode transport)
+        : domain_id(the_domain_id), recovery_enabled(network_recovery_applies(mode, resolve_transport_mode(transport))),
+          configured_transport_mode(resolve_transport_mode(transport)),
+          registered_topics_mutex(std::make_shared<std::mutex>())
     {
+        // What the rest of the constructor configures: the caller's choice, or what
+        // PROVIZIO_DDS_LOCALHOST_ONLY made of "no choice" (resolved in the initialiser list; the answer is cached).
+        transport = configured_transport_mode;
+
         // Install the discovery listener EAGERLY, BEFORE create_fastdds_participant,
         // so Fast-DDS attaches it at participant-creation time and it sees every
         // discovery event from the very first SEDP exchange. This is now mandatory
@@ -1173,8 +1246,9 @@ namespace provizio::dds
                     // when any co-resident participant has joined that group on a real
                     // interface. FILTER_DIFFERENT_HOST makes PDPSimple refuse those proxies
                     // outright, which is what makes "no remote peer can join" true rather
-                    // than merely unreachable -- and it is the same mechanism ROS 2's
-                    // ROS_LOCALHOST_ONLY relies on.
+                    // than merely unreachable. (ROS 2's own localhost-only mode does not use
+                    // it: rmw_fastrtps confines by transport on Humble and by discovery on
+                    // Jazzy and later.)
                     // OR-ed in, never assigned. These are BITS
                     // (NO_FILTER/FILTER_DIFFERENT_HOST/FILTER_DIFFERENT_PROCESS/FILTER_SAME_PROCESS),
                     // and cached_qos already carries whatever the caller set through their XML
@@ -1370,7 +1444,8 @@ namespace provizio::dds
             finding = "Fast-DDS built the transports itself, from FASTDDS_BUILTIN_TRANSPORTS or from an XML profile "
                       "of yours that keeps its built-in transports, and they bind every interface";
             advice = " Confine them in your own configuration -- an interface_allowlist of 127.0.0.1 on each socket "
-                     "transport -- or drop transport=localhost_only.";
+                     "transport -- or drop transport=localhost_only (or unset PROVIZIO_DDS_LOCALHOST_ONLY, if that is "
+                     "what selected it).";
         }
         else
         {
@@ -1432,7 +1507,8 @@ namespace provizio::dds
                               "filtered at the discovery layer, so a remote announcement that reaches this host "
                               "can still become a peer";
                     advice = " Add ignoreParticipantFlags with FILTER_DIFFERENT_HOST to your own participant "
-                             "configuration, or drop transport=localhost_only.";
+                             "configuration, or drop transport=localhost_only (or unset PROVIZIO_DDS_LOCALHOST_ONLY, "
+                             "if that is what selected it).";
                 }
             }
         }
@@ -1444,8 +1520,9 @@ namespace provizio::dds
             // reaches the LAN, and no remote peer can join" -- and somebody who believes
             // they hold it while the domain is on every interface is worse off than
             // somebody who was told they do not.
-            log_warning() << "transport=localhost_only requested on domain " << domain_id
-                          << ", but this participant is NOT confined to this host: " << finding << "." << advice;
+            log_warning()
+                << "transport=localhost_only requested (by the caller, or by PROVIZIO_DDS_LOCALHOST_ONLY) on domain "
+                << domain_id << ", but this participant is NOT confined to this host: " << finding << "." << advice;
         }
     }
 
@@ -2039,7 +2116,10 @@ namespace provizio::dds
 
         // Refresh Fast-DDS's process-wide interface cache FIRST, because everything below
         // is matched against it. Fast-DDS populates that cache once, inside the first
-        // create_participant, and refreshes it on no later one; UDPv4Transport's constructor
+        // create_participant, and refreshes it for no later one (the Fast-DDS this library
+        // builds also refreshes it when a peer of this host announces an address it lacks, or
+        // an initial peer is not in it -- the latter only after this creation has built its
+        // transports from it, so no help here); UDPv4Transport's constructor
         // then intersects our interface_allowlist with the CACHED list
         // (get_ipv4s(force_lookup=false)), so an address that has changed since -- a DHCP
         // renewal, a wifi reconnect -- is in our live list and not in theirs. The
@@ -2055,7 +2135,9 @@ namespace provizio::dds
         //
         // Safe under the reset's locks (this runs from the constructor and from
         // trigger_network_recovery_reset with both lifecycle locks held): it is noexcept, logs
-        // nothing, and takes only SystemInfo's own internal mutex.
+        // nothing, and takes only SystemInfo's own internal mutexes -- in the Fast-DDS this library
+        // builds, one held across the enumeration as well as the one guarding the list, neither of
+        // which anything holds while taking a lock of ours.
         refresh_fastdds_interface_cache();
 
         // Re-evaluated per creation, so a rebuild after a network change blocks the

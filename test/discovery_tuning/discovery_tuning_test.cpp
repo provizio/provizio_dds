@@ -62,11 +62,17 @@ namespace
     // These tests must unset FASTDDS_DEFAULT_PROFILES_FILE to exercise the code-driven
     // discovery tuning, so unlike the rest of the suite they cannot be confined to loopback;
     // with a fixed domain, concurrent ctest runs on other self-hosted CI hosts sharing the
-    // LAN could cross-match into the mesh and break the exact "matched == k" assertion.
+    // LAN could cross-match into the mesh and break the exact "matched == mesh_size" assertion.
     // Randomising per process makes such a collision improbable. The single-participant
     // cases only read back their own QoS, so they are unaffected by domain sharing. Which
-    // domains are eligible, and why not just 1..200, is in detail/test_domain.h.
-    const auto k_mesh_domain = provizio::dds::test::random_test_domain();
+    // domains are eligible, and why not just 1..200, is in detail/test_domain.h. Drawn on first use
+    // (and then kept) rather than during static initialization, which has nowhere to report a failure
+    // of the random source.
+    provizio::dds::DomainId_t mesh_domain()
+    {
+        static const auto domain = provizio::dds::test::random_test_domain();
+        return domain;
+    }
 
     // The expected de-escalated defaults (kept in sync with
     // src/domain_participant.cpp and python/provizio_dds.py QosDefaults).
@@ -113,7 +119,7 @@ namespace
     // effective QoS.
     struct discovery_cfg
     {
-        std::uint32_t initial_count;
+        std::uint32_t initial_count{0};
         Duration_t initial_period;
         Duration_t announcement_period;
         Duration_t lease_duration;
@@ -222,12 +228,12 @@ namespace
         unset_env("PROVIZIO_DDS_DISCOVERY_LEASE_DURATION_MS");
 
         bool passed = true;
-        constexpr int k = 8;
+        constexpr int mesh_size = 8;
         // Generous: 2K participants doing SPDP/SEDP on a loaded runner, with the
         // gentler announcement cadence, may take a while to fully converge.
         constexpr auto convergence_timeout = 60s;
         // Suffixed with an independent per-process random draw (own random_device, NOT derived from
-        // k_mesh_domain) so that even the rare case of two concurrent runs picking the same k_mesh_domain still
+        // mesh_domain()) so that even the rare case of two concurrent runs picking the same mesh domain still
         // does not cross-match this mesh's topic — the two draws must vary independently of each other.
         std::random_device topic_random_device;
         std::uniform_int_distribution<std::uint32_t> topic_suffix_distribution;
@@ -239,17 +245,17 @@ namespace
         std::vector<std::shared_ptr<provizio::dds::domain_participant>> sub_participants;
         std::vector<std::shared_ptr<provizio::dds::subscriber_handle<string_pub_sub_type>>> subscribers;
 
-        for (int i = 0; i < k; ++i)
+        for (int i = 0; i < mesh_size; ++i)
         {
             auto pub_participant =
-                provizio::dds::make_domain_participant(k_mesh_domain, provizio::dds::network_recovery_mode::off);
+                provizio::dds::make_domain_participant(mesh_domain(), provizio::dds::network_recovery_mode::off);
             publishers.push_back(provizio::dds::make_publisher<string_pub_sub_type>(
                 pub_participant, topic_name, eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS,
                 provizio::dds::use_default_history_depth));
             pub_participants.push_back(std::move(pub_participant));
 
             auto sub_participant =
-                provizio::dds::make_domain_participant(k_mesh_domain, provizio::dds::network_recovery_mode::off);
+                provizio::dds::make_domain_participant(mesh_domain(), provizio::dds::network_recovery_mode::off);
             // Explicit reliability (eager reader) so this measures pure discovery
             // convergence rather than the match-publisher deferral path.
             subscribers.push_back(provizio::dds::make_subscriber<string_pub_sub_type>(
@@ -259,7 +265,7 @@ namespace
         }
 
         const auto deadline = std::chrono::steady_clock::now() + convergence_timeout;
-        for (int i = 0; i < k; ++i)
+        for (int i = 0; i < mesh_size; ++i)
         {
             int matched = 0;
             while (std::chrono::steady_clock::now() < deadline)
@@ -267,20 +273,20 @@ namespace
                 // settle_time 0: return the current matched count as soon as it is
                 // positive, so we can poll it up toward the full mesh size.
                 matched = subscribers[static_cast<std::size_t>(i)]->get_num_matched_publishers(500ms, 0ms);
-                if (matched >= k)
+                if (matched >= mesh_size)
                 {
                     break;
                 }
                 std::this_thread::sleep_for(200ms);
             }
-            passed &= EXPECT(matched == k);
-            if (matched != k)
+            passed &= EXPECT(matched == mesh_size);
+            if (matched != mesh_size)
             {
-                std::cerr << "  subscriber " << i << " matched " << matched << " of " << k << " publishers\n";
+                std::cerr << "  subscriber " << i << " matched " << matched << " of " << mesh_size << " publishers\n";
             }
         }
 
-        std::cout << "multi_participant: " << (passed ? "PASS" : "FAIL") << " (k=" << k << ")" << '\n';
+        std::cout << "multi_participant: " << (passed ? "PASS" : "FAIL") << " (k=" << mesh_size << ")" << '\n';
         return passed ? 0 : 1;
     }
 }  // namespace

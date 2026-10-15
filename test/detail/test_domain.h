@@ -79,7 +79,7 @@ namespace provizio::dds::test
      * @param seed Any integer; a negative one wraps the way Python's % does, so the two mirrors agree.
      * @return A domain in k_seed_band_first .. k_highest_safe_domain.
      */
-    inline DomainId_t seed_band_domain(const int seed)
+    inline DomainId_t seed_band_domain(const int seed) noexcept
     {
         const int wrapped = ((seed % k_seed_band_size) + k_seed_band_size) % k_seed_band_size;
         return static_cast<DomainId_t>(k_seed_band_first + wrapped);

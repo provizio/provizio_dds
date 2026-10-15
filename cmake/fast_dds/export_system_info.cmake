@@ -1,13 +1,28 @@
+# Copyright 2026 Provizio Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Decorate eprosima::SystemInfo::update_interfaces() with FASTDDS_EXPORTED_API
 # so the symbol is present in the Windows fastdds.dll export table.
 #
 # Why provizio_dds needs it: the network-auto-recovery feature (APT-11792)
 # calls SystemInfo::update_interfaces() before recreating a participant on a
 # network change, to refresh Fast-DDS's process-wide interface cache (which is
-# otherwise populated once and never refreshed — so a rebuilt participant
-# would bind to stale interfaces). SystemInfo is a Fast-DDS-internal class with
-# zero FASTDDS_EXPORTED_API decoration, so on Windows the symbol isn't in the
-# DLL export table and provizio_dds can't link against it.
+# otherwise populated once, and refreshed by nothing a rebuild does — so a
+# rebuilt participant would bind to stale interfaces). SystemInfo is a
+# Fast-DDS-internal class with zero FASTDDS_EXPORTED_API decoration, so on
+# Windows the symbol isn't in the DLL export table and provizio_dds can't link
+# against it.
 #
 # Why this targeted patch rather than CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS: Fast-DDS
 # is large enough that auto-exporting every symbol overflows the Windows
@@ -44,7 +59,10 @@ endif()
 set(_undecorated "    static bool update_interfaces();")
 set(_decorated "    FASTDDS_EXPORTED_API static bool update_interfaces();")
 
-file(READ "${SYSTEMINFO_HPP}" _contents)
+# Sources are read and written through patch_io.cmake, which keeps the line endings of the
+# checkout and of the host from mattering (see there).
+include("${CMAKE_CURRENT_LIST_DIR}/patch_io.cmake")
+provizio_dds_patch_read("${SYSTEMINFO_HPP}" _contents)
 
 # NO REVISION MARKER HERE, deliberately, and there is a rule attached to that. A tree
 # carries no record of WHICH revision of a patch script wrote it, so a bare "already patched"
@@ -78,5 +96,5 @@ if(_pos EQUAL -1)
 endif()
 
 string(REPLACE "${_undecorated}" "${_decorated}" _contents "${_contents}")
-file(WRITE "${SYSTEMINFO_HPP}" "${_contents}")
+provizio_dds_patch_write("${SYSTEMINFO_HPP}" "${_contents}")
 message(STATUS "export_system_info: decorated SystemInfo::update_interfaces with FASTDDS_EXPORTED_API")

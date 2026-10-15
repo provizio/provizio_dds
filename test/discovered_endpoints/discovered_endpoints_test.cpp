@@ -49,6 +49,9 @@ namespace
     // the one thing that stays put.
     constexpr auto k_discovery_timeout = 15s * PROVIZIO_DDS_TEST_TIMEOUT_SCALE;
 
+    // Process CPU time is read in seconds; the failure and progress reports print it in milliseconds.
+    constexpr double k_milliseconds_per_second = 1000.0;
+
     // Recorded discovery event for the callback to deposit and the test thread
     // to inspect under a mutex.
     struct event
@@ -60,13 +63,13 @@ namespace
     };
 
     // Atomically wait for `predicate` to become true on `events` (vector
-    // guarded by mu/cv), up to `timeout`. Returns true on success.
-    template <typename Pred>
-    bool wait_for_event(std::mutex &mu, std::condition_variable &cv, const std::vector<event> &events,
-                        std::chrono::steady_clock::duration timeout, Pred predicate)
+    // guarded by mutex/condition), up to `timeout`. Returns true on success.
+    template <typename predicate_type>
+    bool wait_for_event(std::mutex &mutex, std::condition_variable &condition, const std::vector<event> &events,
+                        std::chrono::steady_clock::duration timeout, predicate_type predicate)
     {
-        std::unique_lock<std::mutex> lock{mu};
-        return cv.wait_for(lock, timeout, [&] { return predicate(events); });
+        std::unique_lock<std::mutex> lock{mutex};
+        return condition.wait_for(lock, timeout, [&] { return predicate(events); });
     }
 
     int test_type_registry()
@@ -131,42 +134,42 @@ namespace
     // no CPU whether or not it waited, so the case passes there without proving much.
     int test_teardown_does_not_spin()
     {
-        std::mutex mu;
-        std::condition_variable cv;
+        std::mutex mutex;
+        std::condition_variable condition;
         bool callback_entered = false;
 
         // Long enough that a spin is unmistakable against scheduling noise, short enough to
         // keep the case quick.
         const auto callback_hold = std::chrono::milliseconds{600 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
 
-        auto pa = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
-        const auto pb = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        auto participant_a = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_b = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
 
-        pa->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &, const std::string &,
-                                       provizio::dds::endpoint_kind, bool discovered,
-                                       eprosima::fastdds::dds::ReliabilityQosPolicyKind,
-                                       eprosima::fastdds::dds::DurabilityQosPolicyKind) {
+        participant_a->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &,
+                                                  const std::string &, provizio::dds::endpoint_kind, bool discovered,
+                                                  eprosima::fastdds::dds::ReliabilityQosPolicyKind,
+                                                  eprosima::fastdds::dds::DurabilityQosPolicyKind) {
             if (!discovered)
             {
                 return;
             }
             {
-                const std::lock_guard<std::mutex> lock{mu};
+                const std::lock_guard<std::mutex> lock{mutex};
                 callback_entered = true;
             }
-            cv.notify_all();
+            condition.notify_all();
             // Held deliberately. Blocking in a callback is against this library's contract,
             // and that is the point: it is the state in which the participant listener
             // cannot be detached, which is what the destructor then has to wait for.
             std::this_thread::sleep_for(callback_hold);
         });
 
-        const auto pub =
-            provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, "provizio_dds_teardown_wait_topic");
+        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(
+            participant_b, "provizio_dds_teardown_wait_topic");
 
         {
-            std::unique_lock<std::mutex> lock{mu};
-            if (!cv.wait_for(lock, k_discovery_timeout, [&] { return callback_entered; }))
+            std::unique_lock<std::mutex> lock{mutex};
+            if (!condition.wait_for(lock, k_discovery_timeout, [&] { return callback_entered; }))
             {
                 std::cout << "teardown_does_not_spin: FAIL (no discovery callback arrived)" << '\n';
                 return 1;
@@ -176,7 +179,7 @@ namespace
         // Destroy while the callback is still inside its hold.
         const auto cpu_before = provizio::dds::test::process_cpu_seconds();
         const auto started = std::chrono::steady_clock::now();
-        pa.reset();
+        participant_a.reset();
         const auto took = std::chrono::steady_clock::now() - started;
         const auto cpu_used = (provizio::dds::test::process_cpu_seconds()) - cpu_before;
 
@@ -187,8 +190,9 @@ namespace
         const auto budget = std::chrono::duration_cast<std::chrono::duration<double>>(callback_hold).count() / 2.0;
         if (cpu_used >= budget)
         {
-            std::cerr << "participant destruction SPUN: burned " << (cpu_used * 1000.0) << " ms of CPU over "
-                      << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms\n";
+            std::cerr << "participant destruction SPUN: burned " << (cpu_used * k_milliseconds_per_second)
+                      << " ms of CPU over " << std::chrono::duration_cast<std::chrono::milliseconds>(took).count()
+                      << " ms\n";
             passed = false;
         }
 
@@ -204,7 +208,7 @@ namespace
 
         std::cout << "teardown_does_not_spin: " << (passed ? "PASS" : "FAIL") << " (took "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms, burned "
-                  << (cpu_used * 1000.0) << " ms of CPU"
+                  << (cpu_used * k_milliseconds_per_second) << " ms of CPU"
                   << (waited_for_callback ? "; waited for the callback"
                                           : "; callback had already left the counted "
                                             "region, no overlap to wait for")
@@ -221,8 +225,8 @@ namespace
     // not.
     int test_reset_does_not_spin()
     {
-        std::mutex mu;
-        std::condition_variable cv;
+        std::mutex mutex;
+        std::condition_variable condition;
         bool callback_entered = false;
 
         const auto callback_hold = std::chrono::milliseconds{600 * PROVIZIO_DDS_TEST_TIMEOUT_SCALE};
@@ -233,33 +237,33 @@ namespace
         // statement, never reach Phase 4, and pass whatever the code under test did. It would be a
         // test that cannot fail. network_recovery_test's reset_disabled asserts that no-op
         // positively, which is the same fact from the other side.
-        const auto pa = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
-        const auto pb = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_a = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+        const auto participant_b = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
 
-        pa->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &, const std::string &,
-                                       provizio::dds::endpoint_kind, bool discovered,
-                                       eprosima::fastdds::dds::ReliabilityQosPolicyKind,
-                                       eprosima::fastdds::dds::DurabilityQosPolicyKind) {
+        participant_a->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &,
+                                                  const std::string &, provizio::dds::endpoint_kind, bool discovered,
+                                                  eprosima::fastdds::dds::ReliabilityQosPolicyKind,
+                                                  eprosima::fastdds::dds::DurabilityQosPolicyKind) {
             if (!discovered)
             {
                 return;
             }
             {
-                const std::lock_guard<std::mutex> lock{mu};
+                const std::lock_guard<std::mutex> lock{mutex};
                 callback_entered = true;
             }
-            cv.notify_all();
+            condition.notify_all();
             // Held for the same reason as in teardown_does_not_spin: an in-flight callback is
             // the condition the infinite-timeout listener swap spins on.
             std::this_thread::sleep_for(callback_hold);
         });
 
-        const auto pub =
-            provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, "provizio_dds_reset_wait_topic");
+        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(
+            participant_b, "provizio_dds_reset_wait_topic");
 
         {
-            std::unique_lock<std::mutex> lock{mu};
-            if (!cv.wait_for(lock, k_discovery_timeout, [&] { return callback_entered; }))
+            std::unique_lock<std::mutex> lock{mutex};
+            if (!condition.wait_for(lock, k_discovery_timeout, [&] { return callback_entered; }))
             {
                 std::cout << "reset_does_not_spin: FAIL (no discovery callback arrived)" << '\n';
                 return 1;
@@ -269,10 +273,10 @@ namespace
         // Reset while the callback is still inside its hold. This is the same call the
         // coordinator makes on a confirmed network change; driving it directly is what makes
         // the moment observable.
-        const auto generation_before = pa->participant_generation();
+        const auto generation_before = participant_a->participant_generation();
         const auto cpu_before = provizio::dds::test::process_cpu_seconds();
         const auto started = std::chrono::steady_clock::now();
-        pa->trigger_network_recovery_reset();
+        participant_a->trigger_network_recovery_reset();
         const auto took = std::chrono::steady_clock::now() - started;
         const auto cpu_used = provizio::dds::test::process_cpu_seconds() - cpu_before;
 
@@ -283,8 +287,9 @@ namespace
         const auto budget = std::chrono::duration_cast<std::chrono::duration<double>>(callback_hold).count() / 2.0;
         if (cpu_used >= budget)
         {
-            std::cerr << "network-recovery reset SPUN: burned " << (cpu_used * 1000.0) << " ms of CPU over "
-                      << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms\n";
+            std::cerr << "network-recovery reset SPUN: burned " << (cpu_used * k_milliseconds_per_second)
+                      << " ms of CPU over " << std::chrono::duration_cast<std::chrono::milliseconds>(took).count()
+                      << " ms\n";
             passed = false;
         }
 
@@ -295,14 +300,14 @@ namespace
         // happened. A short-circuited call burns no CPU and needs no retry, so without this the
         // case would go green over a function that returned immediately -- which is exactly what
         // it did while it was written against network_recovery_mode::off.
-        if (pa->participant_generation() == generation_before)
+        if (participant_a->participant_generation() == generation_before)
         {
             std::cerr << "the participant was never rebuilt (generation stayed at " << generation_before
                       << "), so this case measured nothing\n";
             passed = false;
         }
 
-        if (pa->needs_network_recovery_retry())
+        if (participant_a->needs_network_recovery_retry())
         {
             std::cerr << "the reset left the participant needing a retry, so the CPU figure above "
                          "describes a rebuild that did not complete\n";
@@ -311,44 +316,47 @@ namespace
 
         std::cout << "reset_does_not_spin: " << (passed ? "PASS" : "FAIL") << " (took "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms, burned "
-                  << (cpu_used * 1000.0) << " ms of CPU)" << '\n';
+                  << (cpu_used * k_milliseconds_per_second) << " ms of CPU)" << '\n';
         return passed ? 0 : 1;
     }
 
     int test_discovers_writer()
     {
         // Declared BEFORE the participants so they outlive them: at scope exit
-        // participant teardown (e.g. pb's writer going away) can still deliver a
-        // REMOVED_WRITER discovery callback to pa, which touches these — they
+        // participant teardown (e.g. participant_b's writer going away) can still deliver a
+        // REMOVED_WRITER discovery callback to participant_a, which touches these — they
         // must be destroyed AFTER the participants, not before.
-        std::mutex mu;
-        std::condition_variable cv;
+        std::mutex mutex;
+        std::condition_variable condition;
         std::vector<event> events;
 
         // Two participants on domain 0 in the same process — Fast-DDS discovers
         // them via intra-process / loopback announcements.
-        const auto pa = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
-        const auto pb = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_a = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_b = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
 
-        pa->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
-                                       const std::string &type, provizio::dds::endpoint_kind kind, bool discovered,
-                                       eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
-                                       eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
-            const std::lock_guard<std::mutex> lock{mu};
+        participant_a->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
+                                                  const std::string &type, provizio::dds::endpoint_kind kind,
+                                                  bool discovered,
+                                                  eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
+                                                  eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
+            const std::lock_guard<std::mutex> lock{mutex};
             events.push_back({topic, type, kind, discovered});
-            cv.notify_all();
+            condition.notify_all();
         });
 
         // Publisher on B → A should see a writer discovery.
         const std::string topic_name = "provizio_dds_discovery_test_topic";
-        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, topic_name);
+        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(participant_b, topic_name);
 
-        const bool got = wait_for_event(mu, cv, events, k_discovery_timeout, [&](const auto &ev) {
-            return std::any_of(ev.begin(), ev.end(), [&](const event &e) {
-                return e.discovered && e.kind == provizio::dds::endpoint_kind::data_writer && e.topic == topic_name &&
-                       e.type == "std_msgs::msg::dds_::String_";
+        const bool got =
+            wait_for_event(mutex, condition, events, k_discovery_timeout, [&](const auto &recorded_events) {
+                return std::any_of(recorded_events.begin(), recorded_events.end(), [&](const event &recorded_event) {
+                    return recorded_event.discovered &&
+                           recorded_event.kind == provizio::dds::endpoint_kind::data_writer &&
+                           recorded_event.topic == topic_name && recorded_event.type == "std_msgs::msg::dds_::String_";
+                });
             });
-        });
         if (!got)
         {
             std::cerr << "no writer discovery event observed within "
@@ -362,40 +370,43 @@ namespace
     {
         // Declared before the participants so they outlive teardown-triggered
         // discovery callbacks (see test_discovers_writer for the rationale).
-        std::mutex mu;
-        std::condition_variable cv;
+        std::mutex mutex;
+        std::condition_variable condition;
         std::vector<event> events;
 
         // With kinds = data_reader, a writer on B must NOT fire the callback,
         // but a subscriber on B should.
-        const auto pa = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
-        const auto pb = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_a = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_b = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
 
-        pa->on_discovered_endpoint(
+        participant_a->on_discovered_endpoint(
             [&](provizio::dds::domain_participant &, const std::string &topic, const std::string &type,
                 provizio::dds::endpoint_kind kind, bool discovered,
                 eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
                 eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
-                const std::lock_guard<std::mutex> lock{mu};
+                const std::lock_guard<std::mutex> lock{mutex};
                 events.push_back({topic, type, kind, discovered});
-                cv.notify_all();
+                condition.notify_all();
             },
             provizio::dds::endpoint_kind::data_reader);
 
         const std::string topic_name = "provizio_dds_discovery_test_topic_filter";
 
         // Publisher first — should NOT fire the data_reader-only callback.
-        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, topic_name);
+        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(participant_b, topic_name);
 
         // Subscriber — SHOULD fire.
         const auto sub = provizio::dds::make_subscriber<std_msgs::msg::StringPubSubType>(
-            pb, topic_name, [](const std_msgs::msg::String &) {});
+            participant_b, topic_name, [](const std_msgs::msg::String &) {});
 
-        const bool got_reader = wait_for_event(mu, cv, events, k_discovery_timeout, [&](const auto &ev) {
-            return std::any_of(ev.begin(), ev.end(), [&](const event &e) {
-                return e.discovered && e.kind == provizio::dds::endpoint_kind::data_reader && e.topic == topic_name;
+        const bool got_reader =
+            wait_for_event(mutex, condition, events, k_discovery_timeout, [&](const auto &recorded_events) {
+                return std::any_of(recorded_events.begin(), recorded_events.end(), [&](const event &recorded_event) {
+                    return recorded_event.discovered &&
+                           recorded_event.kind == provizio::dds::endpoint_kind::data_reader &&
+                           recorded_event.topic == topic_name;
+                });
             });
-        });
         if (!got_reader)
         {
             std::cerr << "no reader discovery event observed within timeout\n";
@@ -403,9 +414,9 @@ namespace
         }
 
         // Verify no writer event was delivered (we never asked for writers).
-        const std::lock_guard<std::mutex> lock{mu};
-        const auto writer_fired = std::any_of(events.begin(), events.end(), [](const event &e) {
-            return e.kind == provizio::dds::endpoint_kind::data_writer;
+        const std::lock_guard<std::mutex> lock{mutex};
+        const auto writer_fired = std::any_of(events.begin(), events.end(), [](const event &recorded_event) {
+            return recorded_event.kind == provizio::dds::endpoint_kind::data_writer;
         });
         if (writer_fired)
         {
@@ -421,34 +432,36 @@ namespace
         // BEFORE Fast-DDS starts discovery. Most directly testable by having
         // a publisher already up on B, then bringing up A with the callback
         // installed via the constructor — A must observe B's writer.
-        const auto pb = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_b = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
         const std::string topic_name = "provizio_dds_discovery_test_topic_ctor";
-        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, topic_name);
+        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(participant_b, topic_name);
 
         // Give Fast-DDS a moment so B is steadily announcing before A appears.
         std::this_thread::sleep_for(500ms);
 
-        std::mutex mu;
-        std::condition_variable cv;
+        std::mutex mutex;
+        std::condition_variable condition;
         std::vector<event> events;
 
-        const auto pa = provizio::dds::make_domain_participant(
+        const auto participant_a = provizio::dds::make_domain_participant(
             0, provizio::dds::network_recovery_mode::off,
             [&](provizio::dds::domain_participant &, const std::string &topic, const std::string &type,
                 provizio::dds::endpoint_kind kind, bool discovered,
                 eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
                 eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
-                const std::lock_guard<std::mutex> lock{mu};
+                const std::lock_guard<std::mutex> lock{mutex};
                 events.push_back({topic, type, kind, discovered});
-                cv.notify_all();
+                condition.notify_all();
             });
 
-        const bool got = wait_for_event(mu, cv, events, k_discovery_timeout, [&](const auto &ev) {
-            return std::any_of(ev.begin(), ev.end(), [&](const event &e) {
-                return e.discovered && e.kind == provizio::dds::endpoint_kind::data_writer && e.topic == topic_name &&
-                       e.type == "std_msgs::msg::dds_::String_";
+        const bool got =
+            wait_for_event(mutex, condition, events, k_discovery_timeout, [&](const auto &recorded_events) {
+                return std::any_of(recorded_events.begin(), recorded_events.end(), [&](const event &recorded_event) {
+                    return recorded_event.discovered &&
+                           recorded_event.kind == provizio::dds::endpoint_kind::data_writer &&
+                           recorded_event.topic == topic_name && recorded_event.type == "std_msgs::msg::dds_::String_";
+                });
             });
-        });
         if (!got)
         {
             std::cerr << "no writer discovery event via constructor-time callback within "
@@ -497,13 +510,13 @@ namespace
     {
         // Unknown type — visitor must not be invoked, return value is false.
         {
-            visit_counting_visitor v;
-            if (provizio::dds::visit_known_type("not::a::known::type", v))
+            visit_counting_visitor visitor;
+            if (provizio::dds::visit_known_type("not::a::known::type", visitor))
             {
                 std::cerr << "visit_known_type returned true for an unknown type\n";
                 return 1;
             }
-            if (v.calls != 0)
+            if (visitor.calls != 0)
             {
                 std::cerr << "visitor invoked for an unknown type\n";
                 return 1;
@@ -515,20 +528,20 @@ namespace
         // name has full compile-time access to data_pub_sub_type — that's the
         // whole point of the visitor pattern.
         {
-            visit_name_recorder v;
-            if (!provizio::dds::visit_known_type("std_msgs::msg::dds_::String_", v))
+            visit_name_recorder visitor;
+            if (!provizio::dds::visit_known_type("std_msgs::msg::dds_::String_", visitor))
             {
                 std::cerr << "visit_known_type returned false for std_msgs::msg::dds_::String_\n";
                 return 1;
             }
-            if (v.calls != 1)
+            if (visitor.calls != 1)
             {
-                std::cerr << "visitor was invoked " << v.calls << " times (expected 1)\n";
+                std::cerr << "visitor was invoked " << visitor.calls << " times (expected 1)\n";
                 return 1;
             }
-            if (v.seen_wire_name != "std_msgs::msg::dds_::String_")
+            if (visitor.seen_wire_name != "std_msgs::msg::dds_::String_")
             {
-                std::cerr << "visitor saw the wrong type: " << v.seen_wire_name << "\n";
+                std::cerr << "visitor saw the wrong type: " << visitor.seen_wire_name << "\n";
                 return 1;
             }
         }
@@ -543,13 +556,13 @@ namespace
         {
             const auto participant =
                 provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
-            visit_announce_factory v{participant, "visit_known_type_test_topic", {}};
-            if (!provizio::dds::visit_known_type("std_msgs::msg::dds_::String_", v))
+            visit_announce_factory visitor{participant, "visit_known_type_test_topic", {}};
+            if (!provizio::dds::visit_known_type("std_msgs::msg::dds_::String_", visitor))
             {
                 std::cerr << "visit_known_type returned false for the publisher-creation case\n";
                 return 1;
             }
-            if (!v.handle)
+            if (!visitor.handle)
             {
                 std::cerr << "visitor failed to create a publisher_handle\n";
                 return 1;
@@ -571,19 +584,19 @@ namespace
         // constructor-time SEDP exchange — that's the window the constructor-
         // time callback form exists to close, and the participant ref must be
         // usable across it.
-        const auto pb = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_b = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
         const std::string topic_name = "provizio_dds_discovery_test_topic_callback_ref";
-        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, topic_name);
+        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(participant_b, topic_name);
 
         // Let B steady-state-announce before A appears so A's first discovery
         // fires close to participant-creation time.
         std::this_thread::sleep_for(500ms);
 
-        std::mutex mu;
-        std::condition_variable cv;
+        std::mutex mutex;
+        std::condition_variable condition;
         provizio::dds::domain_participant *seen_participant{nullptr};
 
-        const auto pa = provizio::dds::make_domain_participant(
+        const auto participant_a = provizio::dds::make_domain_participant(
             0, provizio::dds::network_recovery_mode::off,
             [&](provizio::dds::domain_participant &observer, const std::string & /*topic*/,
                 const std::string & /*type*/, provizio::dds::endpoint_kind /*kind*/, bool discovered,
@@ -594,19 +607,19 @@ namespace
                     return;
                 }
                 {
-                    const std::lock_guard<std::mutex> lock{mu};
+                    const std::lock_guard<std::mutex> lock{mutex};
                     seen_participant = &observer;
                 }
-                cv.notify_all();
+                condition.notify_all();
             });
 
-        std::unique_lock<std::mutex> lock{mu};
-        if (!cv.wait_for(lock, k_discovery_timeout, [&] { return seen_participant != nullptr; }))
+        std::unique_lock<std::mutex> lock{mutex};
+        if (!condition.wait_for(lock, k_discovery_timeout, [&] { return seen_participant != nullptr; }))
         {
             std::cerr << "no discovery event observed within timeout\n";
             return 1;
         }
-        if (seen_participant != pa.get())
+        if (seen_participant != participant_a.get())
         {
             std::cerr << "callback received a different domain_participant than make_domain_participant returned\n";
             return 1;
@@ -618,33 +631,37 @@ namespace
     {
         // Declared before the participants so they outlive teardown-triggered
         // discovery callbacks (see test_discovers_writer for the rationale).
-        std::mutex mu;
-        std::condition_variable cv;
+        std::mutex mutex;
+        std::condition_variable condition;
         std::vector<event> events;
 
         // The discovery callback must continue to fire after a network-recovery
         // reset recreates the Fast-DDS participant under us.
-        const auto pa = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
-        const auto pb = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_a = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::on);
+        const auto participant_b = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
 
-        pa->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
-                                       const std::string &type, provizio::dds::endpoint_kind kind, bool discovered,
-                                       eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
-                                       eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
-            const std::lock_guard<std::mutex> lock{mu};
+        participant_a->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
+                                                  const std::string &type, provizio::dds::endpoint_kind kind,
+                                                  bool discovered,
+                                                  eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
+                                                  eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
+            const std::lock_guard<std::mutex> lock{mutex};
             events.push_back({topic, type, kind, discovered});
-            cv.notify_all();
+            condition.notify_all();
         });
 
         const std::string topic_name = "provizio_dds_discovery_test_topic_reset";
-        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, topic_name);
+        const auto pub = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(participant_b, topic_name);
 
         // Baseline: callback fires before the reset.
-        const bool got_before = wait_for_event(mu, cv, events, k_discovery_timeout, [&](const auto &ev) {
-            return std::any_of(ev.begin(), ev.end(), [&](const event &e) {
-                return e.discovered && e.kind == provizio::dds::endpoint_kind::data_writer && e.topic == topic_name;
+        const bool got_before =
+            wait_for_event(mutex, condition, events, k_discovery_timeout, [&](const auto &recorded_events) {
+                return std::any_of(recorded_events.begin(), recorded_events.end(), [&](const event &recorded_event) {
+                    return recorded_event.discovered &&
+                           recorded_event.kind == provizio::dds::endpoint_kind::data_writer &&
+                           recorded_event.topic == topic_name;
+                });
             });
-        });
         if (!got_before)
         {
             std::cerr << "no pre-reset discovery event\n";
@@ -653,20 +670,23 @@ namespace
 
         // Drain so we can clearly detect a post-reset re-discovery.
         {
-            const std::lock_guard<std::mutex> lock{mu};
+            const std::lock_guard<std::mutex> lock{mutex};
             events.clear();
         }
 
         // Recreate A's underlying participant.
-        pa->trigger_network_recovery_reset();
+        participant_a->trigger_network_recovery_reset();
 
         // The new participant re-runs discovery from scratch and should pick
         // up B's still-alive publisher; the callback must fire again.
-        const bool got_after = wait_for_event(mu, cv, events, k_discovery_timeout, [&](const auto &ev) {
-            return std::any_of(ev.begin(), ev.end(), [&](const event &e) {
-                return e.discovered && e.kind == provizio::dds::endpoint_kind::data_writer && e.topic == topic_name;
+        const bool got_after =
+            wait_for_event(mutex, condition, events, k_discovery_timeout, [&](const auto &recorded_events) {
+                return std::any_of(recorded_events.begin(), recorded_events.end(), [&](const event &recorded_event) {
+                    return recorded_event.discovered &&
+                           recorded_event.kind == provizio::dds::endpoint_kind::data_writer &&
+                           recorded_event.topic == topic_name;
+                });
             });
-        });
         if (!got_after)
         {
             std::cerr << "no post-reset discovery event -- listener was not re-installed?\n";
@@ -680,78 +700,87 @@ namespace
         // Unregister path: on_discovered_endpoint({}) clears the user callback so
         // it stops firing (the listener itself stays attached to drive the internal
         // match-publisher default); a later re-register restores the callback.
-        // A third participant with a live callback (pc) is a positive control —
+        // A third participant with a live callback (participant_c) is a positive control —
         // once IT observes the post-unregister publisher we know discovery has
         // propagated in the domain, so asserting the unregistered participant
         // did NOT observe it is meaningful rather than a race that merely
         // checked too early.
         // Declared before the participants so they outlive teardown-triggered
         // discovery callbacks (see test_discovers_writer for the rationale).
-        std::mutex mu;
-        std::condition_variable cv;
+        std::mutex mutex;
+        std::condition_variable condition;
         std::vector<event> events_a;  // the participant under test
         std::vector<event> events_c;  // positive-control observer
 
-        const auto pa = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
-        const auto pb = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
-        const auto pc = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_a = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_b = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
+        const auto participant_c = provizio::dds::make_domain_participant(0, provizio::dds::network_recovery_mode::off);
 
-        pa->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
-                                       const std::string &type, provizio::dds::endpoint_kind kind, bool discovered,
-                                       eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
-                                       eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
-            const std::lock_guard<std::mutex> lock{mu};
+        participant_a->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
+                                                  const std::string &type, provizio::dds::endpoint_kind kind,
+                                                  bool discovered,
+                                                  eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
+                                                  eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
+            const std::lock_guard<std::mutex> lock{mutex};
             events_a.push_back({topic, type, kind, discovered});
-            cv.notify_all();
+            condition.notify_all();
         });
-        pc->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
-                                       const std::string &type, provizio::dds::endpoint_kind kind, bool discovered,
-                                       eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
-                                       eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
-            const std::lock_guard<std::mutex> lock{mu};
+        participant_c->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
+                                                  const std::string &type, provizio::dds::endpoint_kind kind,
+                                                  bool discovered,
+                                                  eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
+                                                  eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
+            const std::lock_guard<std::mutex> lock{mutex};
             events_c.push_back({topic, type, kind, discovered});
-            cv.notify_all();
+            condition.notify_all();
         });
 
-        // Baseline — pa observes the first publisher while registered.
+        // Baseline — participant_a observes the first publisher while registered.
         const std::string topic1 = "provizio_dds_discovery_test_topic_unreg1";
-        const auto pub1 = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, topic1);
-        const bool got1 = wait_for_event(mu, cv, events_a, k_discovery_timeout, [&](const auto &ev) {
-            return std::any_of(ev.begin(), ev.end(), [&](const event &e) {
-                return e.discovered && e.kind == provizio::dds::endpoint_kind::data_writer && e.topic == topic1;
+        const auto pub1 = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(participant_b, topic1);
+        const bool got1 =
+            wait_for_event(mutex, condition, events_a, k_discovery_timeout, [&](const auto &recorded_events) {
+                return std::any_of(recorded_events.begin(), recorded_events.end(), [&](const event &recorded_event) {
+                    return recorded_event.discovered &&
+                           recorded_event.kind == provizio::dds::endpoint_kind::data_writer &&
+                           recorded_event.topic == topic1;
+                });
             });
-        });
         if (!got1)
         {
             std::cerr << "no pre-unregister discovery event\n";
             return 1;
         }
 
-        // Unregister pa and drain both sinks.
-        pa->on_discovered_endpoint({});
+        // Unregister participant_a and drain both sinks.
+        participant_a->on_discovered_endpoint({});
         {
-            const std::lock_guard<std::mutex> lock{mu};
+            const std::lock_guard<std::mutex> lock{mutex};
             events_a.clear();
             events_c.clear();
         }
 
-        // A fresh publisher: the control participant must still see it; pa,
+        // A fresh publisher: the control participant must still see it; participant_a,
         // having unregistered, must not.
         const std::string topic2 = "provizio_dds_discovery_test_topic_unreg2";
-        const auto pub2 = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, topic2);
-        const bool control_saw = wait_for_event(mu, cv, events_c, k_discovery_timeout, [&](const auto &ev) {
-            return std::any_of(ev.begin(), ev.end(), [&](const event &e) { return e.discovered && e.topic == topic2; });
-        });
+        const auto pub2 = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(participant_b, topic2);
+        const bool control_saw =
+            wait_for_event(mutex, condition, events_c, k_discovery_timeout, [&](const auto &recorded_events) {
+                return std::any_of(recorded_events.begin(), recorded_events.end(), [&](const event &recorded_event) {
+                    return recorded_event.discovered && recorded_event.topic == topic2;
+                });
+            });
         if (!control_saw)
         {
             std::cerr << "control participant never saw the post-unregister publisher -- test inconclusive\n";
             return 1;
         }
         {
-            const std::lock_guard<std::mutex> lock{mu};
-            const auto pa_saw =
-                std::any_of(events_a.begin(), events_a.end(), [&](const event &e) { return e.topic == topic2; });
-            if (pa_saw)
+            const std::lock_guard<std::mutex> lock{mutex};
+            const auto participant_a_saw =
+                std::any_of(events_a.begin(), events_a.end(),
+                            [&](const event &recorded_event) { return recorded_event.topic == topic2; });
+            if (participant_a_saw)
             {
                 std::cerr << "callback fired after on_discovered_endpoint({}) unregistered it\n";
                 return 1;
@@ -759,21 +788,25 @@ namespace
         }
 
         // Re-register: a subsequent publisher must reach the callback again.
-        pa->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
-                                       const std::string &type, provizio::dds::endpoint_kind kind, bool discovered,
-                                       eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
-                                       eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
-            const std::lock_guard<std::mutex> lock{mu};
+        participant_a->on_discovered_endpoint([&](provizio::dds::domain_participant &, const std::string &topic,
+                                                  const std::string &type, provizio::dds::endpoint_kind kind,
+                                                  bool discovered,
+                                                  eprosima::fastdds::dds::ReliabilityQosPolicyKind /*reliability*/,
+                                                  eprosima::fastdds::dds::DurabilityQosPolicyKind /*durability*/) {
+            const std::lock_guard<std::mutex> lock{mutex};
             events_a.push_back({topic, type, kind, discovered});
-            cv.notify_all();
+            condition.notify_all();
         });
         const std::string topic3 = "provizio_dds_discovery_test_topic_unreg3";
-        const auto pub3 = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(pb, topic3);
-        const bool got3 = wait_for_event(mu, cv, events_a, k_discovery_timeout, [&](const auto &ev) {
-            return std::any_of(ev.begin(), ev.end(), [&](const event &e) {
-                return e.discovered && e.kind == provizio::dds::endpoint_kind::data_writer && e.topic == topic3;
+        const auto pub3 = provizio::dds::make_publisher<std_msgs::msg::StringPubSubType>(participant_b, topic3);
+        const bool got3 =
+            wait_for_event(mutex, condition, events_a, k_discovery_timeout, [&](const auto &recorded_events) {
+                return std::any_of(recorded_events.begin(), recorded_events.end(), [&](const event &recorded_event) {
+                    return recorded_event.discovered &&
+                           recorded_event.kind == provizio::dds::endpoint_kind::data_writer &&
+                           recorded_event.topic == topic3;
+                });
             });
-        });
         if (!got3)
         {
             std::cerr << "callback did not fire after re-registration\n";
@@ -784,6 +817,7 @@ namespace
 }  // namespace
 
 int main(int argc, char **argv)
+try
 {
     // argv is a C-style array; indexing it is pointer arithmetic under the hood, which
     // clang-tidy flags. Convert once into a vector of string_views and use that for the
@@ -838,5 +872,11 @@ int main(int argc, char **argv)
         return test_unregister();
     }
     std::cerr << "unknown subcommand: " << subcommand << "\n";
+    return 1;
+}
+catch (const std::exception &exception)
+{
+    // A failure of the case's own setup: report it and fail the case, as any other failed expectation does.
+    std::cerr << "discovered_endpoints: unexpected exception: " << exception.what() << '\n';
     return 1;
 }

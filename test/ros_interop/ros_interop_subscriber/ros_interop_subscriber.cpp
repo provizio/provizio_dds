@@ -16,12 +16,18 @@
 #include <iostream>
 #include <mutex>
 
+#include "../expect_localhost_only.h"
 #include "provizio/dds/subscriber.h"
 
 #include <std_msgs/msg/StringPubSubTypes.hpp>
 
 int main()
 {
+    if (!ros_interop_test::localhost_only_expectation_met())
+    {
+        return 1;
+    }
+
     const auto reliability_kind = provizio::dds::RELIABLE_RELIABILITY_QOS;
     const std::string topic_name{"rt/chatter"};
     const std::string expected_substring{"Hello World:"};

@@ -199,15 +199,19 @@ start_peer() {
     # unshare -m: a mount namespace of this peer's own, in which /dev/shm is a fresh tmpfs
     # (the emulated host's own shared memory) and /etc/machine-id its own identity.
     # FASTDDS_DEFAULT_PROFILES_FILE is dropped: CI points it at the loopback-only profile,
-    # which would confine the participant to 127.0.0.1 and make the veth unreachable.
+    # which would confine the participant to 127.0.0.1 and make the veth unreachable; so are
+    # FASTDDS_BUILTIN_TRANSPORTS and PROVIZIO_DDS_LOCALHOST_ONLY, which would change or confine its
+    # transports too.
+    # The environment is set with unset/export rather than env(1), which would take a binary
+    # path holding a "=" for an assignment and run the next argument instead.
     "$nsx" unshare -m --propagation private bash -c '
         set -e
         mount -t tmpfs -o size=64m,mode=1777 tmpfs /dev/shm
         mount --bind "$1" /etc/machine-id
         cd "$2"
-        exec env -u FASTDDS_DEFAULT_PROFILES_FILE \
-            PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES="$3" \
-            "$4" cold_start_peer "$5" "$6" "$7" "$8"' \
+        unset FASTDDS_DEFAULT_PROFILES_FILE FASTDDS_BUILTIN_TRANSPORTS PROVIZIO_DDS_LOCALHOST_ONLY
+        export PROVIZIO_DDS_NETWORK_RECOVERY_EXTRA_INTERFACES="$3"
+        exec "$4" cold_start_peer "$5" "$6" "$7" "$8"' \
         _ "$mid" "$workdir" "$iface" "$TEST_BINARY" "$role" "$topic" "$timeout" "$mode" > "$out" 2>&1 &
     last_peer_pid=$!
 }
@@ -271,10 +275,16 @@ sub_pid=$last_peer_pid
 peer_pids="$pub_pid $sub_pid"
 wait "$sub_pid"
 sub_status=$?
-wait "$pub_pid" 2> /dev/null
+wait "$pub_pid"
+pub_status=$?
 peer_pids=""
 show "control publisher" "$out_pub"
 show "control subscriber" "$out_sub"
+if [ "$pub_status" -ne 0 ]; then
+    echo "FAIL: the control publisher exited with status ${pub_status}"
+    echo "cold_start_hosts: FAIL (control run)"
+    exit 1
+fi
 if [ "$sub_status" -ne 0 ]; then
     echo "FAIL: the control run exchanged no sample, so the two namespaces cannot talk;"
     echo "      the cold run below cannot be judged"
@@ -325,7 +335,8 @@ nsb ip link set "$IF_B" up
 
 wait "$sub_pid"
 sub_status=$?
-wait "$pub_pid" 2> /dev/null
+wait "$pub_pid"
+pub_status=$?
 peer_pids=""
 show "cold publisher" "$out_pub"
 show "cold subscriber" "$out_sub"
@@ -350,6 +361,10 @@ if [ -n "$cold_id_a" ] && [ "$cold_id_a" = "$cold_id_b" ]; then
 fi
 if [ "$sub_status" -ne 0 ]; then
     echo "FAIL: after both participants were rebuilt, no sample crossed from one host to the other"
+    failures=$((failures + 1))
+fi
+if [ "$pub_status" -ne 0 ]; then
+    echo "FAIL: the cold publisher exited with status ${pub_status}"
     failures=$((failures + 1))
 fi
 

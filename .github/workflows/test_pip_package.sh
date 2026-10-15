@@ -22,6 +22,7 @@ cd "$(cd "$(dirname "$0")" && pwd -P)"
 VENV=/tmp/provizio_dds_test_pip_package.venv
 rm -rf ${VENV}
 python3 -m venv ${VENV}
+# shellcheck source=/dev/null
 source ${VENV}/bin/activate
 
 # Manually install some dependencies in older versions of Python to avoid known incompatibilities in numpy and Cython
@@ -57,11 +58,11 @@ cd ../../
 # intervenes, which is what this loop is for.
 #
 # Two guards, not one. The age guard alone was justified as "a self-hosted runner takes one
-# job at a time", which is not true of this workflow: jetson-18.04 and jetson-20.04 are one
-# physical machine sharing /tmp, and the ARM pip matrix alone schedules more than a dozen jobs
-# onto it. A from-source build for a new Python on ARM can legitimately exceed an hour, so the
-# age guard by itself would delete a SIBLING JOB's tree mid-build, and the failure would
-# surface somewhere else entirely.
+# job at a time", which is not a safe assumption for this workflow's self-hosted jetson pool:
+# its runners have shared a physical machine and its /tmp before, and the ARM pip matrix alone
+# schedules more than a dozen jobs onto it. A from-source build for a new Python on ARM can
+# legitimately exceed an hour, so the age guard by itself would delete a SIBLING JOB's tree
+# mid-build, and the failure would surface somewhere else entirely.
 #
 #   -user: only our own temporaries. install_dependencies.sh runs pip as root, so a cancelled
 #          job leaves root-owned pip-* trees the runner user cannot remove -- and under
@@ -98,20 +99,36 @@ holding ${TMPDIR:-/tmp}; pip copies the whole source tree there before building 
 stale job workspaces and pip temporaries on this runner."
 fi
 
-# Build and install the package, capturing output to verify binary cache usage
-PIP_LOG=/tmp/pip_install_provizio_dds.log
+# Build and install the package, capturing output to verify binary cache usage. A name of its own
+# rather than a fixed one in /tmp, which another job on a shared self-hosted runner would write too.
+PIP_LOG="$(mktemp)"
+trap 'rm -f "${PIP_LOG}"' EXIT
 python3 -m pip install -v . 2>&1 | tee "${PIP_LOG}"
 
-# Verify the binary cache was used (unless IGNORE_BIN_CACHE is set, e.g. for
-# preinstalled-fastdds tests that intentionally build from source).
-IGNORE_BIN_CACHE_UPPER="$(echo "${IGNORE_BIN_CACHE:-}" | tr '[:lower:]' '[:upper:]')"
-if [ "${IGNORE_BIN_CACHE_UPPER}" != "TRUE" ] && [ "$(uname -s)" != "Darwin" ]; then
-    if ! grep -q "Bin cache located and will be used" "${PIP_LOG}"; then
-        echo "::error::Binary cache was NOT used during pip install — check cache artifacts and CMake config"
+# Verify the package was built the way this job is here to test. PIP_PACKAGE_BUILD=source is the
+# build from source that a user's pip install falls back to whenever no prebuilt binaries fit their
+# host or configuration -- which the job forces as a user would, through CMAKE_ARGUMENTS, since the
+# prebuilt binaries would otherwise be taken wherever they exist. Anywhere else, on Linux, the
+# prebuilt binaries must have been used: every other pip job runs on the commit CI publishes them in.
+# macOS has none to use.
+case "${PIP_PACKAGE_BUILD:-}" in
+source)
+    if ! grep -q "Building C++ libraries from source" "${PIP_LOG}"; then
+        echo "::error::The pip install did NOT build from source, which is what this job is here to test"
         exit 1
     fi
-    echo "Verified: binary cache was used"
-fi
+    echo "Verified: built from source"
+    ;;
+*)
+    if [ "$(uname -s)" != "Darwin" ]; then
+        if ! grep -q "Bin cache located and will be used" "${PIP_LOG}"; then
+            echo "::error::Binary cache was NOT used during pip install - check cache artifacts and CMake config"
+            exit 1
+        fi
+        echo "Verified: binary cache was used"
+    fi
+    ;;
+esac
 rm -f "${PIP_LOG}"
 
 # Test it works fine by executing Python tests directly (without copying provizio_dds.py and other beside the tests)

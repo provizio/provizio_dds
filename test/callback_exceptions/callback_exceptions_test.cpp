@@ -45,9 +45,9 @@
 namespace
 {
     using namespace std::chrono_literals;
-    using StringPubSubType = std_msgs::msg::StringPubSubType;
-    using Int32PubSubType = std_msgs::msg::Int32PubSubType;
-    using Int64PubSubType = std_msgs::msg::Int64PubSubType;
+    using string_pub_sub_type = std_msgs::msg::StringPubSubType;
+    using int32_pub_sub_type = std_msgs::msg::Int32PubSubType;
+    using int64_pub_sub_type = std_msgs::msg::Int64PubSubType;
 
     constexpr auto k_domain = 0;
     constexpr auto k_timeout = 15s;
@@ -57,42 +57,62 @@ namespace
     // exception is reported through the customer-replaceable logger rather than
     // printed to stdout/stderr directly. Invoked from Fast-DDS / worker threads,
     // hence the mutex.
-    struct log_recorder
+    class log_recorder
     {
-        std::mutex mutex;
-        int error_count{0};
-        std::string last_error;
+      public:
+        // Forgets every error recorded so far.
+        void reset()
+        {
+            const std::lock_guard<std::mutex> lock{mutex_};
+            error_count_ = 0;
+            last_error_.clear();
+        }
 
+        // Records one ERROR-level message.
+        void record_error(std::string_view message)
+        {
+            const std::lock_guard<std::mutex> lock{mutex_};
+            ++error_count_;
+            last_error_.assign(message);
+        }
+
+        // The number of ERROR-level messages recorded since the last reset().
         int errors()
         {
-            const std::lock_guard<std::mutex> lock{mutex};
-            return error_count;
+            const std::lock_guard<std::mutex> lock{mutex_};
+            return error_count_;
         }
 
+        // The most recent ERROR-level message recorded since the last reset(); empty if there is none.
         std::string last()
         {
-            const std::lock_guard<std::mutex> lock{mutex};
-            return last_error;
+            const std::lock_guard<std::mutex> lock{mutex_};
+            return last_error_;
         }
+
+      private:
+        std::mutex mutex_;
+        int error_count_{0};
+        std::string last_error_;
     };
 
-    log_recorder g_recorder;
+    // The one recorder every case shares: the logging callback is process-wide, and is invoked from
+    // threads that outlive any single case's locals. Built on first use.
+    log_recorder &recorder()
+    {
+        static log_recorder instance;
+        return instance;
+    }
 
     void install_recorder()
     {
         // Clear any prior state so the assertions can't be satisfied by a stale or unrelated
         // ERROR — each case must observe the throw raised by its own callback.
-        {
-            const std::lock_guard<std::mutex> lock{g_recorder.mutex};
-            g_recorder.error_count = 0;
-            g_recorder.last_error.clear();
-        }
+        recorder().reset();
         provizio::dds::set_log_callback([](provizio::dds::log_level level, std::string_view message) {
             if (level == provizio::dds::log_level::error)
             {
-                const std::lock_guard<std::mutex> lock{g_recorder.mutex};
-                ++g_recorder.error_count;
-                g_recorder.last_error.assign(message);
+                recorder().record_error(message);
             }
         });
     }
@@ -131,17 +151,17 @@ namespace
         auto sub_participant = make_participant();
         // Force an eager RELIABLE reader (not the match-publisher default) so this case stays focused
         // on callback-exception safety and doesn't depend on deferred-build discovery/settling timing.
-        auto subscriber = provizio::dds::make_subscriber<StringPubSubType>(
+        auto subscriber = provizio::dds::make_subscriber<string_pub_sub_type>(
             sub_participant, topic,
             [](const std_msgs::msg::String &) { throw std::runtime_error("on_data callback boom"); },
             provizio::dds::RELIABLE_RELIABILITY_QOS);
-        auto publisher = provizio::dds::make_publisher<StringPubSubType>(
+        auto publisher = provizio::dds::make_publisher<string_pub_sub_type>(
             pub_participant, topic, provizio::dds::RELIABLE_RELIABILITY_QOS, provizio::dds::use_default_history_depth);
 
         std_msgs::msg::String message;
         message.data("x");
         const auto deadline = std::chrono::steady_clock::now() + k_timeout;
-        while (std::chrono::steady_clock::now() < deadline && g_recorder.errors() == 0)
+        while (std::chrono::steady_clock::now() < deadline && recorder().errors() == 0)
         {
             publisher->publish(message);
             std::this_thread::sleep_for(100ms);
@@ -149,13 +169,13 @@ namespace
 
         // Reaching here at all proves the throwing callback did not terminate the
         // process; the error count proves it fired AND was reported via the logger.
-        passed &= EXPECT(g_recorder.errors() > 0);
+        passed &= EXPECT(recorder().errors() > 0);
         // ...and the logged error is the one the throwing callback raised, not an unrelated ERROR.
-        passed &= EXPECT(g_recorder.last().find("on_data callback boom") != std::string::npos);
+        passed &= EXPECT(recorder().last().find("on_data callback boom") != std::string::npos);
         // The subscriber is still alive and matched after the throw.
         passed &= EXPECT(subscriber->get_num_matched_publishers(k_timeout, 0ms) > 0);
 
-        std::cout << "on_data: " << (passed ? "PASS" : "FAIL") << " (errors=" << g_recorder.errors() << ")" << '\n';
+        std::cout << "on_data: " << (passed ? "PASS" : "FAIL") << " (errors=" << recorder().errors() << ")" << '\n';
         restore_recorder();
         return passed ? 0 : 1;
     }
@@ -176,24 +196,24 @@ namespace
 
         auto pub_participant = make_participant();
         auto sub_participant = make_participant();
-        auto subscriber = provizio::dds::make_subscriber<StringPubSubType>(
+        auto subscriber = provizio::dds::make_subscriber<string_pub_sub_type>(
             sub_participant, topic, [](const std_msgs::msg::String &) {},
             [](bool) { throw std::runtime_error("on_has_publisher_changed callback boom"); },
             provizio::dds::RELIABLE_RELIABILITY_QOS);
-        auto publisher = provizio::dds::make_publisher<StringPubSubType>(
+        auto publisher = provizio::dds::make_publisher<string_pub_sub_type>(
             pub_participant, topic, provizio::dds::RELIABLE_RELIABILITY_QOS, provizio::dds::use_default_history_depth);
 
         const auto deadline = std::chrono::steady_clock::now() + k_timeout;
-        while (std::chrono::steady_clock::now() < deadline && g_recorder.errors() == 0)
+        while (std::chrono::steady_clock::now() < deadline && recorder().errors() == 0)
         {
             std::this_thread::sleep_for(100ms);
         }
 
-        passed &= EXPECT(g_recorder.errors() > 0);
-        passed &= EXPECT(g_recorder.last().find("on_has_publisher_changed callback boom") != std::string::npos);
+        passed &= EXPECT(recorder().errors() > 0);
+        passed &= EXPECT(recorder().last().find("on_has_publisher_changed callback boom") != std::string::npos);
         passed &= EXPECT(subscriber->get_num_matched_publishers(k_timeout, 0ms) > 0);
 
-        std::cout << "on_has_publisher_changed: " << (passed ? "PASS" : "FAIL") << " (errors=" << g_recorder.errors()
+        std::cout << "on_has_publisher_changed: " << (passed ? "PASS" : "FAIL") << " (errors=" << recorder().errors()
                   << ")" << '\n';
         restore_recorder();
         return passed ? 0 : 1;
@@ -211,7 +231,7 @@ namespace
 
         auto service_participant = make_participant();
         auto client_participant = make_participant();
-        auto service = provizio::dds::make_service<Int32PubSubType, Int64PubSubType>(
+        auto service = provizio::dds::make_service<int32_pub_sub_type, int64_pub_sub_type>(
             service_participant, service_name, [](const std_msgs::msg::Int32 &) -> std_msgs::msg::Int64 {
                 throw std::runtime_error("service handler boom");
             });
@@ -222,15 +242,15 @@ namespace
         // budget: the second cycle is fast once this participant has discovered the
         // service, but the first can be slow in the ROS2-compat Debug containers.
         const auto deadline = std::chrono::steady_clock::now() + 2 * k_timeout;
-        while (std::chrono::steady_clock::now() < deadline && g_recorder.errors() < 2)
+        while (std::chrono::steady_clock::now() < deadline && recorder().errors() < 2)
         {
             // Keep the future alive and wait on it so the request is actually
             // delivered to the service (and the handler runs). The handler throws,
             // so the response never arrives — the wait times out, which is fine;
             // we only need the handler to fire. Dropping the future immediately
             // would tear the client down before the request is sent.
-            auto future = provizio::dds::request<Int32PubSubType, Int64PubSubType>(client_participant, service_name,
-                                                                                   request_data);
+            auto future = provizio::dds::request<int32_pub_sub_type, int64_pub_sub_type>(client_participant,
+                                                                                         service_name, request_data);
             future.wait_for(2s);
         }
 
@@ -238,10 +258,10 @@ namespace
         // process, and the second proves the handler thread SURVIVED the first throw
         // and went on to process another request — the regression this test guards
         // against (a handler that logs once and then dies).
-        passed &= EXPECT(g_recorder.errors() >= 2);
-        passed &= EXPECT(g_recorder.last().find("service handler boom") != std::string::npos);
+        passed &= EXPECT(recorder().errors() >= 2);
+        passed &= EXPECT(recorder().last().find("service handler boom") != std::string::npos);
 
-        std::cout << "service_handler: " << (passed ? "PASS" : "FAIL") << " (errors=" << g_recorder.errors() << ")"
+        std::cout << "service_handler: " << (passed ? "PASS" : "FAIL") << " (errors=" << recorder().errors() << ")"
                   << '\n';
         restore_recorder();
         return passed ? 0 : 1;
@@ -249,6 +269,7 @@ namespace
 }  // namespace
 
 int main(int argc, char **argv)
+try
 {
     // argv is a C-style array; indexing it is pointer arithmetic under the hood, which
     // clang-tidy flags. Convert once into a vector of string_views and use that for the
@@ -275,5 +296,12 @@ int main(int argc, char **argv)
         return test_service_handler();
     }
     std::cerr << "unknown subcommand: " << subcommand << "\n";
+    return 1;
+}
+catch (const std::exception &exception)
+{
+    // A failure of the case's own setup (not of a callback, which the library guards): report it and
+    // fail the case, as any other failed expectation does.
+    std::cerr << "callback_exceptions: unexpected exception: " << exception.what() << '\n';
     return 1;
 }

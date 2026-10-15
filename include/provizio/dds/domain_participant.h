@@ -114,7 +114,9 @@ namespace provizio::dds
     enum class transport_mode : std::uint8_t
     {
         /// Platform default: SHM + UDPv4 on Linux; UDPv4-only on Windows/macOS (where
-        /// shared memory is disabled to dodge a Boost.Interprocess cleanup bug).
+        /// shared memory is disabled to dodge a Boost.Interprocess cleanup bug). Becomes
+        /// @c localhost_only when the @c PROVIZIO_DDS_LOCALHOST_ONLY environment variable
+        /// asks for it (see @c resolve_transport_mode).
         automatic = 0,
         /// UDPv4-only (shared memory disabled) on every platform. For participants that
         /// bridge mismatched Fast-DDS major versions (e.g. a recorder relaying 2.x
@@ -130,7 +132,28 @@ namespace provizio::dds
         /// Discovery is additionally given @c 127.0.0.1 as a unicast initial peer, so it does
         /// not depend on loopback multicast, and participants on another host are refused at
         /// the discovery layer (Fast-DDS' @c FILTER_DIFFERENT_HOST), so a remote announcement
-        /// that still arrives cannot become a peer.
+        /// that still arrives cannot become a peer. A participant counts as being on this host
+        /// when it announces this machine's id (@c /etc/machine-id, the Windows @c MachineGuid,
+        /// the macOS platform UUID) or carries this host's id in its GUID, so machine ids must
+        /// be unique per host: a host cloned with an id left in place is taken for this one.
+        /// Such a peer is reached over loopback whichever of this host's addresses it announces
+        /// (if it accepts localhost), judged from the interfaces with carrier when its announcement
+        /// first arrives -- so a participant created before the network came up (or before the
+        /// host's address changed) still reaches one started after that which announces no
+        /// loopback address, such as a recorder in its ordinary transport. The interface list is
+        /// refreshed for that at a rate limited process-wide; while announcements naming addresses
+        /// this host lacks keep that limit spent, an address that came up within the last 50 ms is
+        /// missed, and a peer misjudged on its first announcement stays unreachable until it
+        /// announces itself anew (a restart). That takes the Fast-DDS this library builds (a
+        /// stock one judges by the interface list as it was when this process last created a
+        /// participant), and a peer announcing the machine id, which eProsima Fast-DDS does from
+        /// 3.2 on: a peer on an older one (a ROS 2 Humble, Iron or Jazzy node, provizio_dds 1.x)
+        /// started under another network state than this participant carries another GUID host id
+        /// and no machine id, so it is taken for another host's and refused.
+        /// A peer that announces no loopback locator and does not announce that it accepts
+        /// localhost (a Fast-DDS before 2.12 left on its default transports, such as a ROS 2
+        /// Iron node) cannot be reached at all: a transport confined to 127.0.0.1 may send to
+        /// none of the addresses it is given.
         ///
         /// What the mode is NOT: a privilege boundary. It substitutes the host for the
         /// network as the limit of reachability, and on the host itself it is deliberately
@@ -162,6 +185,39 @@ namespace provizio::dds
         /// it — there is no tunnel in a locator set that holds only 127.0.0.1.
         localhost_only = 2,
     };
+
+    /**
+     * @brief Resolve the @c transport_mode a participant is actually built with, consulting the
+     * @c PROVIZIO_DDS_LOCALHOST_ONLY environment variable when the caller asked for
+     * @c transport_mode::automatic.
+     *
+     * This is what lets a deployment confine an application to its own host without recompiling
+     * it, the way ROS 2's @c ROS_LOCALHOST_ONLY does: with @c PROVIZIO_DDS_LOCALHOST_ONLY=1 (or
+     * @c on, @c true, @c yes) every participant that did not choose a transport mode itself is
+     * built as @c transport_mode::localhost_only. @c 0, @c off, @c false and @c no -- like leaving
+     * it unset or empty -- leave the mode alone. An unrecognised value is reported once and
+     * ignored.
+     *
+     * The variable only ever replaces @c automatic. A caller that passes @c udp_only or
+     * @c localhost_only has made the choice in code, and the environment does not override it.
+     *
+     * @note The variable is read exactly once (on the first call that asks for @c transport_mode::automatic) and the
+     * result is cached for the lifetime of the process, as for @c PROVIZIO_DDS_NETWORK_RECOVERY: changing it afterwards
+     * has no effect, so relaunch the process to switch. Read by the C++ API only; the Python bindings have no @c
+     * localhost_only mode and do not honour it (a Python participant that chose no transport logs a
+     * warning, once, when the variable is set to anything but an off value -- an on value or an unrecognised
+     * one alike).
+     * @note A localhost-only participant takes no part in network auto-recovery (see
+     * @c transport_mode::localhost_only), whichever way the mode was selected.
+     * That holds even where the library cannot apply the mode because the transports are the caller's
+     * own (an XML profile, @c FASTDDS_BUILTIN_TRANSPORTS): the participant is then neither confined nor
+     * recovered, and a warning says so -- unset the variable for such a process.
+     *
+     * @param requested The mode as supplied to @c make_domain_participant.
+     * @return @p requested, or @c transport_mode::localhost_only when @p requested is
+     * @c transport_mode::automatic and the environment asks for it.
+     */
+    PROVIZIO_DDS_API transport_mode resolve_transport_mode(transport_mode requested);
 
     class PROVIZIO_DDS_API domain_participant
     {
@@ -297,8 +353,9 @@ namespace provizio::dds
          * to @c endpoint_kind::data_writer (the right choice for a recorder).
          * @param transport Network transport selection (see @c transport_mode). Defaults
          * to @c transport_mode::automatic (platform default: SHM+UDP on Linux, UDP-only on
-         * Windows/macOS). Pass @c transport_mode::udp_only to disable shared memory on all
-         * platforms (e.g. when bridging mismatched Fast-DDS major versions), or
+         * Windows/macOS, or @c transport_mode::localhost_only when @c PROVIZIO_DDS_LOCALHOST_ONLY
+         * is set to an on value -- see @c resolve_transport_mode). Pass @c transport_mode::udp_only to disable shared
+         * memory on all platforms (e.g. when bridging mismatched Fast-DDS major versions), or
          * @c transport_mode::localhost_only to confine the domain to this host.
          */
         domain_participant(DomainId_t domain_id = 0,
